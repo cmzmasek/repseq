@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import datetime
-import json
 import platform
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
+
+import yaml
 
 from ..models import QCReport, RunResult, Sequence
 
@@ -41,7 +42,7 @@ def write_run_log(
         "",
         "CONFIGURATION",
     ]
-    for line in json.dumps(cfg, indent=2, default=str).splitlines():
+    for line in yaml.dump(cfg, default_flow_style=False, sort_keys=False).splitlines():
         lines.append(f"  {line}")
     lines += [
         "",

@@ -13,7 +13,13 @@ reference-database construction.
 ## Installation
 
 ```bash
+# Clone and install in editable mode (recommended for development)
+git clone https://github.com/cmzmasek/repseq.git
+cd repseq
 pip install -e .
+
+# Or install directly from GitHub
+pip install git+https://github.com/cmzmasek/repseq.git
 ```
 
 Requires **Python ≥ 3.10** and the external **[MMseqs2](https://github.com/soedinglab/MMseqs2)** binary in `PATH` (only needed for clustering-based modes).
@@ -91,8 +97,24 @@ mode-specific selection (clustering via MMseqs2 + diversity / stratification)
 representative selection: RefSeq > reviewed UniProt > longest
     │
     ▼
-output FASTA(s) + JSON report
+output FASTA(s) + TSV metadata + plain-text run log
 ```
+
+---
+
+## Output files
+
+Each run writes four files to `output.dir` (default `./repseq_output/`):
+
+| File | Contents |
+| --- | --- |
+| `{prefix}_representatives.fasta` | Selected representative sequences |
+| `{prefix}_representatives.tsv` | Metadata for each representative (accession, organism, host, country, date, taxonomy ranks, …) |
+| `{prefix}_clusters.tsv` | Per-cluster summary (cluster ID, representative, size) |
+| `{prefix}_qc_removed.tsv` | Sequences removed by QC and the reason |
+| `{prefix}_run.log` | Plain-text run summary: parameters (YAML), QC stats, output file list |
+
+Segmented-virus runs additionally produce `{prefix}_concatenated.fasta` and one `{prefix}_segment_{name}.fasta` per segment.
 
 ---
 
