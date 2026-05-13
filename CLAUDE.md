@@ -34,7 +34,8 @@ repseq/
 │   └── diversity.py        ← MaxMin selection (alignment-free, k-mer Jaccard)
 ├── representative/selector.py ← RefSeq > reviewed > longest priority
 ├── modes/                  ← one file per selection mode, all extend BaseMode
-└── output/{writer,report}.py ← FASTA + JSON/text report writers
+├── output/{writer,report}.py ← FASTA + TSV/text report writers
+└── viz/clustering_plot.py  ← UMAP scatter (optional, [viz] extras)
 ```
 
 `config/default_config.yaml` is the documented config schema; the same dict
@@ -65,6 +66,12 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
    `{prefix}_proteins.fasta` (amino-acid sequences for all proteins of
    the selected representatives). The protein FASTA is reconstructed
    from the same cached GenBank records — no extra network calls.
+8. If `--plot` is passed, `viz.clustering_plot.write_clustering_plot`
+   embeds the clustered sequences with UMAP on k-mer Jaccard distance
+   and writes `{prefix}_clustering.png`. Cost-bounded by a default
+   2000-point subsample (representatives always kept); skipped when
+   the run produced no clusters. Requires the `[viz]` extras
+   (`matplotlib` + `umap-learn`) — `ImportError` is surfaced gracefully.
 
 ## Invariants worth knowing
 
@@ -147,11 +154,13 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
 
 ## Status
 
-`v0.2.0`. All 8 modes structurally complete, plus optional protein-
-annotation QC (batched GenBank fetch + per-segment count check) and a
-protein-FASTA output reconstructed from the same cached records. 103
-offline regression tests cover IO, QC, selector, segmented logic, cache
-TTL, config validation, diversity selection, resolver fallback, mode
-dispatch (clustering mocked), protein parser + filter, FASTA writer, and
-segment aliases. NCBI Entrez paths have been live-tested against the
-H1N1 RefSeq genome (8 segments, 11 proteins).
+`v0.3.0`. All 8 modes structurally complete, optional protein-annotation
+QC (batched GenBank fetch + per-segment count check), a protein-FASTA
+output reconstructed from cached records, and an optional UMAP scatter
+of the clustering result (`--plot`, behind the `[viz]` extras:
+`matplotlib` + `umap-learn`). 107 offline regression tests cover IO, QC,
+selector, segmented logic, cache TTL, config validation, diversity
+selection, resolver fallback, mode dispatch (clustering mocked), protein
+parser + filter, FASTA writer, segment aliases, and the clustering plot
+(auto-skipped if `umap-learn` is missing). NCBI Entrez paths have been
+live-tested against the H1N1 RefSeq genome (8 segments, 11 proteins).

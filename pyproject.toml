@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "repseq"
-version = "0.2.0"
+version = "0.3.0"
 description = "Representative sequence selection for large bioinformatics datasets"
 requires-python = ">=3.10"
 dependencies = [
@@ -15,6 +15,12 @@ dependencies = [
     "tqdm>=4.66",
     "pandas>=2.0",
     "rich>=13.0",
+]
+
+[project.optional-dependencies]
+viz = [
+    "matplotlib>=3.7",
+    "umap-learn>=0.5",
 ]
 
 [project.scripts]

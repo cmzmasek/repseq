@@ -20,6 +20,9 @@ pip install -e .
 
 # Or install directly from GitHub
 pip install git+https://github.com/cmzmasek/repseq.git
+
+# With the optional visualization extras (matplotlib + umap-learn)
+pip install -e '.[viz]'
 ```
 
 Requires **Python ≥ 3.10** and the external **[MMseqs2](https://github.com/soedinglab/MMseqs2)** binary in `PATH` (only needed for clustering-based modes).
@@ -69,7 +72,7 @@ repseq host -c my_config.yaml -i seqs.fasta -n 10
 | `custom` | `-n` per any field — from taxonomy, sequence attributes, or a metadata TSV. |
 | `hybrid` | `-n` per multi-dimensional stratum (e.g. `--fields genus,host,decade`). |
 
-All commands share these options: `--input/-i`, `--output-dir/-o`, `--config/-c`, `--threads`, `--seed`, `--segmented`, `--dry-run`, `--no-resolve`, `--source {auto,uniprot,ncbi,ncbi_virus}`, `--overflow {keep,trim}`.
+All commands share these options: `--input/-i`, `--output-dir/-o`, `--config/-c`, `--threads`, `--seed`, `--segmented`, `--dry-run`, `--no-resolve`, `--source {auto,uniprot,ncbi,ncbi_virus}`, `--overflow {keep,trim}`, `--plot`.
 
 ---
 
@@ -115,6 +118,7 @@ Each run writes these files to `output.dir` (default `./repseq_output/`):
 | `{prefix}_run.log` | Plain-text run summary: parameters (YAML), QC stats, output file list |
 | `{prefix}_isolate_proteins.tsv` | (Segmented + protein QC) One row per annotated CDS per passing isolate: `isolate_id, segment, accession, protein_id, product, length` |
 | `{prefix}_proteins.fasta` | (Protein QC enabled) All protein amino-acid sequences from the selected representatives, in a single FASTA. Tagged headers: `>protein_id product [isolate=…] [segment=…] [parent=accession]` |
+| `{prefix}_clustering.png` | (`--plot`, `[viz]` extras) Two-panel UMAP scatter — left colored by genus, right colored by cluster with `√(cluster size)` point scaling, member→rep lines, and an inset cluster-size histogram |
 
 Segmented-virus runs additionally produce `{prefix}_concatenated.fasta` and one `{prefix}_segment_{name}.fasta` per segment.
 
@@ -149,6 +153,31 @@ segmented:
 ```
 
 See `config/examples/influenza_a.yaml` for a fully annotated example.
+
+---
+
+## Clustering visualization (optional)
+
+Pass `--plot` to render a two-panel UMAP scatter alongside the standard
+outputs:
+
+```bash
+repseq taxonomic1 -c my.yaml -i seqs.fasta -r genus -n 5 --plot
+```
+
+- **Left panel** — every clustered sequence embedded with UMAP on a k-mer
+  Jaccard distance, colored by genus (top 10 + "Other").
+- **Right panel** — same coordinates, colored by cluster, with point size
+  scaling with `√(cluster size)`. Faint lines link each member to its
+  representative; representatives are outlined in black. An inset histogram
+  shows the cluster-size distribution.
+
+For large runs the embedding is subsampled (default cap 2000 points;
+representatives always kept) and the member→rep lines are auto-suppressed
+above 500 non-rep points to avoid spaghetti.
+
+Requires `pip install 'repseq[viz]'`. Skipped silently for diversity-only
+runs (`global -n`) since those produce no clusters to visualize.
 
 ---
 
@@ -245,9 +274,10 @@ Tests run offline — all network calls (NCBI, UniProt) are mocked.
 
 ## Status
 
-`v0.2.0` — all 8 selection modes implemented, plus optional protein-annotation
+`v0.3.0` — all 8 selection modes implemented, optional protein-annotation
 QC with batched GenBank fetching, per-segment count checks (int or list-of-int),
-segment-name synonyms, and a protein FASTA writer reconstructed from cached
-records. **103 offline regression tests pass.** The NCBI-backed paths have
-been exercised end-to-end against live Entrez (influenza A H1N1 RefSeq
-genome, 8 segments + 11 proteins).
+segment-name synonyms, a protein FASTA writer reconstructed from cached
+records, and an optional UMAP visualization of the clustering result
+(`--plot`, behind the `[viz]` extras). **107 offline regression tests pass.**
+The NCBI-backed paths have been exercised end-to-end against live Entrez
+(influenza A H1N1 RefSeq genome, 8 segments + 11 proteins).
