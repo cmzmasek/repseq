@@ -1,0 +1,78 @@
+# repseq default configuration
+# Copy and modify this file for your project.
+# Pass it to any command with: --config your_config.yaml
+
+cache_dir: ~/.repseq/cache
+temp_dir: /tmp/repseq
+threads: 4
+seed: 42
+
+qc:
+  remove_duplicates: true
+
+  length_filter:
+    # mode: "median_percent" removes sequences shorter than min_percent% of the median
+    # mode: "min_max" filters by absolute min/max length
+    mode: median_percent
+    min_percent: 50      # used when mode == median_percent
+    # min_length: 100    # used when mode == min_max
+    # max_length: 10000  # used when mode == min_max
+
+  # Maximum fraction of ambiguous characters allowed (applies to AA and NA)
+  ambiguous_threshold: 0.05
+
+  annotation_filter:
+    enabled: true
+    keywords:
+      - MAG
+      - metagenome-assembled
+      - synthetic
+      - artificial
+      - fragment
+      - partial
+      - environmental sample
+      - uncultured
+      - unclassified
+      - unidentified
+      - hypothetical
+
+segmented:
+  enabled: false
+  # Set 'virus' to the key in 'viruses' that you want to use
+  virus: null
+  viruses: {}
+
+taxonomy:
+  # Set your NCBI email to avoid rate limiting (required for Entrez API)
+  ncbi_email: null
+  # Optional: NCBI API key for higher rate limits (10 req/s vs 3 req/s)
+  ncbi_api_key: null
+  # How long to keep cached entries before re-querying (days)
+  cache_ttl_days: 30
+
+clustering:
+  backend: mmseqs2
+  # easy-linclust: faster, linear time, best for very large datasets
+  # easy-cluster: slower, all-vs-all, slightly more accurate
+  mmseqs2_mode: easy-linclust
+  coverage: 0.8
+  # coverage_mode:
+  #   0 = query+target coverage
+  #   1 = target coverage
+  #   2 = query coverage
+  #   3 = target-in-query coverage
+  #   4 = query-in-target coverage
+  coverage_mode: 0
+  extra_args: []
+
+representative:
+  # Priority order for selecting cluster representatives.
+  # refseq > reviewed_uniprot > longest (length is always the final tiebreaker)
+  priority:
+    - refseq
+    - reviewed_uniprot
+    - longest
+
+output:
+  dir: ./repseq_output
+  prefix: repseq

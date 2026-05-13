@@ -1,0 +1,116 @@
+# repseq config for Influenza A virus (NCBI Virus dataset)
+# Usage examples:
+#
+#   # Global clustering at 90% identity, segmented mode on:
+#   repseq global -c config/examples/influenza_a.yaml \
+#       -i sequences/*.fasta --threshold 0.90 --segmented
+#
+#   # Taxonomic mode: up to 10 representatives per subtype (H3N2, H5N1, etc.):
+#   repseq custom -c config/examples/influenza_a.yaml \
+#       -i sequences/*.fasta --field subtype -n 10 --segmented
+#
+#   # Hybrid: 5 reps per subtype × host combination:
+#   repseq hybrid -c config/examples/influenza_a.yaml \
+#       -i sequences/*.fasta --fields subtype,host -n 5 --segmented
+#
+#   # Time-stratified: 20 reps per year:
+#   repseq time -c config/examples/influenza_a.yaml \
+#       -i sequences/*.fasta --n-per-window 20 --window year --segmented
+
+cache_dir: ~/.repseq/cache
+temp_dir: /tmp/repseq
+threads: 8
+seed: 42
+
+qc:
+  remove_duplicates: true
+  length_filter:
+    mode: median_percent
+    min_percent: 50
+  ambiguous_threshold: 0.02
+  annotation_filter:
+    enabled: true
+    keywords:
+      - MAG
+      - metagenome-assembled
+      - synthetic
+      - artificial
+      - fragment
+      - partial
+      - environmental sample
+      - uncultured
+      - unclassified
+      - unidentified
+      - hypothetical
+      - recombinant
+      - chimeric
+
+segmented:
+  enabled: false   # activate with --segmented flag or set to true here
+  virus: influenza_a
+  viruses:
+    influenza_a:
+      expected_segments: 8
+      # Segments in canonical order for concatenation
+      segments:
+        - PB2
+        - PB1
+        - PA
+        - HA
+        - NP
+        - NA
+        - M
+        - NS
+      # Regex to extract the isolate ID from NCBI Virus headers.
+      # Captures: A/duck/Hong_Kong/1/1997, A/California/07/2009, etc.
+      # Named group 'isolate' is preferred; falls back to group 1.
+      isolate_regex: "(?P<isolate>[AB]/[^/(\\s]+/[^/(\\s]+/[^/(\\s]+/\\d{4})"
+      # Optional: regex to identify segment from header
+      # segment_regex: "segment\\s+(?P<segment>\\d+)"
+
+    influenza_b:
+      expected_segments: 8
+      segments:
+        - PB2
+        - PB1
+        - PA
+        - HA
+        - NP
+        - NA
+        - M
+        - NS
+      isolate_regex: "(?P<isolate>B/[^/(\\s]+/[^/(\\s]+/\\d{4})"
+
+    influenza_c:
+      expected_segments: 7
+      segments:
+        - PB2
+        - PB1
+        - P3
+        - HEF
+        - NP
+        - M
+        - NS
+      isolate_regex: "(?P<isolate>C/[^/(\\s]+/[^/(\\s]+/\\d{4})"
+
+taxonomy:
+  ncbi_email: null   # set your email here or via REPSEQ_NCBI_EMAIL env var
+  ncbi_api_key: null # set your key here or via REPSEQ_NCBI_API_KEY env var
+  cache_ttl_days: 30
+
+clustering:
+  backend: mmseqs2
+  mmseqs2_mode: easy-linclust
+  coverage: 0.8
+  coverage_mode: 0
+  extra_args: []
+
+representative:
+  priority:
+    - refseq
+    - reviewed_uniprot
+    - longest
+
+output:
+  dir: ./repseq_output_influenza_a
+  prefix: influenza_a

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repseq"
+version = "0.1.0"
+description = "Representative sequence selection for large bioinformatics datasets"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "pyyaml>=6.0",
+    "biopython>=1.81",
+    "requests>=2.31",
+    "tqdm>=4.66",
+    "pandas>=2.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+repseq = "repseq.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["repseq*"]

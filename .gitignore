@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Installed package state
+.eggs/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# repseq runtime artifacts
+/repseq_output/
+/tmp/
+~/.repseq/
+
+# Claude Code local config (not project config)
+.claude/
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
