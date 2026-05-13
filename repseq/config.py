@@ -31,7 +31,7 @@ DEFAULTS: dict[str, Any] = {
         "annotation_filter": {
             "enabled": True,
             "keywords": [
-                "MAG",
+                "MAG:",
                 "metagenome-assembled",
                 "synthetic",
                 "artificial",

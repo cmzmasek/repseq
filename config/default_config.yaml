@@ -24,7 +24,7 @@ qc:
   annotation_filter:
     enabled: true
     keywords:
-      - MAG
+      - "MAG:"
       - metagenome-assembled
       - synthetic
       - artificial

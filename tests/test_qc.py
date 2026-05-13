@@ -93,7 +93,7 @@ def test_annotation_filter_blocks_keyword(make_seq):
     bad = make_seq("p1", "ACGT", header="P1 hypothetical protein [foo]")
     ok = make_seq("p2", "ACGT", header="P2 RNA polymerase [foo]")
     report = QCReport()
-    cfg = {"enabled": True, "keywords": ["hypothetical", "MAG"]}
+    cfg = {"enabled": True, "keywords": ["hypothetical", "MAG:"]}
     kept = annotation_filter([bad, ok], cfg, report)
     assert [s.id for s in kept] == ["p2"]
     assert report.removed_annotation == 1

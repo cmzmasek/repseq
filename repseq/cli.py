@@ -532,7 +532,7 @@ def init_config(output):
     cfg["qc"]["annotation_filter"] = {
         "enabled": click.confirm("Enable annotation keyword filter?", default=True),
         "keywords": [
-            "MAG", "metagenome-assembled", "synthetic", "artificial",
+            "MAG:", "metagenome-assembled", "synthetic", "artificial",
             "fragment", "partial", "environmental sample",
             "uncultured", "unclassified", "unidentified", "hypothetical",
         ],

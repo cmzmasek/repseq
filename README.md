@@ -144,7 +144,7 @@ qc:
   ambiguous_threshold: 0.05
   annotation_filter:
     enabled: true
-    keywords: [MAG, synthetic, partial, hypothetical, ...]
+    keywords: ["MAG:", synthetic, partial, hypothetical, ...]
 
 clustering:
   backend: mmseqs2
