@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from repseq.models import QCReport, SequenceSource
-from repseq.output.report import write_isolate_proteins_tsv
+from repseq.models import Cluster, QCReport, RunResult, SequenceSource
+from repseq.output.report import write_isolate_proteins_tsv, write_proteins_fasta
 from repseq.qc.protein_qc import (
     attach_proteins,
     filter_by_protein_count,
@@ -86,7 +86,9 @@ def test_fetch_proteins_batch_parses_cds_features(tmp_cache_dir, monkeypatch):
     assert proteins[0]["protein_id"] == "QQQ12345.1"
     assert proteins[0]["product"] == "matrix protein 1"
     assert proteins[0]["length"] == 45  # length of the /translation= string
+    assert proteins[0]["sequence"].startswith("MSLLTEVET")  # translation captured
     assert proteins[1]["product"] == "matrix protein 2"
+    assert proteins[1]["sequence"].startswith("MSLLTEVETPIRNEW")
 
 
 def test_fetch_proteins_batch_uses_cache_on_second_call(tmp_cache_dir):
@@ -228,6 +230,29 @@ def test_filter_per_segment_expected_count(make_seq):
     assert report.removed_proteins == 2
 
 
+def test_filter_per_segment_accepts_list_of_counts(make_seq):
+    """List-valued expected count: any value in the list is acceptable."""
+    one_protein = make_seq("a", "ACGT", segment="PB1")
+    one_protein.proteins = [{"protein_id": "PB1"}]
+    two_proteins = make_seq("b", "ACGT", segment="PB1")
+    two_proteins.proteins = [{"protein_id": "PB1"}, {"protein_id": "PB1-F2"}]
+    three_proteins = make_seq("c", "ACGT", segment="PB1")
+    three_proteins.proteins = [{}, {}, {}]  # 3 not in [1, 2]
+
+    virus_cfg = {
+        "segments": ["PB1"],
+        "expected_proteins_per_segment": {"PB1": [1, 2]},
+    }
+    report = QCReport()
+    kept = filter_by_protein_count(
+        [one_protein, two_proteins, three_proteins],
+        qc_cfg={}, virus_cfg=virus_cfg, report=report,
+    )
+    assert {s.id for s in kept} == {"a", "b"}
+    assert report.removed_proteins == 1
+    assert "expected_one_of=[1, 2]" in three_proteins.qc_fail_reason
+
+
 def test_filter_passes_through_when_proteins_none(make_seq):
     """Sequences without protein data (e.g. UniProt) shouldn't be filtered."""
     s = make_seq("a", "MEEP")
@@ -300,6 +325,103 @@ def test_write_isolate_proteins_tsv(tmp_path: Path, make_seq):
     assert len(lines) == 3  # header + 2 protein rows
     assert "HA_P1\themagglutinin\t566" in lines[1]
     assert "NA_P1\tneuraminidase\t469" in lines[2]
+
+
+def test_write_proteins_fasta_segmented(tmp_path: Path, make_seq):
+    """Segmented path: emits proteins from segments of represented isolates."""
+    # Build segments with translations
+    s1 = make_seq("s1", "ACGT", segment="HA", accession="NC_001.1", isolate_id="ISO1")
+    s1.proteins = [{
+        "protein_id": "YP_HA1",
+        "product": "hemagglutinin",
+        "length": 5,
+        "sequence": "MAKLM",
+    }]
+    s2 = make_seq("s2", "ACGT", segment="M", accession="NC_002.1", isolate_id="ISO1")
+    s2.proteins = [
+        {"protein_id": "YP_M1", "product": "matrix protein 1",
+         "length": 4, "sequence": "MAAA"},
+        {"protein_id": "YP_M2", "product": "matrix protein 2",
+         "length": 4, "sequence": "MBBB"},
+    ]
+    # Another isolate that was NOT selected — its proteins must be excluded
+    s3 = make_seq("s3", "ACGT", segment="HA", accession="NC_003.1", isolate_id="ISO2")
+    s3.proteins = [{
+        "protein_id": "YP_HA_other", "product": "hemagglutinin",
+        "length": 5, "sequence": "MSKIP",
+    }]
+    complete_isolates = {"ISO1": [s1, s2], "ISO2": [s3]}
+
+    # The selected representative is the CONCAT for ISO1 only
+    concat = make_seq("concat", "ACGTACGT", accession="ISO1", isolate_id="ISO1")
+    concat.id = "CONCAT|ISO1"
+    result = RunResult(
+        mode="global:threshold",
+        representatives=[concat],
+        clusters=[Cluster(cluster_id="c1", representative=concat)],
+    )
+
+    out = tmp_path / "proteins.fasta"
+    wrote = write_proteins_fasta(result, complete_isolates, out)
+    assert wrote is True
+
+    body = out.read_text()
+    # ISO1 proteins present
+    assert ">YP_HA1 hemagglutinin" in body
+    assert ">YP_M1 matrix protein 1" in body
+    assert ">YP_M2 matrix protein 2" in body
+    # Tags carry isolate, segment, parent accession
+    assert "[isolate=ISO1]" in body
+    assert "[segment=HA]" in body
+    assert "[parent=NC_001.1]" in body
+    # ISO2 (not selected) must NOT appear
+    assert "YP_HA_other" not in body
+
+
+def test_write_proteins_fasta_non_segmented(tmp_path: Path, make_seq):
+    """Non-segmented path: proteins from result.representatives directly."""
+    rep = make_seq("r1", "MEEP", accession="P12345")
+    rep.proteins = [{
+        "protein_id": "P12345", "product": "test protein",
+        "length": 4, "sequence": "MEEP",
+    }]
+    result = RunResult(
+        mode="global:count",
+        representatives=[rep],
+        clusters=[Cluster(cluster_id="c1", representative=rep)],
+    )
+
+    out = tmp_path / "proteins.fasta"
+    wrote = write_proteins_fasta(result, complete_isolates=None, path=out)
+    assert wrote is True
+    body = out.read_text()
+    assert ">P12345 test protein" in body
+    # No isolate tag in non-segmented mode
+    assert "[isolate=" not in body
+    assert "[parent=P12345]" in body
+    assert "MEEP" in body
+
+
+def test_write_proteins_fasta_skips_when_no_translations(tmp_path: Path, make_seq):
+    """If proteins lack 'sequence' (older cache), the file is not written."""
+    rep = make_seq("r1", "ACGT", accession="NC_001.1")
+    rep.proteins = [{"protein_id": "X", "product": "y", "length": 4}]  # no sequence
+    result = RunResult(mode="x", representatives=[rep], clusters=[])
+    out = tmp_path / "proteins.fasta"
+    wrote = write_proteins_fasta(result, complete_isolates=None, path=out)
+    assert wrote is False
+    assert not out.exists()
+
+
+def test_write_proteins_fasta_wraps_at_70_chars(tmp_path: Path, make_seq):
+    rep = make_seq("r1", "X", accession="P1")
+    long_seq = "M" + ("A" * 200)
+    rep.proteins = [{"protein_id": "P1", "product": "x", "length": 201, "sequence": long_seq}]
+    result = RunResult(mode="x", representatives=[rep], clusters=[])
+    out = tmp_path / "p.fasta"
+    write_proteins_fasta(result, complete_isolates=None, path=out)
+    body_lines = [ln for ln in out.read_text().splitlines() if not ln.startswith(">")]
+    assert all(len(ln) <= 70 for ln in body_lines)
 
 
 def test_write_isolate_proteins_tsv_skips_when_no_proteins(tmp_path: Path, make_seq):

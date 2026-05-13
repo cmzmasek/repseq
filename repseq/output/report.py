@@ -128,6 +128,95 @@ def write_representative_tsv(representatives: list[Sequence], path: Path) -> Non
 # Per-isolate protein TSV (segmented mode)
 # ---------------------------------------------------------------------------
 
+def _write_protein_fasta_record(
+    fh,
+    prot: dict,
+    parent_seq: Sequence,
+    isolate_id: Optional[str],
+    line_width: int = 70,
+) -> None:
+    """Emit one FASTA record for a single protein."""
+    pid = prot.get("protein_id") or "unknown"
+    product = prot.get("product") or ""
+    parent_acc = parent_seq.accession or parent_seq.id
+
+    tags: list[str] = []
+    if isolate_id:
+        tags.append(f"[isolate={isolate_id}]")
+    if parent_seq.segment:
+        tags.append(f"[segment={parent_seq.segment}]")
+    tags.append(f"[parent={parent_acc}]")
+
+    header_parts = [f">{pid}"]
+    if product:
+        header_parts.append(product)
+    header_parts.extend(tags)
+    fh.write(" ".join(header_parts) + "\n")
+
+    seq = prot["sequence"]
+    for i in range(0, len(seq), line_width):
+        fh.write(seq[i : i + line_width] + "\n")
+
+
+def write_proteins_fasta(
+    result: RunResult,
+    complete_isolates: Optional[dict[str, list[Sequence]]],
+    path: Path,
+) -> bool:
+    """Write all protein sequences associated with the selected representatives.
+
+    Two paths:
+      - Segmented mode (complete_isolates given): emits proteins from every
+        segment of every isolate whose CONCAT representative was selected.
+      - Non-segmented mode: emits proteins attached directly to each
+        representative sequence.
+
+    Skips the file (returns False) when nothing has a populated
+    ``proteins[i]["sequence"]`` — e.g. protein QC didn't run, or cached
+    entries pre-date the translation-capture change.
+    """
+    has_any_sequence = False
+
+    if complete_isolates:
+        # Selected isolates: extract from CONCAT|<isolate_id> IDs.
+        rep_isolate_ids = {
+            seq.isolate_id for seq in result.representatives if seq.isolate_id
+        }
+        for seq in result.representatives:
+            if seq.id.startswith("CONCAT|"):
+                parts = seq.id.split("|")
+                if len(parts) > 1:
+                    rep_isolate_ids.add(parts[1])
+
+        targets: list[tuple[Optional[str], Sequence]] = []
+        for iso_id, segs in complete_isolates.items():
+            if rep_isolate_ids and iso_id not in rep_isolate_ids:
+                continue
+            for seq in segs:
+                targets.append((iso_id, seq))
+    else:
+        targets = [(None, seq) for seq in result.representatives]
+
+    for _, seq in targets:
+        if seq.proteins and any(p.get("sequence") for p in seq.proteins):
+            has_any_sequence = True
+            break
+
+    if not has_any_sequence:
+        return False
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        for iso_id, seq in targets:
+            if not seq.proteins:
+                continue
+            for prot in seq.proteins:
+                if not prot.get("sequence"):
+                    continue
+                _write_protein_fasta_record(fh, prot, seq, iso_id)
+    return True
+
+
 def write_isolate_proteins_tsv(
     complete_isolates: dict[str, list[Sequence]],
     path: Path,
@@ -205,3 +294,6 @@ def write_all_reports(
         write_isolate_proteins_tsv(
             complete_isolates, out_dir / f"{prefix}_isolate_proteins.tsv"
         )
+    write_proteins_fasta(
+        result, complete_isolates, out_dir / f"{prefix}_proteins.fasta"
+    )

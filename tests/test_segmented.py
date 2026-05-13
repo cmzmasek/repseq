@@ -47,6 +47,78 @@ def test_identify_segment_segment_n_pattern(make_seq):
 
 
 # ---------------------------------------------------------------------------
+# segment_aliases
+# ---------------------------------------------------------------------------
+
+_BUNYA = ["L", "M", "S"]
+_BUNYA_ALIASES = {
+    "L": ["large", "large segment"],
+    "M": ["medium", "medium segment", "glycoprotein"],
+    "S": ["small", "small segment", "nucleoprotein"],
+}
+
+
+def test_alias_single_word_in_header(make_seq):
+    s = make_seq("a", "ACGT", header="Some bunyavirus large gene something")
+    assert identify_segment(s, _BUNYA, segment_aliases=_BUNYA_ALIASES) == "L"
+
+
+def test_alias_multi_word_in_header(make_seq):
+    s = make_seq("a", "ACGT", header="Some bunyavirus large segment polymerase")
+    assert identify_segment(s, _BUNYA, segment_aliases=_BUNYA_ALIASES) == "L"
+
+
+def test_alias_longer_term_wins_over_shorter(make_seq):
+    """When both 'large' and 'large segment' could match, the longer alias
+    should be tried first so the canonical resolution is consistent."""
+    s = make_seq("a", "ACGT", header="virus large segment gene description")
+    # Both terms map to "L" here, but the test still verifies the ordering
+    # path: if we had aliases mapping "large" → "X" and "large segment" → "L",
+    # the longer one would win.
+    aliases = {"L": ["large segment"], "X": ["large"]}
+    assert identify_segment(s, ["L", "X"], segment_aliases=aliases) == "L"
+
+
+def test_alias_seq_segment_string_resolved_to_canonical(make_seq):
+    """When seq.segment carries an alias string, identify_segment should
+    return the canonical name, not the alias verbatim."""
+    s = make_seq("a", "ACGT", segment="hemagglutinin")
+    names = ["PB2", "HA", "NA"]
+    aliases = {"HA": ["hemagglutinin", "haemagglutinin"]}
+    assert identify_segment(s, names, segment_aliases=aliases) == "HA"
+
+
+def test_alias_none_falls_back_to_existing_behavior(make_seq):
+    """With no aliases, behavior should match the pre-alias implementation."""
+    s = make_seq("a", "ACGT", header="A/duck/HK/1/97 segment 4 HA gene")
+    names = ["PB2", "PB1", "PA", "HA", "NP", "NA", "M", "NS"]
+    assert identify_segment(s, names, segment_aliases=None) == "HA"
+
+
+def test_alias_used_via_completeness_filter(make_seq):
+    """End-to-end: aliases should let filter_complete_isolates group
+    sequences that only mention protein names in their headers."""
+    seqs = [
+        make_seq("s1", "A" * 100, header="bunya/X/1/2020 large polymerase"),
+        make_seq("s2", "A" * 100, header="bunya/X/1/2020 glycoprotein gene"),
+        make_seq("s3", "A" * 100, header="bunya/X/1/2020 nucleoprotein gene"),
+    ]
+    virus_cfg = {
+        "expected_segments": 3,
+        "segments": _BUNYA,
+        "isolate_regex": r"(?P<isolate>bunya/[^/]+/[^/]+/\d{4})",
+        "segment_aliases": _BUNYA_ALIASES,
+    }
+    report = QCReport()
+    kept, complete = filter_complete_isolates(seqs, virus_cfg, report)
+    assert len(complete) == 1
+    [(iso_id, ordered)] = complete.items()
+    # Ordering follows cfg["segments"] = [L, M, S]
+    assert [s.segment for s in ordered] == ["L", "M", "S"]
+    assert {s.id for s in kept} == {"s1", "s2", "s3"}
+
+
+# ---------------------------------------------------------------------------
 # filter_complete_isolates
 # ---------------------------------------------------------------------------
 

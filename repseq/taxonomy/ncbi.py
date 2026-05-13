@@ -255,6 +255,10 @@ class NCBITaxonomy:
                     "protein_id": q.get("protein_id", [None])[0],
                     "product": q.get("product", [None])[0],
                     "length": len(translation) if translation else None,
+                    # Amino-acid sequence from the GenBank /translation=
+                    # qualifier. Stored so we can later emit a proteins.fasta
+                    # without a second network call.
+                    "sequence": translation,
                 })
             by_acc_full[record.id] = proteins
             by_acc_no_version[record.id.split(".")[0]] = proteins

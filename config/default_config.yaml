@@ -46,6 +46,19 @@ segmented:
   enabled: false
   # Set 'virus' to the key in 'viruses' that you want to use
   virus: null
+  # Schema for each virus entry:
+  #   <name>:
+  #     expected_segments: <int>
+  #     segments: [<name>, <name>, ...]        # canonical order, used for concatenation
+  #     isolate_regex: "<pattern>"             # must capture group 'isolate' or group 1
+  #     segment_regex: "<pattern>"             # optional; falls back to header search
+  #     segment_aliases:                       # optional; synonyms recognised in headers
+  #       <canonical>: [<alias>, <alias>, ...] #   e.g. L: [large, "large segment"]
+  #     expected_proteins_per_segment:         # optional; each value is int OR list[int]
+  #       <segment_name>: <int>                #   exact count required
+  #       <segment_name>: [<int>, <int>, ...]  #   any of these counts acceptable
+  # See config/examples/influenza_a.yaml for a worked example with
+  # strain-aware list-valued counts.
   viruses: {}
 
 taxonomy:

@@ -190,12 +190,37 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                         errors.append(
                             f"segmented.viruses.{virus_name} missing required field '{field}'"
                         )
+                # Segment aliases: optional dict[canonical → list[str]]
+                aliases = vdef.get("segment_aliases")
+                if aliases is not None:
+                    if not isinstance(aliases, dict):
+                        errors.append(
+                            f"segmented.viruses.{virus_name}.segment_aliases "
+                            f"must be a mapping of canonical-segment-name → list of strings"
+                        )
+                    else:
+                        seg_names = set(vdef.get("segments", []))
+                        for canonical, syns in aliases.items():
+                            if canonical not in seg_names:
+                                errors.append(
+                                    f"segmented.viruses.{virus_name}."
+                                    f"segment_aliases: unknown segment '{canonical}'"
+                                )
+                            if not isinstance(syns, list) or not all(
+                                isinstance(s, str) and s.strip() for s in syns
+                            ):
+                                errors.append(
+                                    f"segmented.viruses.{virus_name}."
+                                    f"segment_aliases.{canonical} "
+                                    f"must be a list of non-empty strings"
+                                )
+
                 epps = vdef.get("expected_proteins_per_segment")
                 if epps is not None:
                     if not isinstance(epps, dict):
                         errors.append(
                             f"segmented.viruses.{virus_name}.expected_proteins_per_segment "
-                            f"must be a mapping of segment-name → int"
+                            f"must be a mapping of segment-name → int or list[int]"
                         )
                     else:
                         seg_names = set(vdef.get("segments", []))
@@ -205,11 +230,27 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                                     f"segmented.viruses.{virus_name}."
                                     f"expected_proteins_per_segment: unknown segment '{seg_name}'"
                                 )
-                            if not isinstance(count, int) or count < 0:
+                            # Allow int (exact) or list[int] (any-of).
+                            # bool is a subclass of int in Python — reject it explicitly.
+                            valid = (
+                                (isinstance(count, int) and not isinstance(count, bool) and count >= 0)
+                                or (
+                                    isinstance(count, list)
+                                    and len(count) > 0
+                                    and all(
+                                        isinstance(x, int)
+                                        and not isinstance(x, bool)
+                                        and x >= 0
+                                        for x in count
+                                    )
+                                )
+                            )
+                            if not valid:
                                 errors.append(
                                     f"segmented.viruses.{virus_name}."
                                     f"expected_proteins_per_segment.{seg_name} "
-                                    f"must be a non-negative integer"
+                                    f"must be a non-negative integer or a non-empty "
+                                    f"list of non-negative integers"
                                 )
 
     # Clustering backend

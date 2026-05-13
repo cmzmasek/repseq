@@ -104,7 +104,7 @@ output FASTA(s) + TSV metadata + plain-text run log
 
 ## Output files
 
-Each run writes four files to `output.dir` (default `./repseq_output/`):
+Each run writes these files to `output.dir` (default `./repseq_output/`):
 
 | File | Contents |
 | --- | --- |
@@ -114,6 +114,7 @@ Each run writes four files to `output.dir` (default `./repseq_output/`):
 | `{prefix}_qc_removed.tsv` | Sequences removed by QC and the reason |
 | `{prefix}_run.log` | Plain-text run summary: parameters (YAML), QC stats, output file list |
 | `{prefix}_isolate_proteins.tsv` | (Segmented + protein QC) One row per annotated CDS per passing isolate: `isolate_id, segment, accession, protein_id, product, length` |
+| `{prefix}_proteins.fasta` | (Protein QC enabled) All protein amino-acid sequences from the selected representatives, in a single FASTA. Tagged headers: `>protein_id product [isolate=…] [segment=…] [parent=accession]` |
 
 Segmented-virus runs additionally produce `{prefix}_concatenated.fasta` and one `{prefix}_segment_{name}.fasta` per segment.
 
@@ -124,11 +125,30 @@ Segmented-virus runs additionally produce `{prefix}_concatenated.fasta` and one 
 For multi-segment viruses (e.g. influenza), `repseq` can:
 
 1. Group sequences by isolate (regex on the header).
-2. Keep only isolates that have **all** expected segments.
-3. Concatenate per-isolate segments into a single sequence for clustering.
-4. Write back both the concatenated FASTA and one FASTA per segment.
+2. Identify each sequence's segment by its **canonical name, numeric index,
+   or any user-defined synonym** (e.g. `large segment` → `L`, `hemagglutinin` → `HA`).
+3. Keep only isolates that have **all** expected segments.
+4. Concatenate per-isolate segments into a single sequence for clustering.
+5. Write back both the concatenated FASTA and one FASTA per segment.
 
-Configure under `segmented:` and enable with `--segmented`. See `config/examples/influenza_a.yaml`.
+Configure under `segmented:` and enable with `--segmented`:
+
+```yaml
+segmented:
+  enabled: false                  # or pass --segmented per-run
+  virus: influenza_a
+  viruses:
+    influenza_a:
+      expected_segments: 8
+      segments: [PB2, PB1, PA, HA, NP, NA, M, NS]
+      isolate_regex: "(?P<isolate>[AB]/[^/(\\s]+/[^/(\\s]+/[^/(\\s]+/\\d{4})"
+      segment_aliases:            # optional: synonyms recognised in headers
+        HA: [hemagglutinin]
+        NA: [neuraminidase]
+        NP: [nucleoprotein, "nucleocapsid protein"]
+```
+
+See `config/examples/influenza_a.yaml` for a fully annotated example.
 
 ---
 
@@ -146,17 +166,25 @@ qc:
 segmented:
   viruses:
     influenza_a:
-      # Per-segment exact-count filter (segmented mode only)
+      # Per-segment protein-count filter (segmented mode only).
+      # Each value is either an int (exact count required) or a list
+      # of ints (any of the listed counts is acceptable — useful for
+      # strain variation, e.g. nonfunctional PB1-F2 in 2009 H1N1).
       expected_proteins_per_segment:
         HA: 1
-        M:  2   # M1 + M2
-        NS: 2   # NS1 + NEP
+        M:  2          # M1 + M2
+        PB1: [1, 2]    # PB1 alone, or PB1 + PB1-F2
+        NS: [1, 2]     # NS1 alone, or NS1 + NEP
         # …
 ```
 
 GenBank records are fetched in **batches of 200 accessions per request**
 and cached in the same SQLite store as taxonomy lookups, so subsequent runs
 on the same dataset are network-free. Skipped automatically with `--no-resolve`.
+
+Translations from each CDS are captured alongside the metadata so the
+optional `{prefix}_proteins.fasta` output requires no additional network
+calls — everything is reconstructed from the same cached records.
 
 ---
 
@@ -190,12 +218,16 @@ Environment variables `REPSEQ_NCBI_EMAIL` and `REPSEQ_NCBI_API_KEY` override `ta
 
 ## Cache management
 
-Taxonomy lookups are cached in a SQLite DB (default `~/.repseq/cache/taxonomy.db`):
+Taxonomy and protein-annotation lookups are cached in a SQLite DB
+(default `~/.repseq/cache/taxonomy.db`):
 
 ```bash
 repseq cache stats
 repseq cache purge-expired
-repseq cache clear --source ncbi
+repseq cache clear --source ncbi_taxonomy
+repseq cache clear --source ncbi_nuccore
+repseq cache clear --source ncbi_proteins    # batched GenBank/CDS records
+repseq cache clear --source uniprot
 ```
 
 ---
@@ -213,6 +245,9 @@ Tests run offline — all network calls (NCBI, UniProt) are mocked.
 
 ## Status
 
-`v0.1.0` — feature-complete draft of all 8 modes. Network-dependent paths
-(NCBI Entrez, UniProt REST) have not been exercised end-to-end against live
-APIs yet; offline regression tests cover everything else.
+`v0.2.0` — all 8 selection modes implemented, plus optional protein-annotation
+QC with batched GenBank fetching, per-segment count checks (int or list-of-int),
+segment-name synonyms, and a protein FASTA writer reconstructed from cached
+records. **103 offline regression tests pass.** The NCBI-backed paths have
+been exercised end-to-end against live Entrez (influenza A H1N1 RefSeq
+genome, 8 segments + 11 proteins).

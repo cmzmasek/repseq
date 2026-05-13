@@ -61,8 +61,10 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
    `representatives` + `clusters`.
 7. `write_results` writes the FASTA(s); `write_all_reports` writes the
    plain-text/TSV reports — including `{prefix}_isolate_proteins.tsv`
-   (one row per CDS per passing isolate) when proteins were fetched
-   in segmented mode.
+   (one row per CDS per passing isolate, segmented mode) and
+   `{prefix}_proteins.fasta` (amino-acid sequences for all proteins of
+   the selected representatives). The protein FASTA is reconstructed
+   from the same cached GenBank records — no extra network calls.
 
 ## Invariants worth knowing
 
@@ -145,8 +147,11 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
 
 ## Status
 
-`v0.1.0` draft. All 8 modes structurally complete. 70 offline regression
-tests cover IO, QC, selector, segmented logic, cache TTL, config
-validation, diversity selection, resolver fallback + failure tracking,
-and mode dispatch (clustering mocked). Not yet exercised against live
-NCBI/UniProt endpoints.
+`v0.2.0`. All 8 modes structurally complete, plus optional protein-
+annotation QC (batched GenBank fetch + per-segment count check) and a
+protein-FASTA output reconstructed from the same cached records. 103
+offline regression tests cover IO, QC, selector, segmented logic, cache
+TTL, config validation, diversity selection, resolver fallback, mode
+dispatch (clustering mocked), protein parser + filter, FASTA writer, and
+segment aliases. NCBI Entrez paths have been live-tested against the
+H1N1 RefSeq genome (8 segments, 11 proteins).

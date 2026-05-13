@@ -79,6 +79,137 @@ def test_validate_config_segmented_requires_fields_for_named_virus():
     assert sum("missing required field" in e for e in errors) == 2
 
 
+def test_validate_config_segment_aliases_accepted():
+    cfg = load_config(None)
+    cfg["segmented"] = {
+        "enabled": True,
+        "virus": "fluA",
+        "viruses": {
+            "fluA": {
+                "expected_segments": 2,
+                "segments": ["HA", "NA"],
+                "isolate_regex": r"(?P<isolate>X)",
+                "segment_aliases": {
+                    "HA": ["hemagglutinin", "haemagglutinin"],
+                    "NA": ["neuraminidase"],
+                },
+            }
+        },
+    }
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_segment_aliases_rejects_unknown_canonical():
+    cfg = load_config(None)
+    cfg["segmented"] = {
+        "enabled": True,
+        "virus": "v",
+        "viruses": {
+            "v": {
+                "expected_segments": 1,
+                "segments": ["HA"],
+                "isolate_regex": r"(?P<isolate>X)",
+                "segment_aliases": {"NOPE": ["x"]},
+            }
+        },
+    }
+    errors = validate_config(cfg)
+    assert any("segment_aliases" in e and "NOPE" in e for e in errors)
+
+
+def test_validate_config_segment_aliases_rejects_empty_alias():
+    cfg = load_config(None)
+    cfg["segmented"] = {
+        "enabled": True,
+        "virus": "v",
+        "viruses": {
+            "v": {
+                "expected_segments": 1,
+                "segments": ["HA"],
+                "isolate_regex": r"(?P<isolate>X)",
+                "segment_aliases": {"HA": ["valid", ""]},
+            }
+        },
+    }
+    errors = validate_config(cfg)
+    assert any("segment_aliases.HA" in e for e in errors)
+
+
+def test_validate_config_expected_proteins_per_segment_accepts_int_and_list():
+    cfg = load_config(None)
+    cfg["segmented"] = {
+        "enabled": True,
+        "virus": "fluA",
+        "viruses": {
+            "fluA": {
+                "expected_segments": 3,
+                "segments": ["HA", "PB1", "NS"],
+                "isolate_regex": r"(?P<isolate>X)",
+                "expected_proteins_per_segment": {
+                    "HA": 1,        # int — exact
+                    "PB1": [1, 2],  # list — any of
+                    "NS": [1, 2, 3],
+                },
+            }
+        },
+    }
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_bad_expected_proteins_value():
+    cfg = load_config(None)
+    cfg["segmented"] = {
+        "enabled": True,
+        "virus": "fluA",
+        "viruses": {
+            "fluA": {
+                "expected_segments": 1,
+                "segments": ["HA"],
+                "isolate_regex": r"(?P<isolate>X)",
+                "expected_proteins_per_segment": {"HA": "two"},
+            }
+        },
+    }
+    errors = validate_config(cfg)
+    assert any("expected_proteins_per_segment.HA" in e for e in errors)
+
+
+def test_validate_config_rejects_negative_in_list():
+    cfg = load_config(None)
+    cfg["segmented"] = {
+        "enabled": True,
+        "virus": "fluA",
+        "viruses": {
+            "fluA": {
+                "expected_segments": 1,
+                "segments": ["HA"],
+                "isolate_regex": r"(?P<isolate>X)",
+                "expected_proteins_per_segment": {"HA": [1, -1]},
+            }
+        },
+    }
+    errors = validate_config(cfg)
+    assert any("expected_proteins_per_segment.HA" in e for e in errors)
+
+
+def test_validate_config_rejects_empty_list():
+    cfg = load_config(None)
+    cfg["segmented"] = {
+        "enabled": True,
+        "virus": "fluA",
+        "viruses": {
+            "fluA": {
+                "expected_segments": 1,
+                "segments": ["HA"],
+                "isolate_regex": r"(?P<isolate>X)",
+                "expected_proteins_per_segment": {"HA": []},
+            }
+        },
+    }
+    errors = validate_config(cfg)
+    assert any("expected_proteins_per_segment.HA" in e for e in errors)
+
+
 def test_get_virus_config_returns_none_when_disabled():
     cfg = load_config(None)
     assert get_virus_config(cfg) is None

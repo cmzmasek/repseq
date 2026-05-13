@@ -49,48 +49,80 @@ def _normalise_isolate_id(raw: str) -> str:
 # Segment identification
 # ---------------------------------------------------------------------------
 
-def identify_segment(seq: Sequence, segment_names: list[str], segment_regex: Optional[str] = None) -> Optional[str]:
-    """Return the segment name/number for a sequence.
+def _build_alias_map(
+    segment_names: list[str],
+    segment_aliases: Optional[dict[str, list[str]]],
+) -> dict[str, str]:
+    """Return a lower-cased alias → canonical-name map.
 
-    Checks seq.segment first, then scans the header using a regex or
-    by searching for the segment names directly.
+    Each canonical name maps to itself; each alias maps to its canonical.
+    Used by identify_segment to recognise synonyms like "large segment" → "L".
     """
+    out: dict[str, str] = {}
+    for canonical in segment_names:
+        out[canonical.lower()] = canonical
+    if segment_aliases:
+        for canonical, syns in segment_aliases.items():
+            for syn in syns:
+                if syn:
+                    out[syn.lower()] = canonical
+    return out
+
+
+def identify_segment(
+    seq: Sequence,
+    segment_names: list[str],
+    segment_regex: Optional[str] = None,
+    segment_aliases: Optional[dict[str, list[str]]] = None,
+) -> Optional[str]:
+    """Return the canonical segment name for a sequence.
+
+    Resolution order:
+      1. seq.segment as a numeric index (e.g. "4" → segment_names[3])
+      2. seq.segment as a canonical name or alias (case-insensitive)
+      3. custom segment_regex applied to the header
+      4. Word-boundary search across canonical names AND aliases in the
+         header, longest term first (so "large segment" wins over "large")
+      5. "segment N" pattern in the header, mapped via the canonical list
+
+    Returns None if nothing matches.
+    """
+    alias_to_canonical = _build_alias_map(segment_names, segment_aliases)
+
     if seq.segment:
-        # Normalise numeric segment references (e.g. "4" -> segment_names[3])
         if seq.segment.isdigit():
             idx = int(seq.segment) - 1
             if 0 <= idx < len(segment_names):
                 return segment_names[idx]
-        # Check if it's already a known segment name
-        for name in segment_names:
-            if seq.segment.upper() == name.upper():
-                return name
+        canon = alias_to_canonical.get(seq.segment.lower())
+        if canon:
+            return canon
         return seq.segment
-
-    # Search header for segment names
-    header_upper = seq.header.upper()
 
     if segment_regex:
         m = re.search(segment_regex, seq.header, re.IGNORECASE)
         if m:
+            raw: Optional[str] = None
             try:
-                return m.group("segment")
+                raw = m.group("segment")
             except IndexError:
                 if m.lastindex:
                     raw = m.group(1)
-                    if raw.isdigit():
-                        idx = int(raw) - 1
-                        if 0 <= idx < len(segment_names):
-                            return segment_names[idx]
-                    return raw
+            if raw:
+                if raw.isdigit():
+                    idx = int(raw) - 1
+                    if 0 <= idx < len(segment_names):
+                        return segment_names[idx]
+                return alias_to_canonical.get(raw.lower(), raw)
 
-    # Direct name search
-    for name in segment_names:
-        pattern = re.compile(r"\b" + re.escape(name) + r"\b", re.IGNORECASE)
-        if pattern.search(seq.header):
-            return name
+    # Word-boundary search over canonical names + aliases. Longest term
+    # first so multi-word aliases (e.g. "large segment") win over short
+    # substrings ("large").
+    candidates = sorted(alias_to_canonical.keys(), key=len, reverse=True)
+    for term in candidates:
+        if re.search(r"\b" + re.escape(term) + r"\b", seq.header, re.IGNORECASE):
+            return alias_to_canonical[term]
 
-    # Numeric: "segment N"
     m = re.search(r"\bsegment\s+(\d+)\b", seq.header, re.IGNORECASE)
     if m:
         idx = int(m.group(1)) - 1
@@ -118,6 +150,7 @@ def filter_complete_isolates(
     expected_segments: list[str] = virus_cfg["segments"]
     isolate_regex: str = virus_cfg["isolate_regex"]
     segment_regex: Optional[str] = virus_cfg.get("segment_regex")
+    segment_aliases: Optional[dict[str, list[str]]] = virus_cfg.get("segment_aliases")
 
     # Group sequences by isolate
     isolate_map: dict[str, dict[str, Sequence]] = defaultdict(dict)
@@ -130,10 +163,14 @@ def filter_complete_isolates(
             continue
         seq.isolate_id = isolate_raw
 
-        seg = identify_segment(seq, expected_segments, segment_regex)
+        seg = identify_segment(seq, expected_segments, segment_regex, segment_aliases)
         if seg is None:
             unresolved.append(seq)
             continue
+
+        # Persist the resolved canonical segment so downstream output
+        # (e.g. {prefix}_isolate_proteins.tsv) sees it.
+        seq.segment = seg
 
         isolate_key = _normalise_isolate_id(isolate_raw)
         if seg in isolate_map[isolate_key]:

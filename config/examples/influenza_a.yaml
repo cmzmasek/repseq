@@ -67,18 +67,41 @@ segmented:
       isolate_regex: "(?P<isolate>[AB]/[^/(\\s]+/[^/(\\s]+/[^/(\\s]+/\\d{4})"
       # Optional: regex to identify segment from header
       # segment_regex: "segment\\s+(?P<segment>\\d+)"
-      # Expected protein count per segment. When set (and protein QC enabled
-      # at the top level), segments whose GenBank record reports a different
-      # CDS count are dropped before completeness checking.
+      # Aliases: extra terms the segment-identifier should recognise as
+      # a given canonical segment. Headers using the protein name rather
+      # than the segment shorthand (e.g. "hemagglutinin gene" → HA) are
+      # the main use case. Longer aliases are tried first, so multi-word
+      # phrases ("polymerase basic 2") win over short tokens ("PB2").
+      segment_aliases:
+        PB2: ["polymerase basic 2", "polymerase PB2"]
+        PB1: ["polymerase basic 1", "polymerase PB1"]
+        PA:  ["polymerase acidic", "polymerase PA"]
+        HA:  ["hemagglutinin", "haemagglutinin"]
+        NP:  ["nucleoprotein", "nucleocapsid protein"]
+        NA:  ["neuraminidase"]
+        M:   ["matrix protein", "matrix gene", "MP"]
+        NS:  ["nonstructural", "non-structural", "nuclear export protein"]
+      # Expected protein count per segment. Each value may be either:
+      #   - an int  : exact count required (strict)
+      #   - a list  : any of the listed counts is acceptable (lenient)
+      #
+      # Influenza A protein counts are STRAIN-DEPENDENT. The canonical
+      # counts below (PB1=2, PA=2, NS=2) assume the full accessory CDS set:
+      #   PB1-F2: truncated/nonfunctional in many 2009 H1N1 pandemic strains
+      #           → some RefSeq records annotate only the main PB1 CDS
+      #   PA-X  : produced by ribosomal frameshift; not always annotated
+      #   NEP/NS2 : alternative splice product, sometimes omitted
+      # If you see your real isolates failing protein QC for PB1/PA/NS,
+      # relax to [1, 2] for those segments.
       expected_proteins_per_segment:
         PB2: 1
-        PB1: 2   # PB1 + PB1-F2
-        PA: 2    # PA + PA-X
+        PB1: [1, 2]   # PB1 alone, or PB1 + PB1-F2
+        PA:  [1, 2]   # PA alone, or PA + PA-X
         HA: 1
         NP: 1
         NA: 1
-        M: 2     # M1 + M2
-        NS: 2    # NS1 + NEP/NS2
+        M:  2         # M1 + M2 (M2 from spliced mRNA, normally always present)
+        NS: [1, 2]    # NS1 alone, or NS1 + NEP/NS2
 
     influenza_b:
       expected_segments: 8

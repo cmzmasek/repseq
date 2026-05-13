@@ -63,7 +63,10 @@ def filter_by_protein_count(
     1. ``qc.protein_annotation.min_proteins`` — global floor. A sequence with
        fewer than this many CDS features fails.
     2. ``segmented.viruses.<v>.expected_proteins_per_segment`` — per-segment
-       exact count. Only applied to sequences whose segment can be identified.
+       count. Each value may be either an ``int`` (exact count required) or
+       a ``list[int]`` (any of the listed counts is acceptable, useful when
+       strain variation means a segment may legitimately have N or N+1
+       proteins, e.g. PB1 with/without PB1-F2).
 
     Sequences whose ``proteins`` field is ``None`` (never fetched, e.g.
     UniProt-sourced or no accession) are passed through unchanged.
@@ -74,10 +77,12 @@ def filter_by_protein_count(
     expected_per_segment: dict[str, int] = {}
     segment_names: list[str] = []
     segment_regex: Optional[str] = None
+    segment_aliases: Optional[dict[str, list[str]]] = None
     if virus_cfg:
         expected_per_segment = virus_cfg.get("expected_proteins_per_segment") or {}
         segment_names = virus_cfg.get("segments", [])
         segment_regex = virus_cfg.get("segment_regex")
+        segment_aliases = virus_cfg.get("segment_aliases")
 
     if min_proteins is None and not expected_per_segment:
         return sequences  # nothing to do
@@ -95,13 +100,20 @@ def filter_by_protein_count(
             fail_reason = f"protein_count_below_min:{n}<{min_proteins}"
 
         if not fail_reason and expected_per_segment and segment_names:
-            seg = identify_segment(seq, segment_names, segment_regex)
+            seg = identify_segment(seq, segment_names, segment_regex, segment_aliases)
             if seg and seg in expected_per_segment:
                 expected = expected_per_segment[seg]
-                if n != expected:
-                    fail_reason = (
-                        f"protein_count_mismatch:segment={seg}:got={n}:expected={expected}"
-                    )
+                if isinstance(expected, list):
+                    if n not in expected:
+                        fail_reason = (
+                            f"protein_count_mismatch:segment={seg}:got={n}:"
+                            f"expected_one_of={expected}"
+                        )
+                else:
+                    if n != expected:
+                        fail_reason = (
+                            f"protein_count_mismatch:segment={seg}:got={n}:expected={expected}"
+                        )
 
         if fail_reason:
             seq.qc_passed = False
