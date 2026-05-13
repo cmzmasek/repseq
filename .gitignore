@@ -19,6 +19,10 @@ htmlcov/
 /tmp/
 ~/.repseq/
 
+# User-generated configs (only default_config.yaml + examples/ are tracked)
+/config/my_*.yaml
+/my_*.yaml
+
 # Claude Code local config (not project config)
 .claude/
 

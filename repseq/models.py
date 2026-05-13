@@ -78,6 +78,10 @@ class Sequence:
     # Taxonomy (resolved after DB lookup)
     taxonomy: Optional[TaxonomyInfo] = None
 
+    # Protein annotations (None = not fetched, [] = fetched but none found).
+    # Each dict has keys: protein_id, product, length.
+    proteins: Optional[list[dict]] = None
+
     # QC state
     qc_passed: bool = True
     qc_fail_reason: Optional[str] = None
@@ -121,6 +125,7 @@ class QCReport:
     removed_length: int = 0
     removed_ambiguous: int = 0
     removed_annotation: int = 0
+    removed_proteins: int = 0
     removed_incomplete_isolates: int = 0
     details: list[dict] = field(default_factory=list)
 
@@ -136,6 +141,7 @@ class QCReport:
             f"  Removed (length)    : {self.removed_length}",
             f"  Removed (ambiguous) : {self.removed_ambiguous}",
             f"  Removed (annotation): {self.removed_annotation}",
+            f"  Removed (proteins)  : {self.removed_proteins}",
             f"  Removed (incomplete): {self.removed_incomplete_isolates}",
         ]
         return "\n".join(lines)

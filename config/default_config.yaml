@@ -21,6 +21,12 @@ qc:
   # Maximum fraction of ambiguous characters allowed (applies to AA and NA)
   ambiguous_threshold: 0.05
 
+  # Optional: drop sequences whose NCBI GenBank record has fewer than
+  # min_proteins annotated CDS features. Requires network (skipped under --no-resolve).
+  protein_annotation:
+    enabled: false
+    min_proteins: 1
+
   annotation_filter:
     enabled: true
     keywords:

@@ -125,6 +125,46 @@ def write_representative_tsv(representatives: list[Sequence], path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Per-isolate protein TSV (segmented mode)
+# ---------------------------------------------------------------------------
+
+def write_isolate_proteins_tsv(
+    complete_isolates: dict[str, list[Sequence]],
+    path: Path,
+) -> bool:
+    """Write proteins per segment per isolate, one row per protein.
+
+    Only emits a file when at least one segment has populated `proteins`.
+    Returns True if the file was written, False if skipped.
+    """
+    has_any = any(
+        seq.proteins for segs in complete_isolates.values() for seq in segs
+    )
+    if not has_any:
+        return False
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(
+            "isolate_id\tsegment\taccession\tprotein_id\tproduct\tlength\n"
+        )
+        for isolate_id, segs in complete_isolates.items():
+            for seq in segs:
+                if not seq.proteins:
+                    continue
+                for prot in seq.proteins:
+                    fh.write(
+                        f"{isolate_id}\t"
+                        f"{seq.segment or ''}\t"
+                        f"{seq.accession or seq.id}\t"
+                        f"{prot.get('protein_id') or ''}\t"
+                        f"{prot.get('product') or ''}\t"
+                        f"{prot.get('length') if prot.get('length') is not None else ''}\n"
+                    )
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Cluster summary TSV
 # ---------------------------------------------------------------------------
 
@@ -152,6 +192,7 @@ def write_all_reports(
     cfg: dict[str, Any],
     input_paths: list[str],
     output_files: list[Path],
+    complete_isolates: Optional[dict[str, list[Sequence]]] = None,
 ) -> None:
     out_dir = Path(cfg.get("output", {}).get("dir", "./repseq_output"))
     prefix = cfg.get("output", {}).get("prefix", "repseq")
@@ -160,3 +201,7 @@ def write_all_reports(
     write_qc_tsv(qc_report, out_dir / f"{prefix}_qc_removed.tsv")
     write_representative_tsv(result.representatives, out_dir / f"{prefix}_representatives.tsv")
     write_cluster_tsv(result, out_dir / f"{prefix}_clusters.tsv")
+    if complete_isolates:
+        write_isolate_proteins_tsv(
+            complete_isolates, out_dir / f"{prefix}_isolate_proteins.tsv"
+        )

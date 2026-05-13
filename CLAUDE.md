@@ -20,7 +20,9 @@ repseq/
 ├── config.py               ← YAML defaults + validation
 ├── models.py               ← Sequence, Cluster, QCReport, RunResult dataclasses
 ├── io/fasta.py             ← parse 3 header formats, read/write FASTA
-├── qc/pipeline.py          ← duplicates → length → ambiguous → annotation
+├── qc/
+│   ├── pipeline.py         ← duplicates → length → ambiguous → annotation
+│   └── protein_qc.py       ← NCBI-backed protein-count filter (opt-in)
 ├── segmented/completeness.py ← isolate grouping, completeness, concat
 ├── taxonomy/
 │   ├── cache.py            ← SQLite TTL cache
@@ -44,15 +46,23 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
    parsed `accession`, `organism`, `is_refseq`, `is_reviewed`, etc.
 2. `_resolve_metadata` builds a `MetadataResolver` and runs
    `resolve_batch` in a thread pool. Failures are non-fatal but **tracked**
-   on `resolver.failures` and surfaced via stderr.
+   on `resolver.failures` and surfaced via stderr. Returns the `NCBITaxonomy`
+   client so downstream steps can reuse it.
 3. `_run_qc` produces a passing-list + `QCReport`.
-4. If `segmented.enabled`, `filter_complete_isolates` then
+4. `_run_protein_qc` (optional) — if `qc.protein_annotation.enabled` or
+   `virus.expected_proteins_per_segment` is set, fetches CDS features via
+   `NCBITaxonomy.fetch_proteins_batch` (200 accessions per request, cached
+   in SQLite under source `ncbi_proteins`), populates `seq.proteins`, and
+   drops sequences failing the count check.
+5. If `segmented.enabled`, `filter_complete_isolates` then
    `build_concatenated_sequences` replace the sequence list with one
    concatenated sequence per complete isolate.
-5. The chosen mode runs (`modes/<mode>.py`), returning a `RunResult` with
+6. The chosen mode runs (`modes/<mode>.py`), returning a `RunResult` with
    `representatives` + `clusters`.
-6. `write_results` writes the FASTA(s); `write_all_reports` writes JSON/text
-   reports including the QC summary and resolver-failure count.
+7. `write_results` writes the FASTA(s); `write_all_reports` writes the
+   plain-text/TSV reports — including `{prefix}_isolate_proteins.tsv`
+   (one row per CDS per passing isolate) when proteins were fetched
+   in segmented mode.
 
 ## Invariants worth knowing
 

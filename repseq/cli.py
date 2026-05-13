@@ -16,6 +16,7 @@ from .models import RunResult
 from .output.report import write_all_reports
 from .output.writer import write_results
 from .qc.pipeline import run_qc
+from .qc.protein_qc import run_protein_qc
 from .segmented.completeness import (
     build_concatenated_sequences,
     filter_complete_isolates,
@@ -104,8 +105,10 @@ def _load_sequences(input_paths: tuple[str, ...], source_override: str = "auto")
 
 
 def _resolve_metadata(sequences, cfg, no_resolve):
+    """Resolve metadata; return the NCBI client (or None if --no-resolve)
+    so downstream steps like protein QC can reuse it."""
     if no_resolve:
-        return
+        return None
     tax_cfg = cfg.get("taxonomy", {})
     cache = TaxonomyCache(cfg["cache_dir"], ttl_days=tax_cfg.get("cache_ttl_days", 30))
     ncbi = NCBITaxonomy(cache, email=tax_cfg.get("ncbi_email"), api_key=tax_cfg.get("ncbi_api_key"))
@@ -119,6 +122,7 @@ def _resolve_metadata(sequences, cfg, no_resolve):
             f"failed (continuing with header-derived metadata).",
             err=True,
         )
+    return ncbi
 
 
 def _run_qc(sequences, cfg):
@@ -126,6 +130,23 @@ def _run_qc(sequences, cfg):
     passed, qc_report = run_qc(sequences, cfg)
     click.echo(qc_report.summary())
     return passed, qc_report
+
+
+def _run_protein_qc(sequences, cfg, qc_report, ncbi):
+    """Optional NCBI-backed protein-count filter. No-op if disabled or
+    if no NCBI client is available (e.g. --no-resolve)."""
+    if ncbi is None:
+        return sequences
+    virus_cfg = get_virus_config(cfg)
+    qc_cfg = cfg.get("qc", {})
+    pa_enabled = qc_cfg.get("protein_annotation", {}).get("enabled", False)
+    has_per_segment = bool((virus_cfg or {}).get("expected_proteins_per_segment"))
+    if not pa_enabled and not has_per_segment:
+        return sequences
+    click.echo("Running protein-annotation QC ...")
+    kept = run_protein_qc(sequences, ncbi, cfg, virus_cfg, qc_report)
+    click.echo(f"  Removed (proteins): {qc_report.removed_proteins}")
+    return kept
 
 
 def _handle_segmented(sequences, cfg, qc_report):
@@ -142,7 +163,10 @@ def _handle_segmented(sequences, cfg, qc_report):
 
 def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names):
     out_files = write_results(result, cfg, complete_isolates, segment_names)
-    write_all_reports(result, qc_report, cfg, list(input_paths), out_files)
+    write_all_reports(
+        result, qc_report, cfg, list(input_paths), out_files,
+        complete_isolates=complete_isolates,
+    )
     click.echo(f"\nOutput written to: {cfg['output']['dir']}")
     for f in out_files:
         click.echo(f"  {f.name}")
@@ -184,8 +208,9 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
-    _resolve_metadata(sequences, cfg, no_resolve)
+    ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.global_mode import GlobalMode
@@ -217,8 +242,9 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
-    _resolve_metadata(sequences, cfg, no_resolve)
+    ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.taxonomic1 import TaxonomicMode1
@@ -254,8 +280,9 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
-    _resolve_metadata(sequences, cfg, no_resolve)
+    ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.taxonomic2 import TaxonomicMode2
@@ -285,8 +312,9 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
-    _resolve_metadata(sequences, cfg, no_resolve)
+    ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.host_mode import HostMode
@@ -318,8 +346,9 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
-    _resolve_metadata(sequences, cfg, no_resolve)
+    ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.time_mode import TimeMode
@@ -349,8 +378,9 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
-    _resolve_metadata(sequences, cfg, no_resolve)
+    ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.geographic_mode import GeographicMode
@@ -387,8 +417,9 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
-    _resolve_metadata(sequences, cfg, no_resolve)
+    ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.custom_mode import CustomMode
@@ -429,8 +460,9 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
-    _resolve_metadata(sequences, cfg, no_resolve)
+    ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.hybrid_mode import HybridMode
@@ -594,6 +626,19 @@ def init_config(output):
     out_path = Path(output)
     with open(out_path, "w") as fh:
         yaml.dump(cfg, fh, default_flow_style=False, sort_keys=False)
+
+    # Insert an explanatory comment before `enabled: false` in the segmented
+    # block — yaml.dump cannot emit comments, so we post-process the file.
+    text = out_path.read_text()
+    text = text.replace(
+        "segmented:\n  enabled: false\n",
+        "segmented:\n"
+        "  # Set enabled to true here, or pass --segmented on the command line.\n"
+        "  # The virus definition below is stored so you can activate it per-run\n"
+        "  # without re-editing this file.\n"
+        "  enabled: false\n",
+    )
+    out_path.write_text(text)
 
     click.echo(f"\nConfig written to: {out_path}")
 

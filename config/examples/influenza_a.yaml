@@ -31,7 +31,7 @@ qc:
   annotation_filter:
     enabled: true
     keywords:
-      - MAG
+      - "MAG:"
       - metagenome-assembled
       - synthetic
       - artificial
@@ -67,6 +67,18 @@ segmented:
       isolate_regex: "(?P<isolate>[AB]/[^/(\\s]+/[^/(\\s]+/[^/(\\s]+/\\d{4})"
       # Optional: regex to identify segment from header
       # segment_regex: "segment\\s+(?P<segment>\\d+)"
+      # Expected protein count per segment. When set (and protein QC enabled
+      # at the top level), segments whose GenBank record reports a different
+      # CDS count are dropped before completeness checking.
+      expected_proteins_per_segment:
+        PB2: 1
+        PB1: 2   # PB1 + PB1-F2
+        PA: 2    # PA + PA-X
+        HA: 1
+        NP: 1
+        NA: 1
+        M: 2     # M1 + M2
+        NS: 2    # NS1 + NEP/NS2
 
     influenza_b:
       expected_segments: 8

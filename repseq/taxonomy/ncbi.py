@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 import time
+from io import StringIO
 from typing import Any, Optional
 
 import requests
 
 from .cache import TaxonomyCache
 
+logger = logging.getLogger(__name__)
+
 _ENTREZ_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 _RATE_LIMIT_DELAY = 0.34  # ~3 req/s without API key; 0.1 with key
 _SOURCE = "ncbi_taxonomy"
 _SOURCE_NUCCORE = "ncbi_nuccore"
+_SOURCE_PROTEINS = "ncbi_proteins"
+_GENBANK_BATCH_SIZE = 200
 
 
 class NCBITaxonomy:
@@ -160,6 +166,106 @@ class NCBITaxonomy:
             return result
         except Exception:
             return None
+
+    # ------------------------------------------------------------------
+    # Batched GenBank protein fetching
+    # ------------------------------------------------------------------
+
+    def fetch_proteins_batch(
+        self,
+        accessions: list[str],
+        batch_size: int = _GENBANK_BATCH_SIZE,
+    ) -> dict[str, list[dict]]:
+        """Fetch CDS protein annotations for nucleotide accessions.
+
+        Returns a mapping ``accession → [{"protein_id", "product", "length"}, ...]``.
+        Accessions with no record (or no CDS features) map to ``[]``.
+
+        Network calls are batched (up to ``batch_size`` per ``efetch``).
+        Per-accession results are cached under the ``ncbi_proteins`` source,
+        so subsequent runs incur no network cost for the same inputs.
+        """
+        results: dict[str, list[dict]] = {}
+        to_fetch: list[str] = []
+        for acc in accessions:
+            cached = self._cache.get(_SOURCE_PROTEINS, acc)
+            if cached is not None:
+                results[acc] = cached.get("proteins", [])
+            else:
+                to_fetch.append(acc)
+
+        for i in range(0, len(to_fetch), batch_size):
+            chunk = to_fetch[i : i + batch_size]
+            try:
+                fetched = self._fetch_genbank_chunk(chunk)
+            except Exception as exc:
+                logger.warning(
+                    "GenBank batch fetch failed for %d accessions: %s",
+                    len(chunk), exc,
+                )
+                fetched = {}
+
+            for acc in chunk:
+                proteins = fetched.get(acc, [])
+                self._cache.set(_SOURCE_PROTEINS, acc, {"proteins": proteins})
+                results[acc] = proteins
+
+        return results
+
+    def _fetch_genbank_chunk(self, accessions: list[str]) -> dict[str, list[dict]]:
+        """One efetch call → parsed CDS features per accession.
+
+        Records from NCBI carry version suffixes (e.g. ``MW626064.1``); we
+        match each parsed record back to the caller's accession with and
+        without the version.
+        """
+        from Bio import SeqIO
+
+        elapsed = time.time() - self._last_request
+        if elapsed < self._delay:
+            time.sleep(self._delay - elapsed)
+
+        params: dict[str, Any] = {
+            "db": "nuccore",
+            "id": ",".join(accessions),
+            "rettype": "gb",
+            "retmode": "text",
+        }
+        if self._email:
+            params["email"] = self._email
+        if self._api_key:
+            params["api_key"] = self._api_key
+
+        resp = requests.get(
+            f"{_ENTREZ_BASE}/efetch.fcgi", params=params, timeout=120,
+        )
+        self._last_request = time.time()
+        resp.raise_for_status()
+
+        by_acc_full: dict[str, list[dict]] = {}
+        by_acc_no_version: dict[str, list[dict]] = {}
+        for record in SeqIO.parse(StringIO(resp.text), "genbank"):
+            proteins: list[dict] = []
+            for feat in record.features:
+                if feat.type != "CDS":
+                    continue
+                q = feat.qualifiers
+                translation = q.get("translation", [None])[0]
+                proteins.append({
+                    "protein_id": q.get("protein_id", [None])[0],
+                    "product": q.get("product", [None])[0],
+                    "length": len(translation) if translation else None,
+                })
+            by_acc_full[record.id] = proteins
+            by_acc_no_version[record.id.split(".")[0]] = proteins
+
+        results: dict[str, list[dict]] = {}
+        for acc in accessions:
+            if acc in by_acc_full:
+                results[acc] = by_acc_full[acc]
+            else:
+                results[acc] = by_acc_no_version.get(acc.split(".")[0], [])
+        return results
 
 
 def _looks_like_protein_acc(acc: str) -> bool:

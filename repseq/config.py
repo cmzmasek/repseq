@@ -28,6 +28,13 @@ DEFAULTS: dict[str, Any] = {
             "max_length": None,
         },
         "ambiguous_threshold": 0.05,
+        "protein_annotation": {
+            # Drop sequences whose NCBI GenBank record has fewer than
+            # min_proteins annotated CDS features. Requires network access
+            # (skipped automatically with --no-resolve).
+            "enabled": False,
+            "min_proteins": 1,
+        },
         "annotation_filter": {
             "enabled": True,
             "keywords": [
@@ -157,6 +164,13 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     if not isinstance(thresh, (int, float)) or not (0 <= thresh <= 1):
         errors.append("qc.ambiguous_threshold must be a number between 0 and 1")
 
+    # Protein annotation QC
+    pa = cfg.get("qc", {}).get("protein_annotation", {})
+    if pa.get("enabled"):
+        mp = pa.get("min_proteins")
+        if not isinstance(mp, int) or mp < 0:
+            errors.append("qc.protein_annotation.min_proteins must be a non-negative integer")
+
     # Segmented virus
     seg = cfg.get("segmented", {})
     if seg.get("enabled"):
@@ -176,6 +190,27 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                         errors.append(
                             f"segmented.viruses.{virus_name} missing required field '{field}'"
                         )
+                epps = vdef.get("expected_proteins_per_segment")
+                if epps is not None:
+                    if not isinstance(epps, dict):
+                        errors.append(
+                            f"segmented.viruses.{virus_name}.expected_proteins_per_segment "
+                            f"must be a mapping of segment-name → int"
+                        )
+                    else:
+                        seg_names = set(vdef.get("segments", []))
+                        for seg_name, count in epps.items():
+                            if seg_name not in seg_names:
+                                errors.append(
+                                    f"segmented.viruses.{virus_name}."
+                                    f"expected_proteins_per_segment: unknown segment '{seg_name}'"
+                                )
+                            if not isinstance(count, int) or count < 0:
+                                errors.append(
+                                    f"segmented.viruses.{virus_name}."
+                                    f"expected_proteins_per_segment.{seg_name} "
+                                    f"must be a non-negative integer"
+                                )
 
     # Clustering backend
     backend = cfg.get("clustering", {}).get("backend")

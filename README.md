@@ -85,7 +85,7 @@ parse + auto-detect source (UniProt / NCBI / NCBI Virus)
 resolve taxonomy & metadata        (NCBI Entrez + UniProt, SQLite cached)
     │
     ▼
-QC: duplicates → length → ambiguous chars → annotation keyword filter
+QC: duplicates → length → ambiguous chars → annotation keyword → protein-count (optional)
     │
     ▼
 [optional] segmented-virus completeness filter (concatenates segments per isolate)
@@ -113,6 +113,7 @@ Each run writes four files to `output.dir` (default `./repseq_output/`):
 | `{prefix}_clusters.tsv` | Per-cluster summary (cluster ID, representative, size) |
 | `{prefix}_qc_removed.tsv` | Sequences removed by QC and the reason |
 | `{prefix}_run.log` | Plain-text run summary: parameters (YAML), QC stats, output file list |
+| `{prefix}_isolate_proteins.tsv` | (Segmented + protein QC) One row per annotated CDS per passing isolate: `isolate_id, segment, accession, protein_id, product, length` |
 
 Segmented-virus runs additionally produce `{prefix}_concatenated.fasta` and one `{prefix}_segment_{name}.fasta` per segment.
 
@@ -128,6 +129,34 @@ For multi-segment viruses (e.g. influenza), `repseq` can:
 4. Write back both the concatenated FASTA and one FASTA per segment.
 
 Configure under `segmented:` and enable with `--segmented`. See `config/examples/influenza_a.yaml`.
+
+---
+
+## Protein-annotation QC (optional)
+
+An optional pre-clustering step fetches GenBank CDS counts from NCBI and
+drops sequences with insufficient or unexpected protein annotations:
+
+```yaml
+qc:
+  protein_annotation:
+    enabled: true       # off by default — opt in
+    min_proteins: 1     # global floor: drop any sequence with fewer CDS features
+
+segmented:
+  viruses:
+    influenza_a:
+      # Per-segment exact-count filter (segmented mode only)
+      expected_proteins_per_segment:
+        HA: 1
+        M:  2   # M1 + M2
+        NS: 2   # NS1 + NEP
+        # …
+```
+
+GenBank records are fetched in **batches of 200 accessions per request**
+and cached in the same SQLite store as taxonomy lookups, so subsequent runs
+on the same dataset are network-free. Skipped automatically with `--no-resolve`.
 
 ---
 
