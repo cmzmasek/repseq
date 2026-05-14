@@ -13,12 +13,11 @@ _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 
 
 def _extract_year(seq: Sequence) -> Optional[int]:
-    date = seq.collection_date or ""
-    m = _YEAR_RE.search(date)
-    if m:
-        return int(m.group(1))
-    # Try strain/header
-    for text in (seq.strain or "", seq.header):
+    # collection_date first, then the strain label (e.g. influenza
+    # A/host/place/n/YEAR). The raw header is deliberately NOT scanned: a
+    # stray 4-digit number there — a clone ID, an accession, a passage
+    # number — is too easily mistaken for a collection year.
+    for text in (seq.collection_date or "", seq.strain or ""):
         m = _YEAR_RE.search(text)
         if m:
             return int(m.group(1))
@@ -59,6 +58,18 @@ class TimeMode(BaseMode):
         overflow: str = "keep",
     ) -> None:
         super().__init__(cfg)
+        if window not in ("year", "decade"):
+            try:
+                size = int(window)
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"time window must be 'year', 'decade', or a positive "
+                    f"integer bin size; got {window!r}"
+                )
+            if size <= 0:
+                raise ValueError(
+                    f"time window bin size must be positive; got {window!r}"
+                )
         self.n_per_window = n_per_window
         self.window = window
         self.overflow = overflow
@@ -75,7 +86,8 @@ class TimeMode(BaseMode):
                 all_reps.extend(group_seqs)
             else:
                 reps, _ = _binary_search_threshold(
-                    group_seqs, self.n_per_window, self.cfg, self.overflow  # type: ignore[arg-type]
+                    group_seqs, self.n_per_window, self.cfg, self.overflow,  # type: ignore[arg-type]
+                    label=label,
                 )
                 all_reps.extend(reps)
                 for rep in reps:

@@ -154,13 +154,31 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
 
 ## Status
 
-`v0.3.0`. All 8 modes structurally complete, optional protein-annotation
+`v0.5.0`. All 8 modes structurally complete, optional protein-annotation
 QC (batched GenBank fetch + per-segment count check), a protein-FASTA
-output reconstructed from cached records, and an optional UMAP scatter
-of the clustering result (`--plot`, behind the `[viz]` extras:
-`matplotlib` + `umap-learn`). 107 offline regression tests cover IO, QC,
-selector, segmented logic, cache TTL, config validation, diversity
-selection, resolver fallback, mode dispatch (clustering mocked), protein
-parser + filter, FASTA writer, segment aliases, and the clustering plot
+output reconstructed from cached records, per-segment nucleotide length
+bounds (`segment_lengths` in virus config, applied after completeness
+filter), and an optional UMAP scatter of the clustering result (`--plot`,
+behind the `[viz]` extras: `matplotlib` + `umap-learn`). In segmented mode
+the whole-pool QC length filter is skipped automatically (mixed segment
+lengths make a pooled median meaningless and would drop short segments,
+leaving every isolate incomplete) — use `segment_lengths` instead. Every
+run ends with a one-line CLI summary (representatives/clusters selected, QC
+pass rate) or, when nothing is selected, a stderr warning naming the most
+likely cause (`cli._final_summary`). 145 offline regression tests cover IO,
+QC, selector, segmented logic (including per-segment length filtering),
+cache TTL, config validation, diversity selection, resolver fallback, mode
+dispatch (clustering mocked), protein parser + filter, FASTA writer, segment
+aliases, the closing CLI summary, and the clustering plot
 (auto-skipped if `umap-learn` is missing). NCBI Entrez paths have been
 live-tested against the H1N1 RefSeq genome (8 segments, 11 proteins).
+
+A full pipeline audit (see git history around this note) fixed, with
+regression tests: clustering ID round-trip for UniProt/CONCAT inputs,
+RefSeq-nucleotide accession misrouting, the `MAG:` keyword filter, an
+**inverted binary-search direction** (the threshold↔cluster-count
+relationship was backwards, so `n-per-group` searches walked away from
+the target), NCBI host/country/date now harvested from esummary
+`subtype`/`subname` with the DB taking precedence over header heuristics,
+a length-robust containment distance for diversity selection, thread-safe
+caches and rate limiters, and assorted QC/parsing corrections.

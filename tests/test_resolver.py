@@ -5,7 +5,32 @@ from unittest.mock import MagicMock
 
 from repseq.models import SequenceSource, TaxonomyInfo
 from repseq.taxonomy.cache import TaxonomyCache
+from repseq.taxonomy.ncbi import _looks_like_protein_acc
 from repseq.taxonomy.resolver import MetadataResolver, _parse_strain_label
+
+
+# ---------------------------------------------------------------------------
+# Accession-type detection (picks the Entrez db: nuccore vs protein)
+# ---------------------------------------------------------------------------
+
+def test_looks_like_protein_acc_refseq_protein_prefixes():
+    # NP_/XP_/YP_/WP_/AP_ are RefSeq *protein* accessions.
+    for acc in ("NP_040980.1", "XP_001234.2", "YP_009725.1", "WP_000123.1"):
+        assert _looks_like_protein_acc(acc) is True
+
+
+def test_looks_like_protein_acc_refseq_nucleotide_not_protein():
+    # Regression: RefSeq *nucleotide* prefixes must NOT be treated as
+    # protein, or fetch_accession_metadata queries the wrong Entrez db
+    # and resolves no metadata for curated RefSeq genomes.
+    for acc in ("NC_026433.1", "NM_000546.6", "NG_007114.1",
+                "NR_003286.4", "NW_000001.1", "NZ_CP000001.1", "XM_011.1"):
+        assert _looks_like_protein_acc(acc) is False
+
+
+def test_looks_like_protein_acc_genbank():
+    assert _looks_like_protein_acc("AAA12345") is True       # GenBank protein
+    assert _looks_like_protein_acc("MW626064.1") is False    # GenBank nucleotide
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +116,77 @@ def test_resolve_populates_taxonomy_from_db(tmp_cache_dir, make_seq):
     assert isinstance(s.taxonomy, TaxonomyInfo)
     assert s.taxonomy.genus == "Alphainfluenzavirus"
     assert s.taxonomy.family == "Orthomyxoviridae"
+
+
+def test_resolve_db_value_overrides_header_parsed_field(tmp_cache_dir, make_seq):
+    # H2 regression: the authoritative database value must win over the
+    # heuristic header parse. Previously the resolver only filled EMPTY
+    # fields, so a wrong header guess blocked the correct DB value.
+    cache = TaxonomyCache(tmp_cache_dir)
+    ncbi = MagicMock()
+    ncbi.fetch_accession_metadata.return_value = {
+        "organism": "Influenza A virus",
+        "host": "Gallus gallus",
+        "country": "Viet Nam",
+    }
+    uniprot = MagicMock()
+    resolver = MetadataResolver(cache, ncbi, uniprot, threads=1)
+    # seq carries values a fragile header parse might have produced
+    s = make_seq("s1", "ACGT", source=SequenceSource.NCBI,
+                 host="H5N1", country="USA")
+    resolver.resolve(s)
+    assert s.host == "Gallus gallus"
+    assert s.country == "Viet Nam"
+
+
+def test_resolve_keeps_header_value_when_db_field_absent(tmp_cache_dir, make_seq):
+    # The DB only overrides fields it actually provides; a header-derived
+    # value is retained when the database has nothing for that field.
+    cache = TaxonomyCache(tmp_cache_dir)
+    ncbi = MagicMock()
+    ncbi.fetch_accession_metadata.return_value = {"organism": "Foo virus"}
+    uniprot = MagicMock()
+    resolver = MetadataResolver(cache, ncbi, uniprot, threads=1)
+    s = make_seq("s1", "ACGT", source=SequenceSource.NCBI, host="duck")
+    resolver.resolve(s)
+    assert s.host == "duck"
+
+
+def test_fetch_accession_metadata_parses_source_qualifiers(tmp_cache_dir):
+    # H1 regression: host/country/collection_date/strain must be harvested
+    # from the esummary subtype/subname fields, not left to header parsing.
+    from repseq.taxonomy.ncbi import NCBITaxonomy
+
+    cache = TaxonomyCache(tmp_cache_dir)
+    ncbi = NCBITaxonomy(cache)
+
+    def fake_get(endpoint, params):
+        if endpoint == "esearch.fcgi":
+            return {"esearchresult": {"idlist": ["999"]}}
+        if endpoint == "esummary.fcgi" and params.get("db") == "taxonomy":
+            return {"result": {"111": {"lineageex": [
+                {"rank": "genus", "scientificname": "Alphainfluenzavirus"},
+                {"rank": "family", "scientificname": "Orthomyxoviridae"},
+            ]}}}
+        if endpoint == "esummary.fcgi":
+            return {"result": {"999": {
+                "organism": "Influenza A virus",
+                "taxid": 111,
+                "title": "Influenza A virus segment 4",
+                "subtype": "strain|host|country|collection_date",
+                "subname": "A/duck/Vietnam/1/2005|Gallus gallus|Viet Nam|2005-01",
+            }}}
+        raise AssertionError(f"unexpected _get({endpoint!r}, {params!r})")
+
+    ncbi._get = fake_get  # type: ignore[assignment]
+    meta = ncbi.fetch_accession_metadata("MW000001.1")
+
+    assert meta["organism"] == "Influenza A virus"
+    assert meta["host"] == "Gallus gallus"
+    assert meta["country"] == "Viet Nam"
+    assert meta["collection_date"] == "2005-01"
+    assert meta["strain"] == "A/duck/Vietnam/1/2005"
+    assert meta["lineage"]["genus"] == "Alphainfluenzavirus"
 
 
 # ---------------------------------------------------------------------------

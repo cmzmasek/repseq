@@ -1,263 +1,387 @@
 # repseq
 
-**Representative sequence selection for large bioinformatics datasets.**
+**Pick a small, clean, representative set of sequences out of a big messy FASTA file.**
 
-`repseq` curates a small, diverse, high-quality reference set from large FASTA
-dumps (UniProt, NCBI, NCBI Virus). It handles QC, taxonomy resolution,
-optional segmented-virus completeness filtering, and a choice of stratified
-selection strategies — useful for phylogenetics, ML training sets, and
-reference-database construction.
+You downloaded 80,000 influenza sequences from NCBI. You need 200 good ones that
+still cover the real diversity — for a tree, for a figure, for a training set, or
+to seed a curated reference database. Doing that by hand is miserable. `repseq`
+does it for you: it cleans up the data, looks up what each sequence actually is,
+groups similar sequences together, and keeps one good example from each group.
+
+It works on protein **or** nucleotide FASTA files, from UniProt, NCBI, or NCBI
+Virus, and it has a strong focus on viral sequences (including segmented viruses
+like influenza).
+
+---
+
+## What "representative selection" means here
+
+If you have 5,000 nearly-identical H3N2 sequences and 3 unusual ones, a random
+sample of 200 will be 200 H3N2 sequences and you'll lose the unusual ones.
+`repseq` instead:
+
+1. **Cleans** — drops duplicates, truncated junk, sequences full of `N`s, and
+   records labelled "hypothetical", "synthetic", "partial", etc.
+2. **Identifies** — looks up each sequence's organism, host, country, and
+   collection date from NCBI/UniProt (results are cached, so it's only slow once).
+3. **Groups** — buckets the sequences (by how similar they are, or by genus, host,
+   year, country… your choice).
+4. **Keeps the best example from each group** — preferring curated records
+   (RefSeq, reviewed UniProt) over random ones, and longer over shorter.
+
+The result is a FASTA file that's small enough to work with but still spans the
+diversity that was in the original.
 
 ---
 
 ## Installation
 
+You need **Python 3.10 or newer**. Then:
+
 ```bash
-# Clone and install in editable mode (recommended for development)
 git clone https://github.com/cmzmasek/repseq.git
 cd repseq
 pip install -e .
-
-# Or install directly from GitHub
-pip install git+https://github.com/cmzmasek/repseq.git
-
-# With the optional visualization extras (matplotlib + umap-learn)
-pip install -e '.[viz]'
 ```
 
-Requires **Python ≥ 3.10** and the external **[MMseqs2](https://github.com/soedinglab/MMseqs2)** binary in `PATH` (only needed for clustering-based modes).
+That's it for most uses. Two optional pieces:
+
+**MMseqs2** — a fast sequence-clustering program. `repseq` calls it to group
+sequences *by similarity*. You only need it for the similarity-based modes (see
+the table below); if you group by genus/host/year and your groups are small, or
+you just want N diverse sequences, you can skip it. Install it with:
 
 ```bash
-# macOS
-brew install mmseqs2
-# Linux (conda)
-conda install -c bioconda mmseqs2
+brew install mmseqs2                       # macOS
+conda install -c bioconda mmseqs2          # Linux (conda)
+```
+
+`repseq` finds it automatically as long as `mmseqs` is on your `PATH` (i.e. you
+can type `mmseqs` in a terminal and it runs).
+
+**Plots** — if you want the optional diagnostic scatter plot of the clustering
+result:
+
+```bash
+pip install -e '.[viz]'
 ```
 
 ---
 
 ## Quickstart
 
-Generate a config:
+**Step 1 — make a config file.** This is a small text file with your settings
+(cleaning thresholds, your NCBI email, etc.). A wizard asks you the questions:
 
 ```bash
 repseq init-config -o my_config.yaml
 ```
 
-Pick a mode and run:
+**Step 2 — run a mode.** Point it at your FASTA file and pick how to select:
 
 ```bash
-# Cluster at 90% identity, keep representatives
+# Keep one sequence per cluster of 90%-identical sequences
 repseq global -c my_config.yaml -i seqs.fasta -T 0.90
 
-# Up to 5 representatives per genus
+# Keep up to 5 sequences per genus
 repseq taxonomic1 -c my_config.yaml -i seqs.fasta -r genus -n 5
 
-# 10 representatives per host organism
+# Keep up to 10 sequences per host species
 repseq host -c my_config.yaml -i seqs.fasta -n 10
 ```
 
----
+When it finishes you'll see a one-line summary — how many sequences passed
+cleaning and how many representatives were selected. If *nothing* came out, it
+tells you the most likely reason (see [Troubleshooting](#troubleshooting)).
 
-## Selection modes
-
-| Command | What it does |
-| --- | --- |
-| `global` | One pass: cluster at threshold `-T`, or pick `-n` diverse sequences. |
-| `taxonomic1` | `-n` per group at a single rank (`--rank genus`, etc.). |
-| `taxonomic2` | Hierarchical multi-rank: `-r '[{"rank":"family","n_per_group":20},{"rank":"genus","n_per_group":5}]'`. |
-| `host` | `-n` per host organism. |
-| `time` | `-n` per time window (`--window year`, `decade`, or `5` for 5-year bins). |
-| `geographic` | `-n` per country. |
-| `custom` | `-n` per any field — from taxonomy, sequence attributes, or a metadata TSV. |
-| `hybrid` | `-n` per multi-dimensional stratum (e.g. `--fields genus,host,decade`). |
-
-All commands share these options: `--input/-i`, `--output-dir/-o`, `--config/-c`, `--threads`, `--seed`, `--segmented`, `--dry-run`, `--no-resolve`, `--source {auto,uniprot,ncbi,ncbi_virus}`, `--overflow {keep,trim}`, `--plot`.
+> **Tip:** add `--no-resolve` while you're experimenting. It skips the NCBI/UniProt
+> lookups, so runs are fast — at the cost of not knowing each sequence's
+> organism/host/country. Drop it for the real run.
 
 ---
 
-## Pipeline
+## Choosing a mode
+
+A "mode" is just *how you want the sequences grouped before one is picked from
+each group*. All modes take `-i` (input), `-c` (config), and most take `-n`
+(how many to keep per group).
+
+| Command | What it does | Use it when… |
+| --- | --- | --- |
+| `global` | One big pass over everything. Either cluster at a similarity threshold `-T` (e.g. `-T 0.95` = group sequences ≥95% identical), or just ask for `-n` maximally-different sequences. | You want a flat, even sampling of the whole dataset. |
+| `taxonomic1` | Up to `-n` sequences per taxonomic rank — `--rank genus`, `family`, `species`, etc. | You want even coverage across the tree of life (or of viruses). |
+| `taxonomic2` | Like `taxonomic1` but **nested**: e.g. 20 per family, then 5 per genus within each. | One rank isn't enough — you want a hierarchy. |
+| `host` | Up to `-n` sequences per host organism. | You care about which host the virus came from. |
+| `time` | Up to `-n` per time window — `--window year`, `decade`, or a number like `5` for 5-year bins. | You want even coverage across collection dates. |
+| `geographic` | Up to `-n` per country. | You want even geographic coverage. |
+| `custom` | Up to `-n` per *any* field — a sequence attribute, a taxonomy rank, or a column in a metadata spreadsheet you provide. | Your grouping isn't one of the built-ins. |
+| `hybrid` | Up to `-n` per *combination* of fields, e.g. `--fields genus,host,decade`. | You want a balanced grid across several variables at once. |
+
+**Within each group**, if the group already has `-n` or fewer sequences, all of
+them are kept. If it's bigger, `repseq` clusters it down to about `-n`
+representatives. Add `--overflow trim` if you need *exactly* `-n` and not "about
+`-n`".
+
+Every mode also accepts: `--input/-i`, `--output-dir/-o`, `--config/-c`,
+`--threads`, `--seed`, `--segmented`, `--dry-run`, `--no-resolve`,
+`--source {auto,uniprot,ncbi,ncbi_virus}`, `--overflow {keep,trim}`, `--plot`.
+
+---
+
+## What happens during a run
 
 ```
-input FASTA(s)
-    │
-    ▼
-parse + auto-detect source (UniProt / NCBI / NCBI Virus)
-    │
-    ▼
-resolve taxonomy & metadata        (NCBI Entrez + UniProt, SQLite cached)
-    │
-    ▼
-QC: duplicates → length → ambiguous chars → annotation keyword → protein-count (optional)
-    │
-    ▼
-[optional] segmented-virus completeness filter (concatenates segments per isolate)
-    │
-    ▼
-mode-specific selection (clustering via MMseqs2 + diversity / stratification)
-    │
-    ▼
-representative selection: RefSeq > reviewed UniProt > longest
-    │
-    ▼
-output FASTA(s) + TSV metadata + plain-text run log
+your FASTA file(s)
+        │
+        ▼
+  read it, figure out the format (UniProt / NCBI / NCBI Virus)
+        │
+        ▼
+  look up organism, host, country, date     (from NCBI & UniProt, cached locally)
+        │
+        ▼
+  clean: drop duplicates → too-short/long → too many ambiguous chars
+         → bad-keyword annotations → (optional) wrong protein count
+        │
+        ▼
+  (optional) segmented-virus step: keep only isolates that have ALL segments
+        │
+        ▼
+  group + pick the best representative from each group
+        │
+        ▼
+  write: representative FASTA + metadata tables + a plain-text run log
 ```
+
+The run log (`{prefix}_run.log`) records exactly what settings were used and what
+got dropped at each step — keep it with your results so the selection is
+reproducible.
 
 ---
 
 ## Output files
 
-Each run writes these files to `output.dir` (default `./repseq_output/`):
+Everything is written to the output directory (`./repseq_output/` by default):
 
-| File | Contents |
+| File | What's in it |
 | --- | --- |
-| `{prefix}_representatives.fasta` | Selected representative sequences |
-| `{prefix}_representatives.tsv` | Metadata for each representative (accession, organism, host, country, date, taxonomy ranks, …) |
-| `{prefix}_clusters.tsv` | Per-cluster summary (cluster ID, representative, size) |
-| `{prefix}_qc_removed.tsv` | Sequences removed by QC and the reason |
-| `{prefix}_run.log` | Plain-text run summary: parameters (YAML), QC stats, output file list |
-| `{prefix}_isolate_proteins.tsv` | (Segmented + protein QC) One row per annotated CDS per passing isolate: `isolate_id, segment, accession, protein_id, product, length` |
-| `{prefix}_proteins.fasta` | (Protein QC enabled) All protein amino-acid sequences from the selected representatives, in a single FASTA. Tagged headers: `>protein_id product [isolate=…] [segment=…] [parent=accession]` |
-| `{prefix}_clustering.png` | (`--plot`, `[viz]` extras) Two-panel UMAP scatter — left colored by genus, right colored by cluster with `√(cluster size)` point scaling, member→rep lines, and an inset cluster-size histogram |
+| `{prefix}_representatives.fasta` | **The main result** — your selected sequences. |
+| `{prefix}_representatives.tsv` | A spreadsheet: one row per representative, with accession, organism, host, country, date, taxonomy. Opens in Excel. |
+| `{prefix}_clusters.tsv` | Which sequences ended up grouped together, and which one was picked. |
+| `{prefix}_qc_removed.tsv` | Every sequence that was dropped during cleaning, and *why*. Check this if you lost more than expected. |
+| `{prefix}_run.log` | Plain-text record of the settings used and the per-step counts. |
+| `{prefix}_proteins.fasta` | *(if protein QC is on)* The protein sequences of all your representatives. |
+| `{prefix}_isolate_proteins.tsv` | *(segmented + protein QC)* One row per gene per kept isolate. |
+| `{prefix}_clustering.png` | *(if `--plot`)* A diagnostic scatter plot of the clustering — see below. |
 
-Segmented-virus runs additionally produce `{prefix}_concatenated.fasta` and one `{prefix}_segment_{name}.fasta` per segment.
+Segmented-virus runs also write `{prefix}_concatenated.fasta` (all segments of an
+isolate joined head-to-tail) and one `{prefix}_segment_<name>.fasta` per segment.
 
 ---
 
-## Segmented virus mode
+## Cleaning (QC) — what gets dropped and how to control it
 
-For multi-segment viruses (e.g. influenza), `repseq` can:
+All cleaning settings live under `qc:` in your config file. Defaults are sensible;
+loosen them if you're losing sequences you want to keep.
 
-1. Group sequences by isolate (regex on the header).
-2. Identify each sequence's segment by its **canonical name, numeric index,
-   or any user-defined synonym** (e.g. `large segment` → `L`, `hemagglutinin` → `HA`).
-3. Keep only isolates that have **all** expected segments.
-4. Concatenate per-isolate segments into a single sequence for clustering.
-5. Write back both the concatenated FASTA and one FASTA per segment.
+```yaml
+qc:
+  remove_duplicates: true        # drop byte-identical sequences (keeps the curated copy)
 
-Configure under `segmented:` and enable with `--segmented`:
+  length_filter:
+    mode: median_percent         # judge length relative to the dataset's median…
+    min_percent: 50              #   …drop anything shorter than 50% of the median
+    # max_percent: 200           #   …optionally also drop anything over 200%
+    # ── or ──
+    # mode: min_max              # judge length against fixed numbers instead
+    # min_length: 1000
+    # max_length: 20000
+
+  ambiguous_threshold: 0.05      # drop sequences that are >5% N / X / other ambiguous letters
+
+  annotation_filter:
+    enabled: true
+    keywords: ["MAG:", synthetic, partial, hypothetical, fragment, uncultured, ...]
+    # any sequence whose description contains one of these words is dropped
+```
+
+A few things worth knowing:
+
+- **`median_percent` compares every sequence to the median length of the whole
+  file.** That's perfect for a single gene, but **wrong for a mixed file** (e.g.
+  several different genes, or a whole genome plus its individual genes) — the
+  median is meaningless and you'll drop things unfairly. For mixed files, use
+  `min_max` with explicit numbers instead.
+- **In segmented-virus mode, the whole-file length filter is skipped
+  automatically** — a file of influenza segments mixes 2,300-nt and 890-nt
+  sequences, so a single median can't work. Use per-segment length bounds instead
+  (see below).
+
+---
+
+## Segmented viruses (influenza, etc.)
+
+Segmented viruses store their genome in several separate pieces. NCBI gives you
+one FASTA record per segment, so a single isolate is spread across multiple
+records. `repseq` can stitch them back together:
+
+1. **Group records by isolate** — using a pattern (regex) that matches the strain
+   name in the header.
+2. **Identify each record's segment** — by its name, its number, or a synonym you
+   define (e.g. `hemagglutinin` → `HA`).
+3. **Keep only complete isolates** — an isolate missing any expected segment is
+   dropped.
+4. **(Optional) length-check each segment** — drop an isolate if, say, its HA
+   segment is suspiciously short.
+5. **Concatenate** the segments of each complete isolate into one sequence, so the
+   normal grouping/selection can run on whole isolates.
+
+Configure it under `segmented:` and turn it on with `--segmented` on the command
+line (or `enabled: true` in the config):
 
 ```yaml
 segmented:
-  enabled: false                  # or pass --segmented per-run
-  virus: influenza_a
+  enabled: false
+  virus: influenza_a              # which entry below to use
   viruses:
     influenza_a:
       expected_segments: 8
-      segments: [PB2, PB1, PA, HA, NP, NA, M, NS]
+      segments: [PB2, PB1, PA, HA, NP, NA, M, NS]   # canonical order
       isolate_regex: "(?P<isolate>[AB]/[^/(\\s]+/[^/(\\s]+/[^/(\\s]+/\\d{4})"
-      segment_aliases:            # optional: synonyms recognised in headers
+      segment_aliases:            # optional: words in headers that mean a segment
         HA: [hemagglutinin]
         NA: [neuraminidase]
         NP: [nucleoprotein, "nucleocapsid protein"]
+      segment_lengths:            # optional: drop an isolate if a segment is out of range
+        HA: {min: 1600, max: 1800}
+        NS: {min: 800,  max: 1000}
 ```
 
-See `config/examples/influenza_a.yaml` for a fully annotated example.
+`config/examples/influenza_a.yaml` is a complete, commented example you can copy.
+
+> The `isolate_regex` is the part people get wrong most often. It has to match the
+> strain identifier as it appears in *your* headers, and it must capture it either
+> as a group named `isolate` or as the first parenthesised group. If no isolates
+> come through, this is the first thing to check.
 
 ---
 
-## Clustering visualization (optional)
+## Optional: protein-annotation QC
 
-Pass `--plot` to render a two-panel UMAP scatter alongside the standard
-outputs:
-
-```bash
-repseq taxonomic1 -c my.yaml -i seqs.fasta -r genus -n 5 --plot
-```
-
-- **Left panel** — every clustered sequence embedded with UMAP on a k-mer
-  Jaccard distance, colored by genus (top 10 + "Other").
-- **Right panel** — same coordinates, colored by cluster, with point size
-  scaling with `√(cluster size)`. Faint lines link each member to its
-  representative; representatives are outlined in black. An inset histogram
-  shows the cluster-size distribution.
-
-For large runs the embedding is subsampled (default cap 2000 points;
-representatives always kept) and the member→rep lines are auto-suppressed
-above 500 non-rep points to avoid spaghetti.
-
-Requires `pip install 'repseq[viz]'`. Skipped silently for diversity-only
-runs (`global -n`) since those produce no clusters to visualize.
-
----
-
-## Protein-annotation QC (optional)
-
-An optional pre-clustering step fetches GenBank CDS counts from NCBI and
-drops sequences with insufficient or unexpected protein annotations:
+This step asks NCBI how many protein-coding genes (CDS features) each record has,
+and drops records with too few — or, for segmented viruses, the wrong number per
+segment. It's off by default; turn it on in the config:
 
 ```yaml
 qc:
   protein_annotation:
-    enabled: true       # off by default — opt in
-    min_proteins: 1     # global floor: drop any sequence with fewer CDS features
+    enabled: true
+    min_proteins: 1     # drop any record with fewer annotated proteins than this
 
 segmented:
   viruses:
     influenza_a:
-      # Per-segment protein-count filter (segmented mode only).
-      # Each value is either an int (exact count required) or a list
-      # of ints (any of the listed counts is acceptable — useful for
-      # strain variation, e.g. nonfunctional PB1-F2 in 2009 H1N1).
       expected_proteins_per_segment:
         HA: 1
-        M:  2          # M1 + M2
-        PB1: [1, 2]    # PB1 alone, or PB1 + PB1-F2
-        NS: [1, 2]     # NS1 alone, or NS1 + NEP
-        # …
+        M:  2           # M1 + M2
+        PB1: [1, 2]     # PB1 alone, or PB1 + PB1-F2 — a list means "any of these"
+        NS: [1, 2]      # NS1 alone, or NS1 + NEP
 ```
 
-GenBank records are fetched in **batches of 200 accessions per request**
-and cached in the same SQLite store as taxonomy lookups, so subsequent runs
-on the same dataset are network-free. Skipped automatically with `--no-resolve`.
-
-Translations from each CDS are captured alongside the metadata so the
-optional `{prefix}_proteins.fasta` output requires no additional network
-calls — everything is reconstructed from the same cached records.
+Records are fetched from NCBI in batches and cached locally, so a second run on
+the same data needs no network. Skipped automatically under `--no-resolve`.
 
 ---
 
-## Config
+## Optional: clustering plot
 
-`config/default_config.yaml` documents every option. Highlights:
+Pass `--plot` (and install with `'.[viz]'`) to get a two-panel scatter plot,
+`{prefix}_clustering.png`, that lets you eyeball whether the clustering looks
+sensible:
+
+- **Left** — every sequence as a dot, positioned so similar sequences sit close
+  together, coloured by genus.
+- **Right** — the same dots, coloured by cluster, with bigger dots for bigger
+  clusters and faint lines from each sequence to its chosen representative.
+
+For big datasets the plot is drawn from a subsample (the representatives are
+always included). It's skipped for `global -n` runs, which produce no clusters.
+
+---
+
+## The config file
+
+`config/default_config.yaml` is fully commented and documents every option — read
+that file as the reference. The `repseq init-config` wizard writes a starter
+config for you. The most-changed settings:
 
 ```yaml
 qc:
   remove_duplicates: true
   length_filter:
-    mode: median_percent     # or "min_max"
+    mode: median_percent
     min_percent: 50
   ambiguous_threshold: 0.05
-  annotation_filter:
-    enabled: true
-    keywords: ["MAG:", synthetic, partial, hypothetical, ...]
+
+taxonomy:
+  ncbi_email: you@institute.org   # NCBI asks for this; without it you'll be rate-limited
+  ncbi_api_key: null              # optional — get one from NCBI for faster lookups
 
 clustering:
-  backend: mmseqs2
-  mmseqs2_mode: easy-linclust   # or easy-cluster
+  mmseqs2_mode: easy-linclust     # fast; use easy-cluster for tighter, slower clustering
   coverage: 0.8
 
 representative:
-  priority: [refseq, reviewed_uniprot, longest]
+  priority: [refseq, reviewed_uniprot, longest]   # tie-break order for picking the "best"
 ```
 
-Environment variables `REPSEQ_NCBI_EMAIL` and `REPSEQ_NCBI_API_KEY` override `taxonomy.ncbi_email` / `taxonomy.ncbi_api_key`.
+You can also set your NCBI email/key via the environment variables
+`REPSEQ_NCBI_EMAIL` and `REPSEQ_NCBI_API_KEY` instead of putting them in the file.
 
 ---
 
-## Cache management
+## The local cache
 
-Taxonomy and protein-annotation lookups are cached in a SQLite DB
-(default `~/.repseq/cache/taxonomy.db`):
+Every NCBI/UniProt lookup is saved to a small database (`~/.repseq/cache/` by
+default) so you only pay the network cost once. Manage it with:
 
 ```bash
-repseq cache stats
-repseq cache purge-expired
-repseq cache clear --source ncbi_taxonomy
-repseq cache clear --source ncbi_nuccore
-repseq cache clear --source ncbi_proteins    # batched GenBank/CDS records
-repseq cache clear --source uniprot
+repseq cache stats                           # how big is it, what's in it
+repseq cache purge-expired                   # remove stale entries
+repseq cache clear                           # wipe everything
+repseq cache clear --source ncbi_taxonomy    # wipe just one kind of lookup
 ```
+
+---
+
+## Troubleshooting
+
+**"WARNING: no representative sequences were selected."**
+The run finished but nothing came out. `repseq` prints the most likely cause; the
+usual ones are:
+
+- *No sequences were loaded* — the input path is wrong, the file is empty, or its
+  header format wasn't recognised. Try `--source ncbi_virus` (or `ncbi` /
+  `uniprot`) to force it.
+- *QC removed everything* — your cleaning thresholds are too strict for this data.
+  Look at `{prefix}_qc_removed.tsv` to see which step did it, then loosen that
+  setting. A common one: `median_percent` length filtering on a mixed-gene file —
+  switch to `min_max`.
+- *The segmented step dropped everything* — no isolate had all its segments. Most
+  often the `isolate_regex` doesn't match your headers; also check the segment
+  names/aliases and any `segment_lengths` bounds.
+
+**`MMseqs2Error` / "mmseqs not found"** — the similarity-clustering program isn't
+installed or isn't on your `PATH`. Install it (see [Installation](#installation)),
+or use a mode that doesn't need it (`global -n`, or a stratified mode where every
+group is already small).
+
+**Everything is grouped under "Unknown"** in a taxonomic/host/geographic run — the
+metadata lookups didn't run or didn't find anything. Don't use `--no-resolve` for
+the real run, and make sure your `ncbi_email` is set in the config.
+
+**Lookups are slow the first time** — that's expected; they're cached, so the
+*second* run on the same data is fast. An NCBI API key speeds up the first run.
 
 ---
 
@@ -268,16 +392,31 @@ pip install pytest
 pytest tests/
 ```
 
-Tests run offline — all network calls (NCBI, UniProt) are mocked.
+The tests run fully offline — all network calls are simulated — so they're safe
+to run anywhere and finish in a couple of seconds.
 
 ---
 
 ## Status
 
-`v0.3.0` — all 8 selection modes implemented, optional protein-annotation
-QC with batched GenBank fetching, per-segment count checks (int or list-of-int),
-segment-name synonyms, a protein FASTA writer reconstructed from cached
-records, and an optional UMAP visualization of the clustering result
-(`--plot`, behind the `[viz]` extras). **107 offline regression tests pass.**
-The NCBI-backed paths have been exercised end-to-end against live Entrez
-(influenza A H1N1 RefSeq genome, 8 segments + 11 proteins).
+**`v0.5.0`** — all 8 selection modes, optional protein-annotation QC (with
+per-segment counts and per-segment length bounds), segment-name synonyms, a
+protein-FASTA output, and an optional UMAP plot of the clustering.
+
+New in this release:
+
+- **Clearer endings.** Every run finishes with a one-line summary (how many
+  sequences passed cleaning, how many representatives were selected) — or, if
+  nothing came out, a warning naming the most likely cause.
+- **Smarter segmented-virus cleaning.** The whole-file length filter is now
+  skipped automatically in segmented mode, where a single median length is
+  meaningless and would wrongly discard the short segments. Use per-segment
+  `segment_lengths` instead.
+
+This release also folds in a full pipeline audit — corrected sequence-ID handling
+through clustering, RefSeq accession routing, the `MAG:` keyword filter, the
+similarity-threshold search direction, NCBI host/country/date harvesting, a
+length-robust diversity metric, and thread-safe caching.
+
+**145 offline regression tests pass.** The NCBI-backed paths have been tested
+end-to-end against a live influenza A H1N1 RefSeq genome (8 segments, 11 proteins).

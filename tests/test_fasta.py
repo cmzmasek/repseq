@@ -29,6 +29,21 @@ def test_detect_seq_type_empty():
     assert detect_seq_type("") == SequenceType.UNKNOWN
 
 
+def test_detect_seq_type_protein_using_only_iupac_overlap_letters():
+    # Regression: a protein whose residues happen to be only letters that
+    # are ALSO IUPAC nucleotide-ambiguity codes (no E/F/I/L/P/Q) must not
+    # be misclassified as nucleotide. Detection keys on strict A/C/G/T/U
+    # content, not the ambiguity codes.
+    # "KWMHRSNDVKWMHRSNDV" — all amino acids, all also IUPAC codes.
+    assert detect_seq_type("KWMHRSNDVKWMHRSNDVKWMHRSNDV") == SequenceType.PROTEIN
+
+
+def test_detect_seq_type_nucleotide_with_some_ambiguity():
+    # A real nucleotide sequence stays nucleotide despite a scattered N
+    # (1 ambiguous of 21 => 95% strict bases, above the 90% threshold).
+    assert detect_seq_type("ATCGATCGATCGATCGATCGN") == SequenceType.NUCLEOTIDE
+
+
 # ---------------------------------------------------------------------------
 # parse_header
 # ---------------------------------------------------------------------------
@@ -119,6 +134,17 @@ def test_read_fasta_source_override(tmp_path: Path):
     seqs = list(read_fasta(p, source_override=SequenceSource.NCBI_VIRUS))
     for s in seqs:
         assert s.source == SequenceSource.NCBI_VIRUS
+
+
+def test_read_fasta_strips_alignment_gaps(tmp_path: Path):
+    # repseq expects unaligned input; gap ('-', '.') and stop ('*')
+    # characters must be stripped on read so they cannot corrupt k-mers
+    # or break MMseqs2.
+    p = tmp_path / "aligned.fasta"
+    p.write_text(">seq1 aligned\nACGT--ACGT..ACGT\n>seq2 prot\nMEEP*QSDP-SV\n")
+    seqs = list(read_fasta(p))
+    assert seqs[0].sequence == "ACGTACGTACGT"
+    assert seqs[1].sequence == "MEEPQSDPSV"
 
 
 def test_write_fasta_then_read_back(tmp_path: Path, make_seq):

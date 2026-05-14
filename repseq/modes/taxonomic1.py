@@ -6,6 +6,7 @@ that yields <= n_per_group representatives, then return those.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal, Optional
 
 from ..clustering.diversity import select_diverse
@@ -14,6 +15,7 @@ from ..models import Cluster, RunResult, Sequence
 from ..representative.selector import apply_representative_selection
 from .base import BaseMode
 
+logger = logging.getLogger(__name__)
 
 OverflowStrategy = Literal["keep", "trim"]
 
@@ -38,13 +40,30 @@ def _binary_search_threshold(
     lo: float = 0.3,
     hi: float = 1.0,
     max_iter: int = 12,
+    label: str = "",
 ) -> tuple[list[Sequence], float]:
-    """Binary-search for threshold that yields <= n_target clusters.
+    """Binary-search for the MMseqs2 threshold that yields ~n_target clusters.
+
+    MMseqs2 ``--min-seq-id`` semantics: a *higher* identity threshold makes
+    clustering stricter and produces *more*, smaller clusters; a *lower*
+    threshold merges more aggressively into *fewer* clusters. The search
+    moves accordingly.
+
+    Cluster count is a step function of the threshold, so an exact landing
+    on ``n_target`` is often impossible. The result kept is the one whose
+    count is largest while still ``<= n_target`` (closest from below); if
+    no threshold gets at or below the target, the closest result from
+    above is returned instead. A significant undershoot is logged as a
+    warning — silently returning far fewer representatives than requested
+    is a real footgun.
 
     Returns (representatives, threshold_used).
     """
     best_reps: list[Sequence] = []
+    best_count = -1
     best_threshold = hi
+    fallback_reps: list[Sequence] = []
+    fallback_count: Optional[int] = None  # smallest count seen that exceeds n_target
 
     for _ in range(max_iter):
         mid = (lo + hi) / 2
@@ -53,21 +72,46 @@ def _binary_search_threshold(
         n_reps = len(clusters)
 
         if n_reps <= n_target:
-            best_reps = [c.representative for c in clusters]
-            best_threshold = mid
-            hi = mid  # try to lower threshold (more clusters) to get closer to n_target
+            # Few enough — keep the count closest to the target (largest
+            # that is still <= n_target), then raise the threshold to
+            # split further.
+            if n_reps > best_count:
+                best_reps = [c.representative for c in clusters]
+                best_count = n_reps
+                best_threshold = mid
+            lo = mid
         else:
-            lo = mid  # raise threshold (fewer clusters)
+            # Too many clusters — lower the threshold to merge more.
+            if fallback_count is None or n_reps < fallback_count:
+                fallback_reps = [c.representative for c in clusters]
+                fallback_count = n_reps
+            hi = mid
 
-        if abs(hi - lo) < 0.005:
+        if n_reps == n_target or abs(hi - lo) < 0.005:
             break
 
     if not best_reps:
-        # Could not reach target even at hi=1.0; use all sequences
-        best_reps = sequences
+        # No threshold reached at-or-below the target; return the closest
+        # result from above (overflow="trim" will pare it down exactly).
+        best_reps = fallback_reps or list(sequences)
+        best_count = fallback_count if fallback_count is not None else len(sequences)
         best_threshold = hi
 
-    # If overflow == "trim", diversity-select exactly n_target from best_reps
+    where = f" for '{label}'" if label else ""
+    if best_count < n_target:
+        logger.warning(
+            "Binary search%s: requested %d representatives but cluster count "
+            "is a step function of identity; closest achievable is %d at "
+            "threshold %.3f.",
+            where, n_target, best_count, best_threshold,
+        )
+    else:
+        logger.info(
+            "Binary search%s: %d representatives at threshold %.3f.",
+            where, best_count, best_threshold,
+        )
+
+    # If overflow == "trim", diversity-select exactly n_target from best_reps.
     if overflow == "trim" and len(best_reps) > n_target:
         seed = cfg.get("seed", 42)
         best_reps = select_diverse(best_reps, n_target, seed=seed)
@@ -110,6 +154,7 @@ class TaxonomicMode1(BaseMode):
                     self.n_per_group,
                     self.cfg,
                     self.overflow,
+                    label=group_label,
                 )
                 all_reps.extend(reps)
                 for rep in reps:

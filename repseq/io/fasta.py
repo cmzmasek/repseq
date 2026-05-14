@@ -13,18 +13,25 @@ from ..models import Sequence, SequenceSource, SequenceType
 # Sequence type detection
 # ---------------------------------------------------------------------------
 
-_NUCLEOTIDE_CHARS = set("ATCGUNRYWSKMBDHVatcgunrywskmbdhv")
-_PROTEIN_ONLY_CHARS = set("EFILPQZefilpqz")
+# Strict A/C/G/T/U only — deliberately NOT the IUPAC ambiguity codes
+# (N/R/Y/W/S/K/M/B/D/H/V), since those letters are also amino acids and
+# counting them as "nucleotide" makes proteins look like DNA.
+_STRICT_NT_CHARS = set("ACGTU")
+_PROTEIN_ONLY_CHARS = set("EFILPQZ")
 
 
 def detect_seq_type(sequence: str) -> SequenceType:
     if not sequence:
         return SequenceType.UNKNOWN
     sample = sequence[:200].upper()
+    # An unambiguous protein-only residue (E/F/I/L/P/Q/Z) is decisive.
     if any(c in _PROTEIN_ONLY_CHARS for c in sample):
         return SequenceType.PROTEIN
-    na_count = sum(1 for c in sample if c in _NUCLEOTIDE_CHARS)
-    if na_count / len(sample) >= 0.90:
+    # Otherwise classify by strict A/C/G/T/U content: a real nucleotide
+    # sequence is ≥90% strict bases even with scattered ambiguity codes;
+    # a protein is not.
+    strict_nt = sum(1 for c in sample if c in _STRICT_NT_CHARS)
+    if strict_nt / len(sample) >= 0.90:
         return SequenceType.NUCLEOTIDE
     return SequenceType.PROTEIN
 
@@ -220,7 +227,13 @@ def read_fasta(
     current_lines: list[str] = []
 
     def _emit(header: str, lines: list[str]) -> Sequence:
-        seq_str = "".join(lines).upper().replace(" ", "").replace("\r", "")
+        # Strip whitespace and alignment characters: '-'/'.' gaps and '*'
+        # stop markers. repseq expects unaligned sequences; stripping gaps
+        # from an alignment recovers the original residues, and leaving
+        # them in would corrupt k-mers and break MMseqs2.
+        seq_str = "".join(lines).upper()
+        for ch in (" ", "\r", "-", ".", "*"):
+            seq_str = seq_str.replace(ch, "")
         fields = parse_header(header)
         seq_type = detect_seq_type(seq_str)
         seq = Sequence(

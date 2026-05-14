@@ -45,6 +45,21 @@ def test_validate_config_rejects_bad_length_mode():
     assert any("length_filter.mode" in e for e in errors)
 
 
+def test_validate_config_accepts_min_percent_zero_and_max_percent():
+    cfg = load_config(None)
+    cfg["qc"]["length_filter"]["min_percent"] = 0    # disables lower bound
+    cfg["qc"]["length_filter"]["max_percent"] = 200  # optional upper cap
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_max_percent_not_above_min():
+    cfg = load_config(None)
+    cfg["qc"]["length_filter"]["min_percent"] = 80
+    cfg["qc"]["length_filter"]["max_percent"] = 50
+    errors = validate_config(cfg)
+    assert any("max_percent" in e for e in errors)
+
+
 def test_validate_config_rejects_out_of_range_ambiguous():
     cfg = load_config(None)
     cfg["qc"]["ambiguous_threshold"] = 1.5

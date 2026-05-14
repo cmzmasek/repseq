@@ -87,16 +87,22 @@ class MetadataResolver:
         # 1. Database query
         db_meta = self._db_query(seq)
 
-        # 2. Fill missing fields from DB result
+        # 2. Fill fields from the DB result.
+        #    The database is authoritative: a DB-provided value overrides
+        #    the heuristic header parse (which, for NCBI Virus headers, is
+        #    fragile bracket-guessing). A field is only left to the header
+        #    value when the DB has nothing for it.
         if db_meta:
-            if not seq.organism and db_meta.get("organism"):
+            if db_meta.get("organism"):
                 seq.organism = db_meta["organism"]
-            if not seq.host and db_meta.get("host"):
+            if db_meta.get("host"):
                 seq.host = db_meta["host"]
-            if not seq.collection_date and db_meta.get("collection_date"):
+            if db_meta.get("collection_date"):
                 seq.collection_date = db_meta["collection_date"]
-            if not seq.country and db_meta.get("country"):
+            if db_meta.get("country"):
                 seq.country = db_meta["country"]
+            if db_meta.get("strain"):
+                seq.strain = db_meta["strain"]
             if db_meta.get("is_reviewed") is not None:
                 seq.is_reviewed = db_meta["is_reviewed"]
 

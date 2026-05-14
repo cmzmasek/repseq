@@ -11,10 +11,17 @@ qc:
   remove_duplicates: true
 
   length_filter:
-    # mode: "median_percent" removes sequences shorter than min_percent% of the median
+    # mode: "median_percent" filters relative to the median input length
     # mode: "min_max" filters by absolute min/max length
+    #
+    # NOTE: in median_percent mode the median is taken over the WHOLE input.
+    # For multi-gene datasets that median is not meaningful — use min_max.
+    # In segmented mode this whole-pool length filter is SKIPPED entirely
+    # (the input is a mix of segments of very different lengths); use
+    # segmented.viruses.<v>.segment_lengths for per-segment bounds instead.
     mode: median_percent
-    min_percent: 50      # used when mode == median_percent
+    min_percent: 50      # drop sequences shorter than this % of the median; 0 disables
+    # max_percent: 200   # optional: also drop sequences longer than this % of the median
     # min_length: 100    # used when mode == min_max
     # max_length: 10000  # used when mode == min_max
 
@@ -57,6 +64,10 @@ segmented:
   #     expected_proteins_per_segment:         # optional; each value is int OR list[int]
   #       <segment_name>: <int>                #   exact count required
   #       <segment_name>: [<int>, <int>, ...]  #   any of these counts acceptable
+  #     segment_lengths:                       # optional; per-segment length bounds
+  #       <segment_name>:                      #   drop any isolate where this segment
+  #         min: <int>                         #   is shorter than min or longer than max
+  #         max: <int>                         #   (either bound is optional)
   # See config/examples/influenza_a.yaml for a worked example with
   # strain-aware list-valued counts.
   viruses: {}
@@ -71,8 +82,13 @@ taxonomy:
 
 clustering:
   backend: mmseqs2
-  # easy-linclust: faster, linear time, best for very large datasets
-  # easy-cluster: slower, all-vs-all, slightly more accurate
+  # easy-linclust: linear-time, scales to very large datasets, but APPROXIMATE
+  #   — it does not guarantee every pair within a cluster meets --min-seq-id,
+  #   so clusters can be looser than the nominal threshold.
+  # easy-cluster: cascaded all-vs-all, slower, but cluster membership
+  #   actually respects the identity threshold.
+  # For reference-set construction where cluster tightness matters, prefer
+  # easy-cluster unless the dataset is too large for it to finish.
   mmseqs2_mode: easy-linclust
   coverage: 0.8
   # coverage_mode:

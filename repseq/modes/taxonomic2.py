@@ -100,6 +100,7 @@ class TaxonomicMode2(BaseMode):
                     n_per_group,
                     self.cfg,
                     self.overflow,  # type: ignore[arg-type]
+                    label=group_prefix,
                 )
                 # Recurse into next level with the representatives
                 self._recurse(reps, next_levels, all_reps, all_clusters, group_prefix)

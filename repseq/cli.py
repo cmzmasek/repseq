@@ -20,6 +20,7 @@ from .qc.protein_qc import run_protein_qc
 from .segmented.completeness import (
     build_concatenated_sequences,
     filter_complete_isolates,
+    segment_length_filter,
 )
 from .taxonomy.cache import TaxonomyCache
 from .taxonomy.ncbi import NCBITaxonomy
@@ -163,6 +164,12 @@ def _handle_segmented(sequences, cfg, qc_report):
         return sequences, None, None
     click.echo("Applying segmented virus completeness filter ...")
     kept, complete_isolates = filter_complete_isolates(sequences, virus_cfg, qc_report)
+    segment_lengths = virus_cfg.get("segment_lengths")
+    if segment_lengths:
+        complete_isolates = segment_length_filter(
+            complete_isolates, virus_cfg["segments"], segment_lengths, qc_report
+        )
+        kept = [seq for segs in complete_isolates.values() for seq in segs]
     click.echo(f"  Complete isolates : {len(complete_isolates)}")
     click.echo(f"  Individual seqs   : {len(kept)}")
     concat_seqs = build_concatenated_sequences(complete_isolates)
@@ -194,6 +201,72 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
     click.echo(f"\nOutput written to: {cfg['output']['dir']}")
     for f in out_files:
         click.echo(f"  {f.name}")
+    _final_summary(result, qc_report, cfg)
+
+
+def _final_summary(result, qc_report, cfg) -> None:
+    """Close the run with a one-glance summary, or — if nothing came out the
+    other end — a warning plus the most likely reasons why."""
+    n_reps = len(result.representatives)
+    n_clusters = len(result.clusters)
+    segmented = bool(cfg.get("segmented", {}).get("enabled"))
+
+    if n_reps > 0:
+        cluster_note = f" across {n_clusters} cluster(s)" if n_clusters else ""
+        unit = "isolate(s)" if segmented else "representative sequence(s)"
+        click.echo(f"\nDone — selected {n_reps} {unit}{cluster_note}.")
+        if qc_report is not None and qc_report.total_input:
+            click.echo(
+                f"  {qc_report.passed} of {qc_report.total_input} input "
+                f"sequences passed QC."
+            )
+        return
+
+    # Nothing was selected — diagnose.
+    click.echo("\nWARNING: no representative sequences were selected.", err=True)
+    reasons: list[str] = []
+    if qc_report is None or qc_report.total_input == 0:
+        reasons.append(
+            "No sequences were loaded — check the input FASTA path(s) and, "
+            "if headers are unusual, pass --source explicitly."
+        )
+    elif qc_report.passed == 0:
+        bits = []
+        if qc_report.removed_duplicates:
+            bits.append(f"{qc_report.removed_duplicates} duplicate(s)")
+        if qc_report.removed_length:
+            bits.append(f"{qc_report.removed_length} on length")
+        if qc_report.removed_ambiguous:
+            bits.append(f"{qc_report.removed_ambiguous} on ambiguous chars")
+        if qc_report.removed_annotation:
+            bits.append(f"{qc_report.removed_annotation} on annotation keywords")
+        if qc_report.removed_proteins:
+            bits.append(f"{qc_report.removed_proteins} on protein count")
+        detail = f" ({', '.join(bits)})" if bits else ""
+        reasons.append(
+            f"QC removed all {qc_report.total_input} input sequences{detail} — "
+            "loosen the relevant qc.* settings (length_filter, "
+            "ambiguous_threshold, annotation_filter keywords, protein_annotation)."
+        )
+    elif segmented and qc_report.removed_incomplete_isolates:
+        reasons.append(
+            f"{qc_report.passed} sequences passed QC, but the segmented "
+            f"completeness/length filter dropped everything "
+            f"({qc_report.removed_incomplete_isolates} removed) — no isolate "
+            "had all expected segments. Check isolate_regex, the segment "
+            "names/aliases, and any segment_lengths bounds."
+        )
+    else:
+        reasons.append(
+            f"{qc_report.passed} sequences passed QC but selection produced "
+            "nothing — check that MMseqs2 is on PATH and that the grouping "
+            "field actually has values (taxonomic/host/geographic modes fall "
+            "back to a single 'Unknown' group without metadata resolution)."
+        )
+
+    for r in reasons:
+        click.echo(f"  - {r}", err=True)
+    click.echo("  See the run log for the full QC and selection breakdown.", err=True)
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +667,16 @@ def init_config(output):
         ],
     }
 
+    if click.confirm("Enable protein-annotation QC (fetches CDS counts from NCBI)?", default=False):
+        cfg["qc"]["protein_annotation"] = {
+            "enabled": True,
+            "min_proteins": click.prompt(
+                "Minimum number of annotated proteins per sequence", default=1, type=int
+            ),
+        }
+    else:
+        cfg["qc"]["protein_annotation"] = {"enabled": False}
+
     # Segmented
     if click.confirm("\nConfigure segmented virus mode?", default=False):
         virus_name = click.prompt("Virus name (e.g. influenza_a)")
@@ -606,16 +689,55 @@ def init_config(output):
             "Regex to extract isolate ID from header",
             default=r"(?P<isolate>[A-Za-z]+/[^/]+/[^/]+/[^/]+/\d{4})"
         )
+        virus_def: dict = {
+            "expected_segments": n_seg,
+            "segments": segments,
+            "isolate_regex": isolate_regex,
+        }
+
+        if click.confirm(
+            "Configure expected protein counts per segment?", default=False
+        ):
+            expected_proteins: dict = {}
+            click.echo(
+                "  Enter a single integer (exact count) or comma-separated integers\n"
+                "  (any of those counts accepted, e.g. '1,2' for PB1 ± PB1-F2).\n"
+                "  Press Enter to skip a segment."
+            )
+            for seg in segments:
+                raw = click.prompt(f"  {seg}", default="").strip()
+                if raw:
+                    parts = [p.strip() for p in raw.split(",") if p.strip()]
+                    if len(parts) == 1:
+                        expected_proteins[seg] = int(parts[0])
+                    else:
+                        expected_proteins[seg] = [int(p) for p in parts]
+            if expected_proteins:
+                virus_def["expected_proteins_per_segment"] = expected_proteins
+
+        if click.confirm("Configure length bounds per segment?", default=False):
+            segment_lengths: dict = {}
+            click.echo(
+                "  Enter min and/or max nucleotide length per segment.\n"
+                "  Enter 0 (or press Enter) to leave a bound unset."
+            )
+            for seg in segments:
+                mn = click.prompt(f"  {seg} min length", default=0, type=int)
+                mx = click.prompt(f"  {seg} max length", default=0, type=int)
+                bounds: dict = {}
+                if mn:
+                    bounds["min"] = mn
+                if mx:
+                    bounds["max"] = mx
+                if bounds:
+                    segment_lengths[seg] = bounds
+            if segment_lengths:
+                virus_def["segment_lengths"] = segment_lengths
+
         cfg["segmented"] = {
             "enabled": False,
             "virus": virus_name,
-            "viruses": {
-                virus_name: {
-                    "expected_segments": n_seg,
-                    "segments": segments,
-                    "isolate_regex": isolate_regex,
-                }
-            },
+            "viruses": {virus_name: virus_def},
         }
     else:
         cfg["segmented"] = {"enabled": False}

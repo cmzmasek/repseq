@@ -9,7 +9,6 @@ import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
-from ..io.fasta import write_fasta
 from ..models import Cluster, Sequence
 
 
@@ -24,6 +23,26 @@ def _check_mmseqs2() -> str:
             "mmseqs2 not found in PATH. Install it from https://github.com/soedinglab/MMseqs2"
         )
     return path
+
+
+def _write_id_fasta(sequences: list[Sequence], path: Path, line_width: int = 70) -> None:
+    """Write a FASTA whose header is exactly ``seq.id``.
+
+    MMseqs2 uses the first whitespace-delimited token of each header as the
+    sequence identifier in its cluster TSV. Writing the full descriptive
+    header (as the general-purpose writer does) would make that token differ
+    from ``seq.id`` for UniProt (``sp|ACC|NAME ...``) and concatenated
+    segmented isolates (``CONCAT|iso|acc1|acc2``), so the parsed cluster
+    members could not be matched back. Using ``seq.id`` as the sole header
+    token keeps the round-trip exact.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        for seq in sequences:
+            fh.write(f">{seq.id}\n")
+            s = seq.sequence
+            for i in range(0, len(s), line_width):
+                fh.write(s[i : i + line_width] + "\n")
 
 
 def run_clustering(
@@ -60,7 +79,7 @@ def run_clustering(
         result_prefix = str(td / "result")
         mmseqs_tmp = str(td / "tmp")
 
-        write_fasta(sequences, input_fasta)
+        _write_id_fasta(sequences, input_fasta)
 
         cmd = [
             mmseqs,

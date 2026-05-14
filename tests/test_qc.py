@@ -28,6 +28,28 @@ def test_remove_duplicates_keeps_first(make_seq):
     assert b.qc_fail_reason and "duplicate" in b.qc_fail_reason
 
 
+def test_remove_duplicates_keeps_refseq_over_earlier_plain(make_seq):
+    # Byte-identical records: the curated RefSeq copy must survive even
+    # though a plain duplicate appeared first in the file.
+    plain = make_seq("plain", "ACGTACGT")
+    refseq = make_seq("refseq", "ACGTACGT", is_refseq=True)
+    report = QCReport()
+    kept = remove_duplicates([plain, refseq], report)
+    assert [s.id for s in kept] == ["refseq"]
+    assert plain.qc_passed is False
+    assert plain.qc_fail_reason == "exact_duplicate_of:refseq"
+
+
+def test_remove_duplicates_prefers_reviewed_then_first_seen(make_seq):
+    a = make_seq("a", "TTTTGGGG")
+    b = make_seq("b", "TTTTGGGG", is_reviewed=True)
+    c = make_seq("c", "TTTTGGGG")
+    report = QCReport()
+    kept = remove_duplicates([a, b, c], report)
+    assert [s.id for s in kept] == ["b"]
+    assert report.removed_duplicates == 2
+
+
 # ---------------------------------------------------------------------------
 # length_filter
 # ---------------------------------------------------------------------------
@@ -65,6 +87,61 @@ def test_length_filter_empty_input_no_crash():
     assert length_filter([], {"mode": "median_percent", "min_percent": 50}, report) == []
 
 
+def test_length_filter_median_percent_caps_long(make_seq):
+    # max_percent should also drop oversized records (median = 100).
+    seqs = [
+        make_seq("s1", "A" * 100),
+        make_seq("s2", "A" * 100),
+        make_seq("s3", "A" * 100),
+        make_seq("big", "A" * 500),
+    ]
+    report = QCReport()
+    cfg = {"mode": "median_percent", "min_percent": 50, "max_percent": 150}
+    kept = length_filter(seqs, cfg, report)
+    assert {s.id for s in kept} == {"s1", "s2", "s3"}
+    assert report.removed_length == 1
+
+
+def test_length_filter_min_percent_zero_disables_lower_bound(make_seq):
+    seqs = [make_seq("s1", "A" * 100), make_seq("tiny", "A" * 2)]
+    report = QCReport()
+    kept = length_filter(seqs, {"mode": "median_percent", "min_percent": 0}, report)
+    assert {s.id for s in kept} == {"s1", "tiny"}
+    assert report.removed_length == 0
+
+
+def test_run_qc_skips_length_filter_in_segmented_mode(make_seq):
+    # Regression: in segmented mode the input is a mix of long and short
+    # segments. A whole-pool median would drop the short segments, leaving
+    # every isolate incomplete. run_qc must skip the global length filter so
+    # per-segment segment_lengths bounds can do the job downstream.
+    seqs = [
+        make_seq("L1", "A" * 6000),
+        make_seq("M1", "A" * 4000),
+        make_seq("S1", "A" * 900),   # < 50% of median — would be dropped
+    ]
+    cfg = {"qc": {"length_filter": {"mode": "median_percent", "min_percent": 50}},
+           "segmented": {"enabled": True}}
+    kept, report = run_qc(seqs, cfg)
+    assert {s.id for s in kept} == {"L1", "M1", "S1"}
+    assert report.removed_length == 0
+    assert report.length_filter_skipped is True
+
+
+def test_run_qc_applies_length_filter_when_not_segmented(make_seq):
+    seqs = [
+        make_seq("L1", "A" * 6000),
+        make_seq("M1", "A" * 4000),
+        make_seq("S1", "A" * 900),
+    ]
+    cfg = {"qc": {"length_filter": {"mode": "median_percent", "min_percent": 50}},
+           "segmented": {"enabled": False}}
+    kept, report = run_qc(seqs, cfg)
+    assert "S1" not in {s.id for s in kept}
+    assert report.removed_length == 1
+    assert report.length_filter_skipped is False
+
+
 # ---------------------------------------------------------------------------
 # ambiguous_filter
 # ---------------------------------------------------------------------------
@@ -83,6 +160,14 @@ def test_ambiguous_filter_protein_X_is_ambiguous(make_seq):
     report = QCReport()
     kept = ambiguous_filter([s], threshold=0.05, report=report)
     assert kept == []
+
+
+def test_ambiguous_fraction_protein_excludes_real_residues(make_seq):
+    # U (selenocysteine) and O (pyrrolysine) are definite residues, not
+    # ambiguity codes — only X/B/Z/J should count toward the fraction.
+    s = make_seq("p", "MKUXOJ", seq_type=SequenceType.PROTEIN)
+    # ambiguous chars in "MKUXOJ": X and J  => 2 of 6
+    assert abs(s.ambiguous_fraction - 2 / 6) < 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +190,44 @@ def test_annotation_filter_disabled_passthrough(make_seq):
     cfg = {"enabled": False, "keywords": ["hypothetical"]}
     kept = annotation_filter([bad], cfg, report)
     assert kept == [bad]
+    assert report.removed_annotation == 0
+
+
+def test_annotation_filter_matches_keyword_with_nonword_edge(make_seq):
+    # Regression: a keyword ending in a non-word char (e.g. "MAG:") must
+    # still match the real NCBI title format "MAG: Genus species ...".
+    # The old \b...\b wrapping made the trailing \b after ':' unsatisfiable.
+    bad = make_seq("p1", "ACGT", header="CP000001.1 MAG: Escherichia coli genome")
+    ok = make_seq("p2", "ACGT", header="P2 RNA polymerase [foo]")
+    report = QCReport()
+    cfg = {"enabled": True, "keywords": ["MAG:"]}
+    kept = annotation_filter([bad, ok], cfg, report)
+    assert [s.id for s in kept] == ["p2"]
+    assert report.removed_annotation == 1
+    assert bad.qc_fail_reason == "annotation_keyword:MAG:"
+
+
+def test_annotation_filter_word_keyword_still_bounded(make_seq):
+    # A plain-word keyword must still require word boundaries — "partial"
+    # should not match inside "impartiality".
+    inside = make_seq("p1", "ACGT", header="P1 impartiality study")
+    real = make_seq("p2", "ACGT", header="P2 partial cds")
+    report = QCReport()
+    cfg = {"enabled": True, "keywords": ["partial"]}
+    kept = annotation_filter([inside, real], cfg, report)
+    assert [s.id for s in kept] == ["p1"]
+
+
+def test_annotation_filter_targets_description_not_structured_header(make_seq):
+    # A keyword that appears only in a structured header field (e.g. a
+    # UniProt OS= organism name) must NOT trigger removal — matching
+    # targets the parsed description.
+    seq = make_seq("p1", "ACGT", header="sp|P1|X pol OS=Partial-named organism sp.")
+    seq.description = "RNA polymerase"          # clean description
+    report = QCReport()
+    cfg = {"enabled": True, "keywords": ["partial"]}
+    kept = annotation_filter([seq], cfg, report)
+    assert [s.id for s in kept] == ["p1"]
     assert report.removed_annotation == 0
 
 

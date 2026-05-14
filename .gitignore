@@ -22,6 +22,11 @@ htmlcov/
 # User-generated configs (only default_config.yaml + examples/ are tracked)
 /config/my_*.yaml
 /my_*.yaml
+/repseq_config.yaml
+/repseq_config.yaml~
+
+# Local scratch
+/JUNK/
 
 # Claude Code local config (not project config)
 .claude/

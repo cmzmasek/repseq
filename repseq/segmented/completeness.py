@@ -117,8 +117,14 @@ def identify_segment(
 
     # Word-boundary search over canonical names + aliases. Longest term
     # first so multi-word aliases (e.g. "large segment") win over short
-    # substrings ("large").
-    candidates = sorted(alias_to_canonical.keys(), key=len, reverse=True)
+    # substrings ("large"). Single-character terms (e.g. the "M" segment)
+    # are excluded here: \bM\b matches any stray standalone "M" in a
+    # header and would mis-assign the segment. Such segments must instead
+    # be resolved via the numeric index, an explicit segment_regex, the
+    # seq.segment field, or a multi-character alias.
+    candidates = sorted(
+        (t for t in alias_to_canonical if len(t) >= 2), key=len, reverse=True
+    )
     for term in candidates:
         if re.search(r"\b" + re.escape(term) + r"\b", seq.header, re.IGNORECASE):
             return alias_to_canonical[term]
@@ -236,7 +242,11 @@ def concatenate_isolate(
         sequence=combined_seq,
         seq_type=representative.seq_type,
         source=representative.source,
-        accession=representative.accession,
+        # A concatenated isolate has no single accession — its identity is
+        # the isolate_id. Reporting segment 0's accession here would be
+        # misleading; per-segment accessions remain in the header and in
+        # the per-segment output files.
+        accession=None,
         organism=representative.organism,
         description=representative.description,
         strain=representative.strain,
@@ -248,6 +258,43 @@ def concatenate_isolate(
         is_reviewed=all(s.is_reviewed for s in segments),
         taxonomy=representative.taxonomy,
     )
+
+
+def segment_length_filter(
+    complete_isolates: dict[str, list[Sequence]],
+    segment_names: list[str],
+    segment_lengths: dict[str, dict[str, int]],
+    report: QCReport,
+) -> dict[str, list[Sequence]]:
+    """Drop complete isolates where any segment falls outside configured length bounds.
+
+    segment_lengths maps segment name → {min: N, max: M}; either bound is optional.
+    Dropped sequences are recorded in the QC report under removed_length.
+    """
+    kept: dict[str, list[Sequence]] = {}
+    for isolate_key, segs in complete_isolates.items():
+        fail_reason: Optional[str] = None
+        for seg_name, seq in zip(segment_names, segs):
+            bounds = segment_lengths.get(seg_name)
+            if not bounds:
+                continue
+            mn = bounds.get("min")
+            mx = bounds.get("max")
+            if mn is not None and seq.length < mn:
+                fail_reason = f"segment_length:{seg_name}:{seq.length}<{mn}"
+                break
+            if mx is not None and seq.length > mx:
+                fail_reason = f"segment_length:{seg_name}:{seq.length}>{mx}"
+                break
+        if fail_reason:
+            for seq in segs:
+                seq.qc_passed = False
+                seq.qc_fail_reason = fail_reason
+                report.removed_length += 1
+                report.add_removed(seq.id, fail_reason)
+        else:
+            kept[isolate_key] = segs
+    return kept
 
 
 def build_concatenated_sequences(

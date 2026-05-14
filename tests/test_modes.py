@@ -104,3 +104,69 @@ def test_taxonomic1_missing_rank_grouped_as_unknown(make_seq):
         result = TaxonomicMode1(_base_cfg(), rank="genus", n_per_group=5).run([s1, s2])
     # Both kept because both groups are small
     assert {r.id for r in result.representatives} == {"s1", "s2"}
+
+
+# ---------------------------------------------------------------------------
+# Binary-search threshold direction (regression: the search used to walk
+# AWAY from the target because the MMseqs2 threshold→count relationship
+# was inverted).
+# ---------------------------------------------------------------------------
+
+def test_binary_search_climbs_toward_target(make_seq):
+    from repseq.modes.taxonomic1 import _binary_search_threshold
+
+    seqs = [make_seq(f"s{i}", "ACGT" * 10) for i in range(20)]
+
+    def fake_run_clustering(sequences, threshold, cfg, tmp_dir=None):
+        # Correct MMseqs2 semantics: a higher identity threshold yields
+        # MORE clusters. count ~ threshold * 20.
+        n = max(1, min(len(sequences), round(threshold * 20)))
+        return [
+            Cluster(cluster_id=f"c{i}", representative=sequences[i])
+            for i in range(n)
+        ]
+
+    with patch("repseq.modes.taxonomic1.run_clustering", side_effect=fake_run_clustering):
+        reps, threshold = _binary_search_threshold(
+            seqs, n_target=10, cfg=_base_cfg(), overflow="keep"
+        )
+
+    # count ≈ threshold*20, so the target of 10 sits near threshold 0.5.
+    # The search must land close to 10 — not undershoot to 1-3.
+    assert len(reps) <= 10
+    assert len(reps) >= 8
+
+
+def test_binary_search_trim_enforces_exact_count(make_seq):
+    from repseq.modes.taxonomic1 import _binary_search_threshold
+
+    seqs = [make_seq(f"s{i}", "ACGT" * 10 + "A" * i) for i in range(20)]
+
+    def fake_run_clustering(sequences, threshold, cfg, tmp_dir=None):
+        # Always returns more than the target so 'trim' has to act.
+        return [
+            Cluster(cluster_id=f"c{i}", representative=sequences[i])
+            for i in range(len(sequences))
+        ]
+
+    with patch("repseq.modes.taxonomic1.run_clustering", side_effect=fake_run_clustering):
+        reps, _ = _binary_search_threshold(
+            seqs, n_target=5, cfg=_base_cfg(), overflow="trim"
+        )
+
+    assert len(reps) == 5
+
+
+def test_time_mode_rejects_nonpositive_or_garbage_window():
+    import pytest
+
+    from repseq.modes.time_mode import TimeMode
+
+    for bad in ("0", "-3", "banana"):
+        with pytest.raises(ValueError):
+            TimeMode(_base_cfg(), n_per_window=5, window=bad)
+
+    # valid windows construct fine
+    TimeMode(_base_cfg(), n_per_window=5, window="year")
+    TimeMode(_base_cfg(), n_per_window=5, window="decade")
+    TimeMode(_base_cfg(), n_per_window=5, window="5")

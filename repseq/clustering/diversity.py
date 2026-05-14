@@ -18,12 +18,34 @@ def _kmer_set(sequence: str, k: int = 5) -> set[str]:
 
 
 def _jaccard_distance(a: set, b: set) -> float:
-    """Return 1 - Jaccard similarity (0 = identical, 1 = no overlap)."""
+    """Return 1 - Jaccard similarity (0 = identical, 1 = no overlap).
+
+    Note: Jaccard divides by the *union*, so it is length-sensitive — a
+    short sequence and a long one have an inflated distance purely from
+    the size gap. Kept for the illustrative clustering plot; diversity
+    selection uses :func:`_containment_distance` instead.
+    """
     if not a and not b:
         return 0.0
     intersection = len(a & b)
     union = len(a | b)
     return 1.0 - intersection / union
+
+
+def _containment_distance(a: set, b: set) -> float:
+    """Length-robust k-mer distance: 1 - |A∩B| / min(|A|, |B|).
+
+    Dividing by the *smaller* k-mer set (rather than the union, as Jaccard
+    does) removes the length bias: a short sequence whose k-mers are all
+    contained in a longer one scores ~0 ("not diverse from it") instead of
+    ~1. Without this, MaxMin selection preferentially picks length
+    extremes — the shortest and longest sequences — as "most diverse",
+    which is an artefact, not biology. Symmetric because ``min`` is.
+    """
+    if not a or not b:
+        return 0.0 if (not a and not b) else 1.0
+    intersection = len(a & b)
+    return 1.0 - intersection / min(len(a), len(b))
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +64,10 @@ def select_diverse(
         1. Start with the longest sequence as the first representative.
         2. Maintain a per-sequence distance to the nearest already-selected representative.
         3. Iteratively pick the sequence with the greatest min-distance.
+
+    Distance is the length-robust k-mer containment distance
+    (:func:`_containment_distance`), so the selection reflects sequence
+    divergence rather than length differences.
 
     Args:
         sequences: Pool of sequences to select from.
@@ -68,7 +94,7 @@ def select_diverse(
     selected_indices = [first_idx]
 
     # min_dist[i] = distance from sequence i to its nearest selected representative
-    min_dist = [_jaccard_distance(kmer_sets[i], kmer_sets[first_idx]) for i in range(len(sequences))]
+    min_dist = [_containment_distance(kmer_sets[i], kmer_sets[first_idx]) for i in range(len(sequences))]
     min_dist[first_idx] = -1.0  # mark as already selected
 
     for _ in range(n - 1):
@@ -85,7 +111,7 @@ def select_diverse(
         for i in range(len(sequences)):
             if min_dist[i] < 0:
                 continue
-            d = _jaccard_distance(kmer_sets[i], chosen_kmers)
+            d = _containment_distance(kmer_sets[i], chosen_kmers)
             if d < min_dist[i]:
                 min_dist[i] = d
 

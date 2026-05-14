@@ -23,7 +23,8 @@ DEFAULTS: dict[str, Any] = {
         "remove_duplicates": True,
         "length_filter": {
             "mode": "median_percent",   # "median_percent" | "min_max"
-            "min_percent": 50,          # used when mode == median_percent
+            "min_percent": 50,          # used when mode == median_percent; 0 disables lower bound
+            "max_percent": None,        # optional upper cap, as % of median (median_percent mode)
             "min_length": None,         # used when mode == min_max
             "max_length": None,
         },
@@ -149,10 +150,22 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         )
     if mode == "median_percent":
         pct = lf.get("min_percent")
-        if not isinstance(pct, (int, float)) or not (0 < pct < 100):
+        if not isinstance(pct, (int, float)) or not (0 <= pct <= 100):
             errors.append(
-                "qc.length_filter.min_percent must be a number between 0 and 100"
+                "qc.length_filter.min_percent must be a number between 0 and 100 "
+                "(0 disables the lower bound)"
             )
+        max_pct = lf.get("max_percent")
+        if max_pct is not None:
+            if not isinstance(max_pct, (int, float)) or max_pct <= 0:
+                errors.append(
+                    "qc.length_filter.max_percent must be a positive number "
+                    "(percent of median length)"
+                )
+            elif isinstance(pct, (int, float)) and max_pct <= pct:
+                errors.append(
+                    "qc.length_filter.max_percent must be greater than min_percent"
+                )
     if mode == "min_max":
         mn = lf.get("min_length")
         mx = lf.get("max_length")
@@ -252,6 +265,57 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                                     f"must be a non-negative integer or a non-empty "
                                     f"list of non-negative integers"
                                 )
+
+                sl = vdef.get("segment_lengths")
+                if sl is not None:
+                    if not isinstance(sl, dict):
+                        errors.append(
+                            f"segmented.viruses.{virus_name}.segment_lengths "
+                            f"must be a mapping of segment-name → {{min: N, max: M}}"
+                        )
+                    else:
+                        seg_names = set(vdef.get("segments", []))
+                        for seg_name, bounds in sl.items():
+                            if seg_name not in seg_names:
+                                errors.append(
+                                    f"segmented.viruses.{virus_name}."
+                                    f"segment_lengths: unknown segment '{seg_name}'"
+                                )
+                            if not isinstance(bounds, dict):
+                                errors.append(
+                                    f"segmented.viruses.{virus_name}."
+                                    f"segment_lengths.{seg_name} must be a dict "
+                                    f"with optional 'min' and/or 'max' integer keys"
+                                )
+                            else:
+                                mn = bounds.get("min")
+                                mx = bounds.get("max")
+                                if mn is not None and (
+                                    not isinstance(mn, int) or isinstance(mn, bool) or mn < 0
+                                ):
+                                    errors.append(
+                                        f"segmented.viruses.{virus_name}."
+                                        f"segment_lengths.{seg_name}.min must be a "
+                                        f"non-negative integer"
+                                    )
+                                if mx is not None and (
+                                    not isinstance(mx, int) or isinstance(mx, bool) or mx < 0
+                                ):
+                                    errors.append(
+                                        f"segmented.viruses.{virus_name}."
+                                        f"segment_lengths.{seg_name}.max must be a "
+                                        f"non-negative integer"
+                                    )
+                                if (
+                                    mn is not None and mx is not None
+                                    and isinstance(mn, int) and isinstance(mx, int)
+                                    and mn >= mx
+                                ):
+                                    errors.append(
+                                        f"segmented.viruses.{virus_name}."
+                                        f"segment_lengths.{seg_name}: min must be "
+                                        f"less than max"
+                                    )
 
     # Clustering backend
     backend = cfg.get("clustering", {}).get("backend")

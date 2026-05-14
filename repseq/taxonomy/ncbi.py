@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from io import StringIO
 from typing import Any, Optional
@@ -19,6 +20,7 @@ _SOURCE = "ncbi_taxonomy"
 _SOURCE_NUCCORE = "ncbi_nuccore"
 _SOURCE_PROTEINS = "ncbi_proteins"
 _GENBANK_BATCH_SIZE = 200
+_NOT_FOUND: dict = {"_not_found": True}
 
 
 class NCBITaxonomy:
@@ -33,6 +35,7 @@ class NCBITaxonomy:
         self._api_key = api_key
         self._delay = 0.11 if api_key else _RATE_LIMIT_DELAY
         self._last_request: float = 0.0
+        self._throttle_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -46,12 +49,25 @@ class NCBITaxonomy:
             p["api_key"] = self._api_key
         return p
 
+    def _throttle(self) -> None:
+        """Space successive Entrez requests at least ``self._delay`` apart.
+
+        The sleep happens inside the lock so concurrent resolver threads
+        queue up and each one waits for its slot — without the lock the
+        shared ``_last_request`` timestamp races and the NCBI rate limit
+        (3 req/s, or 10 with an API key) is not actually enforced.
+        """
+        with self._throttle_lock:
+            now = time.time()
+            wait = self._last_request + self._delay - now
+            if wait > 0:
+                time.sleep(wait)
+                now = time.time()
+            self._last_request = now
+
     def _get(self, endpoint: str, params: dict) -> dict:
-        elapsed = time.time() - self._last_request
-        if elapsed < self._delay:
-            time.sleep(self._delay - elapsed)
+        self._throttle()
         resp = requests.get(f"{_ENTREZ_BASE}/{endpoint}", params=params, timeout=30)
-        self._last_request = time.time()
         resp.raise_for_status()
         return resp.json()
 
@@ -80,6 +96,10 @@ class NCBITaxonomy:
 
     def _fetch_lineage_esummary(self, taxid: int) -> Optional[dict[str, Any]]:
         key = str(taxid)
+        cached = self._cache.get(_SOURCE, key)
+        if cached is not None:
+            return None if cached.get("_not_found") else cached
+
         try:
             data = self._get(
                 "esummary.fcgi",
@@ -88,10 +108,8 @@ class NCBITaxonomy:
             result_dict = data.get("result", {})
             rec = result_dict.get(str(taxid), {})
             if not rec:
+                self._cache.set(_SOURCE, key, _NOT_FOUND)
                 return None
-
-            lineage_str = rec.get("lineage", "")
-            lineage_names = [x.strip() for x in lineage_str.split(";") if x.strip()]
 
             lineage_ex = rec.get("lineageex", [])
             rank_map: dict[str, str] = {}
@@ -126,7 +144,7 @@ class NCBITaxonomy:
         """Fetch organism, taxid, host, collection_date, country for an accession."""
         cached = self._cache.get(_SOURCE_NUCCORE, accession)
         if cached is not None:
-            return cached
+            return None if cached.get("_not_found") else cached
 
         db = "protein" if _looks_like_protein_acc(accession) else "nuccore"
         try:
@@ -137,6 +155,7 @@ class NCBITaxonomy:
             )
             ids = search.get("esearchresult", {}).get("idlist", [])
             if not ids:
+                self._cache.set(_SOURCE_NUCCORE, accession, _NOT_FOUND)
                 return None
 
             # Then esummary
@@ -146,6 +165,7 @@ class NCBITaxonomy:
             )
             rec = summary.get("result", {}).get(ids[0], {})
             if not rec:
+                self._cache.set(_SOURCE_NUCCORE, accession, _NOT_FOUND)
                 return None
 
             taxid = rec.get("taxid")
@@ -155,6 +175,28 @@ class NCBITaxonomy:
                 "taxid": int(taxid) if taxid else None,
                 "title": rec.get("title"),
             }
+
+            # Source-feature qualifiers (host, country, collection_date,
+            # strain/isolate) are exposed by esummary as two parallel
+            # pipe-delimited fields: 'subtype' holds the qualifier names,
+            # 'subname' the corresponding values. Without this, NCBI
+            # sequences get host/country/date only from fragile header
+            # parsing, never from the authoritative database.
+            subtype = rec.get("subtype") or ""
+            subname = rec.get("subname") or ""
+            if subtype and subname:
+                quals = dict(zip(subtype.split("|"), subname.split("|")))
+                if quals.get("host"):
+                    result["host"] = quals["host"]
+                # NCBI is migrating 'country' → 'geo_loc_name'; accept both.
+                location = quals.get("geo_loc_name") or quals.get("country")
+                if location:
+                    result["country"] = location
+                if quals.get("collection_date"):
+                    result["collection_date"] = quals["collection_date"]
+                strain = quals.get("strain") or quals.get("isolate")
+                if strain:
+                    result["strain"] = strain
 
             # Fetch lineage if we have a taxid
             if result["taxid"]:
@@ -221,9 +263,7 @@ class NCBITaxonomy:
         """
         from Bio import SeqIO
 
-        elapsed = time.time() - self._last_request
-        if elapsed < self._delay:
-            time.sleep(self._delay - elapsed)
+        self._throttle()
 
         params: dict[str, Any] = {
             "db": "nuccore",
@@ -239,7 +279,6 @@ class NCBITaxonomy:
         resp = requests.get(
             f"{_ENTREZ_BASE}/efetch.fcgi", params=params, timeout=120,
         )
-        self._last_request = time.time()
         resp.raise_for_status()
 
         by_acc_full: dict[str, list[dict]] = {}
@@ -273,6 +312,13 @@ class NCBITaxonomy:
 
 
 def _looks_like_protein_acc(acc: str) -> bool:
-    # Protein accessions: [A-Z]{2}_\d+ or [A-Z]{3}\d+
+    """Return True if the accession looks like a protein record.
+
+    RefSeq protein accessions are NP_/XP_/YP_/WP_/AP_ — the discriminator
+    is a 'P' in the second position followed by '_'. RefSeq *nucleotide*
+    accessions (NC_, NM_, NG_, NR_, NT_, NW_, NZ_, XM_, XR_) must NOT match,
+    or their metadata would be looked up in the wrong Entrez database.
+    GenBank protein accessions are three letters followed by digits.
+    """
     import re
-    return bool(re.match(r"^[A-NR-Z][A-Z]_\d|^[A-Z]{3}\d", acc))
+    return bool(re.match(r"^[A-Z]P_\d|^[A-Z]{3}\d", acc))

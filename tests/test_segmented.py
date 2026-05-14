@@ -8,6 +8,7 @@ from repseq.segmented.completeness import (
     extract_isolate_id,
     filter_complete_isolates,
     identify_segment,
+    segment_length_filter,
 )
 
 
@@ -44,6 +45,15 @@ def test_identify_segment_segment_n_pattern(make_seq):
     s = make_seq("a", "ACGT", header="A/duck/HK/1/97 segment 6 thing")
     names = ["PB2", "PB1", "PA", "HA", "NP", "NA", "M", "NS"]
     assert identify_segment(s, names) == "NA"
+
+
+def test_identify_segment_ignores_stray_single_char_name(make_seq):
+    # A lone "M" in the header must NOT be read as the "M" segment by the
+    # bare word-boundary search — single-char segment names are too
+    # ambiguous and are excluded from that step.
+    s = make_seq("a", "ACGT", header="some virus isolate M/3/2019 complete genome")
+    names = ["PB2", "PB1", "PA", "HA", "NP", "NA", "M", "NS"]
+    assert identify_segment(s, names) is None
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +209,70 @@ def test_concatenate_isolate_joins_in_order(make_seq):
     assert out.id == "CONCAT|ISO1"
     assert "ISO1" in out.header
     assert out.isolate_id == "ISO1"
+
+
+def test_concatenate_isolate_has_no_single_accession(make_seq):
+    # A concatenated isolate spans several segments — it must not claim a
+    # single segment's accession. Identity is carried by isolate_id; the
+    # per-segment accessions remain recoverable from the header.
+    a = make_seq("acc1", "AAA", accession="acc1")
+    b = make_seq("acc2", "CCC", accession="acc2")
+    out = concatenate_isolate([a, b], "ISO1")
+    assert out.accession is None
+    assert out.isolate_id == "ISO1"
+    assert "acc1" in out.header and "acc2" in out.header
+
+
+# ---------------------------------------------------------------------------
+# segment_length_filter
+# ---------------------------------------------------------------------------
+
+def test_segment_length_filter_keeps_in_bounds(make_seq):
+    seg_names = ["HA", "NA"]
+    iso = {"iso1": [make_seq("h", "A" * 1700, segment="HA"),
+                    make_seq("n", "A" * 1400, segment="NA")]}
+    bounds = {"HA": {"min": 1600, "max": 1800}, "NA": {"min": 1300, "max": 1500}}
+    report = QCReport()
+    result = segment_length_filter(iso, seg_names, bounds, report)
+    assert "iso1" in result
+    assert report.removed_length == 0
+
+
+def test_segment_length_filter_drops_too_short(make_seq):
+    seg_names = ["HA", "NA"]
+    iso = {"iso1": [make_seq("h", "A" * 500, segment="HA"),
+                    make_seq("n", "A" * 1400, segment="NA")]}
+    bounds = {"HA": {"min": 1600}}
+    report = QCReport()
+    result = segment_length_filter(iso, seg_names, bounds, report)
+    assert result == {}
+    assert report.removed_length == 2  # both seqs in the dropped isolate
+
+
+def test_segment_length_filter_drops_too_long(make_seq):
+    seg_names = ["HA", "NA"]
+    iso = {"iso1": [make_seq("h", "A" * 2000, segment="HA"),
+                    make_seq("n", "A" * 1400, segment="NA")]}
+    bounds = {"HA": {"max": 1800}}
+    report = QCReport()
+    result = segment_length_filter(iso, seg_names, bounds, report)
+    assert result == {}
+    assert report.removed_length == 2
+
+
+def test_segment_length_filter_partial_bounds_and_mixed_isolates(make_seq):
+    seg_names = ["HA", "NA"]
+    iso = {
+        "good": [make_seq("g_ha", "A" * 1700, segment="HA"),
+                 make_seq("g_na", "A" * 1400, segment="NA")],
+        "bad":  [make_seq("b_ha", "A" * 500,  segment="HA"),
+                 make_seq("b_na", "A" * 1400, segment="NA")],
+    }
+    bounds = {"HA": {"min": 1600, "max": 1800}}
+    report = QCReport()
+    result = segment_length_filter(iso, seg_names, bounds, report)
+    assert set(result.keys()) == {"good"}
+    assert report.removed_length == 2  # two seqs from the bad isolate
 
 
 def test_build_concatenated_sequences_one_per_isolate(make_seq):

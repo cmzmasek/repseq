@@ -96,7 +96,9 @@ class Sequence:
             return 0.0
         seq = self.sequence.upper()
         if self.seq_type == SequenceType.PROTEIN:
-            ambiguous = set("XBZJU")
+            # X=any, B=Asx, Z=Glx, J=Xle. U (selenocysteine) and O
+            # (pyrrolysine) are definite residues, not ambiguity codes.
+            ambiguous = set("XBZJ")
         else:
             ambiguous = set("NRYWSKMBDHV")
         return sum(1 for c in seq if c in ambiguous) / len(seq)
@@ -127,18 +129,27 @@ class QCReport:
     removed_annotation: int = 0
     removed_proteins: int = 0
     removed_incomplete_isolates: int = 0
+    # Whole-pool length filter is skipped in segmented mode (the input is a
+    # mix of segments of very different lengths; per-segment bounds are
+    # applied later via segmented.viruses.<v>.segment_lengths instead).
+    length_filter_skipped: bool = False
     details: list[dict] = field(default_factory=list)
 
     def add_removed(self, seq_id: str, reason: str) -> None:
         self.details.append({"id": seq_id, "reason": reason})
 
     def summary(self) -> str:
+        length_line = (
+            "  Removed (length)    : skipped (segmented mode)"
+            if self.length_filter_skipped
+            else f"  Removed (length)    : {self.removed_length}"
+        )
         lines = [
             f"QC Summary",
             f"  Input sequences     : {self.total_input}",
             f"  Passed QC           : {self.passed}",
             f"  Removed (duplicates): {self.removed_duplicates}",
-            f"  Removed (length)    : {self.removed_length}",
+            length_line,
             f"  Removed (ambiguous) : {self.removed_ambiguous}",
             f"  Removed (annotation): {self.removed_annotation}",
             f"  Removed (proteins)  : {self.removed_proteins}",

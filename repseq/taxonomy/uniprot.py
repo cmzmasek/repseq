@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any, Optional
 
@@ -14,19 +15,32 @@ _TAXONOMY_API = "https://rest.uniprot.org/taxonomy"
 _RATE_LIMIT_DELAY = 0.2
 _SOURCE = "uniprot"
 _SOURCE_TAX = "uniprot_taxonomy"
+_NOT_FOUND: dict = {"_not_found": True}
 
 
 class UniProtAPI:
     def __init__(self, cache: TaxonomyCache) -> None:
         self._cache = cache
         self._last_request: float = 0.0
+        self._throttle_lock = threading.Lock()
+
+    def _throttle(self) -> None:
+        """Space successive requests at least ``_RATE_LIMIT_DELAY`` apart.
+
+        The sleep is held under the lock so concurrent resolver threads
+        queue for their slot rather than racing on ``_last_request``.
+        """
+        with self._throttle_lock:
+            now = time.time()
+            wait = self._last_request + _RATE_LIMIT_DELAY - now
+            if wait > 0:
+                time.sleep(wait)
+                now = time.time()
+            self._last_request = now
 
     def _get(self, url: str, params: Optional[dict] = None) -> dict:
-        elapsed = time.time() - self._last_request
-        if elapsed < _RATE_LIMIT_DELAY:
-            time.sleep(_RATE_LIMIT_DELAY - elapsed)
+        self._throttle()
         resp = requests.get(url, params=params, timeout=30)
-        self._last_request = time.time()
         resp.raise_for_status()
         return resp.json()
 
@@ -38,19 +52,25 @@ class UniProtAPI:
         """Fetch organism, taxonomy, host, and review status for a UniProt accession."""
         cached = self._cache.get(_SOURCE, accession)
         if cached is not None:
-            return cached
+            return None if cached.get("_not_found") else cached
 
         try:
             data = self._get(
                 f"{_UNIPROT_API}/{accession}",
                 params={"format": "json"},
             )
+        except requests.HTTPError as exc:
+            # Only a definitive 404 means "no such entry" — negative-cache
+            # that so repeat runs skip it. Transient failures (timeouts,
+            # 5xx, rate limits) must NOT poison the cache.
+            if exc.response is not None and exc.response.status_code == 404:
+                self._cache.set(_SOURCE, accession, _NOT_FOUND)
+            return None
         except Exception:
             return None
 
         result = _parse_uniprot_entry(accession, data)
-        if result:
-            self._cache.set(_SOURCE, accession, result)
+        self._cache.set(_SOURCE, accession, result)
         return result
 
     # ------------------------------------------------------------------
@@ -61,10 +81,14 @@ class UniProtAPI:
         key = str(taxid)
         cached = self._cache.get(_SOURCE_TAX, key)
         if cached is not None:
-            return cached
+            return None if cached.get("_not_found") else cached
 
         try:
             data = self._get(f"{_TAXONOMY_API}/{taxid}")
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                self._cache.set(_SOURCE_TAX, key, _NOT_FOUND)
+            return None
         except Exception:
             return None
 

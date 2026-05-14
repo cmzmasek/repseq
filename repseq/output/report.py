@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import datetime
 import platform
 import subprocess
@@ -42,7 +43,12 @@ def write_run_log(
         "",
         "CONFIGURATION",
     ]
-    for line in yaml.dump(cfg, default_flow_style=False, sort_keys=False).splitlines():
+    # Redact secrets before serialising the config into a plaintext log.
+    safe_cfg = copy.deepcopy(cfg)
+    tax_cfg = safe_cfg.get("taxonomy")
+    if isinstance(tax_cfg, dict) and tax_cfg.get("ncbi_api_key"):
+        tax_cfg["ncbi_api_key"] = "***redacted***"
+    for line in yaml.dump(safe_cfg, default_flow_style=False, sort_keys=False).splitlines():
         lines.append(f"  {line}")
     lines += [
         "",

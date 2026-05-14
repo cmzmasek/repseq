@@ -93,6 +93,19 @@ segmented:
       #   NEP/NS2 : alternative splice product, sometimes omitted
       # If you see your real isolates failing protein QC for PB1/PA/NS,
       # relax to [1, 2] for those segments.
+      # Per-segment nucleotide length bounds. Isolates where any segment
+      # falls outside its bounds are dropped before clustering.
+      # Typical RefSeq lengths shown; widen or remove if your dataset
+      # includes partial records you want to keep.
+      # segment_lengths:
+      #   PB2: {min: 2200, max: 2400}
+      #   PB1: {min: 2200, max: 2400}
+      #   PA:  {min: 2100, max: 2300}
+      #   HA:  {min: 1600, max: 1800}
+      #   NP:  {min: 1480, max: 1600}
+      #   NA:  {min: 1350, max: 1480}
+      #   M:   {min: 950,  max: 1050}
+      #   NS:  {min: 820,  max: 920}
       expected_proteins_per_segment:
         PB2: 1
         PB1: [1, 2]   # PB1 alone, or PB1 + PB1-F2

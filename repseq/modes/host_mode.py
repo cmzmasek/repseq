@@ -40,7 +40,8 @@ class HostMode(BaseMode):
                 all_reps.extend(group_seqs)
             else:
                 reps, _ = _binary_search_threshold(
-                    group_seqs, self.n_per_host, self.cfg, self.overflow  # type: ignore[arg-type]
+                    group_seqs, self.n_per_host, self.cfg, self.overflow,  # type: ignore[arg-type]
+                    label=host,
                 )
                 all_reps.extend(reps)
                 for rep in reps:
