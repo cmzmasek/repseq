@@ -152,6 +152,21 @@ def test_resolve_keeps_header_value_when_db_field_absent(tmp_cache_dir, make_seq
     assert s.host == "duck"
 
 
+# Taxonomy efetch XML — the *only* Entrez endpoint that returns the ranked
+# lineage. (Taxonomy esummary carries none: genus/species are blank for
+# viruses, which silently grouped every viral sequence as "Unknown".)
+_TAXONOMY_XML = """<?xml version="1.0"?>
+<TaxaSet><Taxon>
+  <TaxId>111</TaxId>
+  <ScientificName>Influenza A virus</ScientificName>
+  <Rank>species</Rank>
+  <LineageEx>
+    <Taxon><ScientificName>Orthomyxoviridae</ScientificName><Rank>family</Rank></Taxon>
+    <Taxon><ScientificName>Alphainfluenzavirus</ScientificName><Rank>genus</Rank></Taxon>
+  </LineageEx>
+</Taxon></TaxaSet>"""
+
+
 def test_fetch_accession_metadata_parses_source_qualifiers(tmp_cache_dir):
     # H1 regression: host/country/collection_date/strain must be harvested
     # from the esummary subtype/subname fields, not left to header parsing.
@@ -163,11 +178,6 @@ def test_fetch_accession_metadata_parses_source_qualifiers(tmp_cache_dir):
     def fake_get(endpoint, params):
         if endpoint == "esearch.fcgi":
             return {"esearchresult": {"idlist": ["999"]}}
-        if endpoint == "esummary.fcgi" and params.get("db") == "taxonomy":
-            return {"result": {"111": {"lineageex": [
-                {"rank": "genus", "scientificname": "Alphainfluenzavirus"},
-                {"rank": "family", "scientificname": "Orthomyxoviridae"},
-            ]}}}
         if endpoint == "esummary.fcgi":
             return {"result": {"999": {
                 "organism": "Influenza A virus",
@@ -179,6 +189,8 @@ def test_fetch_accession_metadata_parses_source_qualifiers(tmp_cache_dir):
         raise AssertionError(f"unexpected _get({endpoint!r}, {params!r})")
 
     ncbi._get = fake_get  # type: ignore[assignment]
+    # Lineage comes from taxonomy efetch (XML), not esummary.
+    ncbi._get_text = lambda endpoint, params: _TAXONOMY_XML  # type: ignore[assignment]
     meta = ncbi.fetch_accession_metadata("MW000001.1")
 
     assert meta["organism"] == "Influenza A virus"
@@ -187,6 +199,46 @@ def test_fetch_accession_metadata_parses_source_qualifiers(tmp_cache_dir):
     assert meta["collection_date"] == "2005-01"
     assert meta["strain"] == "A/duck/Vietnam/1/2005"
     assert meta["lineage"]["genus"] == "Alphainfluenzavirus"
+    assert meta["lineage"]["family"] == "Orthomyxoviridae"
+
+
+def test_parse_taxonomy_xml_extracts_ranked_lineage():
+    # Regression: virus lineage must be read from efetch XML <LineageEx>.
+    # The taxonomy esummary endpoint returns no lineage at all, so the old
+    # esummary-based parse gave every viral sequence an empty lineage and
+    # taxonomic modes grouped everything under "Unknown".
+    from repseq.taxonomy.ncbi import _parse_taxonomy_xml
+
+    xml_text = """<?xml version="1.0"?>
+    <TaxaSet><Taxon>
+      <TaxId>159137</TaxId>
+      <ScientificName>Yaba-7 virus</ScientificName>
+      <Rank>no rank</Rank>
+      <LineageEx>
+        <Taxon><ScientificName>Viruses</ScientificName><Rank>acellular root</Rank></Taxon>
+        <Taxon><ScientificName>Bunyaviricetes</ScientificName><Rank>class</Rank></Taxon>
+        <Taxon><ScientificName>Elliovirales</ScientificName><Rank>order</Rank></Taxon>
+        <Taxon><ScientificName>Peribunyaviridae</ScientificName><Rank>family</Rank></Taxon>
+        <Taxon><ScientificName>Orthobunyavirus</ScientificName><Rank>genus</Rank></Taxon>
+        <Taxon><ScientificName>Orthobunyavirus heptayabaense</ScientificName><Rank>species</Rank></Taxon>
+      </LineageEx>
+    </Taxon></TaxaSet>"""
+
+    ranks = _parse_taxonomy_xml(xml_text)
+    assert ranks["genus"] == "Orthobunyavirus"
+    assert ranks["family"] == "Peribunyaviridae"
+    assert ranks["order"] == "Elliovirales"
+    assert ranks["class"] == "Bunyaviricetes"
+    assert ranks["species"] == "Orthobunyavirus heptayabaense"
+    # 'no rank' entries (here the queried taxon itself) are skipped.
+    assert "no rank" not in ranks
+
+
+def test_parse_taxonomy_xml_handles_garbage():
+    from repseq.taxonomy.ncbi import _parse_taxonomy_xml
+
+    assert _parse_taxonomy_xml("not xml at all") == {}
+    assert _parse_taxonomy_xml("<TaxaSet></TaxaSet>") == {}
 
 
 # ---------------------------------------------------------------------------

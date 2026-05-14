@@ -131,7 +131,7 @@ class MetadataResolver:
         if seq.source in (SequenceSource.NCBI, SequenceSource.NCBI_VIRUS):
             meta = self._ncbi.fetch_accession_metadata(acc)
             if meta and meta.get("taxid") and not (meta.get("lineage")):
-                lineage = self._ncbi._fetch_lineage_esummary(meta["taxid"])
+                lineage = self._ncbi.fetch_lineage(meta["taxid"])
                 if lineage:
                     meta["lineage"] = lineage
             return meta
@@ -180,7 +180,7 @@ class MetadataResolver:
         if source == SequenceSource.UNIPROT:
             data = self._uniprot.fetch_lineage(taxid)
         else:
-            data = self._ncbi._fetch_lineage_esummary(taxid)
+            data = self._ncbi.fetch_lineage(taxid)
         if data:
             return _build_taxonomy(data)
         return None

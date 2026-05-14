@@ -41,13 +41,17 @@ class NCBITaxonomy:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _params(self, extra: dict) -> dict:
-        p: dict = {"retmode": "json", **extra}
+    def _auth_params(self, extra: dict) -> dict:
+        """Attach email/api_key auth params without forcing a retmode."""
+        p = dict(extra)
         if self._email:
             p["email"] = self._email
         if self._api_key:
             p["api_key"] = self._api_key
         return p
+
+    def _params(self, extra: dict) -> dict:
+        return self._auth_params({"retmode": "json", **extra})
 
     def _throttle(self) -> None:
         """Space successive Entrez requests at least ``self._delay`` apart.
@@ -71,70 +75,66 @@ class NCBITaxonomy:
         resp.raise_for_status()
         return resp.json()
 
+    def _get_text(self, endpoint: str, params: dict) -> str:
+        """Like ``_get`` but returns the raw response body — for the Entrez
+        endpoints that only speak XML (taxonomy ``efetch``)."""
+        self._throttle()
+        resp = requests.get(f"{_ENTREZ_BASE}/{endpoint}", params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.text
+
     # ------------------------------------------------------------------
     # Taxonomy by taxid
     # ------------------------------------------------------------------
 
     def fetch_lineage(self, taxid: int) -> Optional[dict[str, Any]]:
-        """Return lineage dict for a taxid, using cache."""
-        key = str(taxid)
-        cached = self._cache.get(_SOURCE, key)
-        if cached is not None:
-            return cached
+        """Return the full taxonomic lineage for a taxid (cached).
 
-        try:
-            data = self._get(
-                "efetch.fcgi",
-                self._params({"db": "taxonomy", "id": str(taxid), "retmode": "xml"}),
-            )
-        except Exception:
-            return None
+        Uses Entrez ``efetch`` on the taxonomy DB (XML). The taxonomy
+        *esummary* response — which a previous implementation parsed — does
+        not carry the lineage at all: its ``genus``/``species`` fields are
+        blank for viruses and there is no ``LineageEx``. That silently gave
+        every viral sequence an empty lineage, so taxonomic modes grouped
+        everything under "Unknown". ``efetch`` is the only Entrez endpoint
+        that returns the ranked lineage.
 
-        # efetch with retmode=json for taxonomy doesn't work; use XML via requests
-        # Fallback: use esummary
-        return self._fetch_lineage_esummary(taxid)
-
-    def _fetch_lineage_esummary(self, taxid: int) -> Optional[dict[str, Any]]:
+        Returns a dict with the standard rank keys plus a ``lineage``
+        rank→name map, or ``None`` if the taxid has no usable lineage.
+        """
         key = str(taxid)
         cached = self._cache.get(_SOURCE, key)
         if cached is not None:
             return None if cached.get("_not_found") else cached
 
         try:
-            data = self._get(
-                "esummary.fcgi",
-                self._params({"db": "taxonomy", "id": str(taxid)}),
+            xml_text = self._get_text(
+                "efetch.fcgi",
+                self._auth_params(
+                    {"db": "taxonomy", "id": str(taxid), "retmode": "xml"}
+                ),
             )
-            result_dict = data.get("result", {})
-            rec = result_dict.get(str(taxid), {})
-            if not rec:
-                self._cache.set(_SOURCE, key, _NOT_FOUND)
-                return None
-
-            lineage_ex = rec.get("lineageex", [])
-            rank_map: dict[str, str] = {}
-            for entry in lineage_ex:
-                rank = entry.get("rank", "").lower()
-                name = entry.get("scientificname", "")
-                if rank and name and rank != "no rank":
-                    rank_map[rank] = name
-
-            result = {
-                "taxid": taxid,
-                "species": rank_map.get("species"),
-                "genus": rank_map.get("genus"),
-                "family": rank_map.get("family"),
-                "order": rank_map.get("order"),
-                "class": rank_map.get("class"),
-                "phylum": rank_map.get("phylum"),
-                "kingdom": rank_map.get("kingdom"),
-                "superkingdom": rank_map.get("superkingdom"),
-                "lineage": rank_map,
-            }
-            self._cache.set(_SOURCE, key, result)
-            return result
         except Exception:
             return None
+
+        rank_map = _parse_taxonomy_xml(xml_text)
+        if not rank_map:
+            self._cache.set(_SOURCE, key, _NOT_FOUND)
+            return None
+
+        result = {
+            "taxid": taxid,
+            "species": rank_map.get("species"),
+            "genus": rank_map.get("genus"),
+            "family": rank_map.get("family"),
+            "order": rank_map.get("order"),
+            "class": rank_map.get("class"),
+            "phylum": rank_map.get("phylum"),
+            "kingdom": rank_map.get("kingdom"),
+            "superkingdom": rank_map.get("superkingdom"),
+            "lineage": rank_map,
+        }
+        self._cache.set(_SOURCE, key, result)
+        return result
 
     # ------------------------------------------------------------------
     # Metadata from accession (nuccore / protein)
@@ -200,7 +200,7 @@ class NCBITaxonomy:
 
             # Fetch lineage if we have a taxid
             if result["taxid"]:
-                lineage = self._fetch_lineage_esummary(result["taxid"])
+                lineage = self.fetch_lineage(result["taxid"])
                 if lineage:
                     result["lineage"] = lineage
 
@@ -309,6 +309,42 @@ class NCBITaxonomy:
             else:
                 results[acc] = by_acc_no_version.get(acc.split(".")[0], [])
         return results
+
+
+def _parse_taxonomy_xml(xml_text: str) -> dict[str, str]:
+    """Parse an Entrez taxonomy ``efetch`` XML payload into a rank→name map.
+
+    Collects every ranked entry in the queried taxon's ``<LineageEx>`` plus
+    the queried taxon's own rank. Entries with rank ``no rank`` or ``clade``
+    are skipped — only named ranks (genus, family, order, …) are kept.
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return {}
+
+    taxon = root.find("Taxon")
+    if taxon is None:
+        return {}
+
+    rank_map: dict[str, str] = {}
+
+    def _add(node) -> None:
+        rank = (node.findtext("Rank") or "").strip().lower()
+        name = (node.findtext("ScientificName") or "").strip()
+        if rank and name and rank not in ("no rank", "clade"):
+            rank_map.setdefault(rank, name)
+
+    lineage_ex = taxon.find("LineageEx")
+    if lineage_ex is not None:
+        for node in lineage_ex.findall("Taxon"):
+            _add(node)
+    # The queried taxon itself may carry a useful rank (e.g. it *is* the
+    # species); add it last so a LineageEx entry of the same rank wins.
+    _add(taxon)
+    return rank_map
 
 
 def _looks_like_protein_acc(acc: str) -> bool:

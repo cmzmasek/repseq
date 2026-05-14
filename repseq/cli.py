@@ -9,6 +9,7 @@ from typing import Optional
 import click
 import yaml
 
+from . import __version__
 from .config import load_config, validate_config, get_virus_config
 from .io.fasta import read_fasta
 from .models import SequenceSource
@@ -274,7 +275,7 @@ def _final_summary(result, qc_report, cfg) -> None:
 # ---------------------------------------------------------------------------
 
 @click.group()
-@click.version_option(package_name="repseq")
+@click.version_option(version=__version__, prog_name="repseq")
 def main():
     """repseq — representative sequence selection for large bioinformatics datasets."""
     pass

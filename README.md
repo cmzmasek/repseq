@@ -400,9 +400,21 @@ to run anywhere and finish in a couple of seconds.
 
 ## Status
 
-**`v0.5.1`** — all 8 selection modes, optional protein-annotation QC (with
+**`v0.5.2`** — all 8 selection modes, optional protein-annotation QC (with
 per-segment counts and per-segment length bounds), segment-name synonyms, a
 protein-FASTA output, and an optional UMAP plot of the clustering.
+
+New in `v0.5.2`:
+
+- **Taxonomy lineage fix.** Genus/family/order are now resolved from NCBI's
+  `efetch` endpoint, which actually returns the ranked lineage. The previous
+  code read NCBI's taxonomy *summary* endpoint, which carries no lineage for
+  viruses — so taxonomic modes silently grouped every viral sequence under
+  "Unknown". **If you ran an earlier version, clear the cached taxonomy first:**
+  `repseq cache clear --source ncbi_taxonomy` and
+  `repseq cache clear --source ncbi_nuccore`.
+- `repseq --version` always reports the real version (single source of truth
+  in the package, no stale-install surprises).
 
 New in `v0.5.1`:
 
@@ -429,5 +441,5 @@ New in `v0.5.0`:
   search direction, NCBI host/country/date harvesting, a length-robust diversity
   metric, and thread-safe caching.
 
-**150 offline regression tests pass.** The NCBI-backed paths have been tested
+**152 offline regression tests pass.** The NCBI-backed paths have been tested
 end-to-end against a live influenza A H1N1 RefSeq genome (8 segments, 11 proteins).

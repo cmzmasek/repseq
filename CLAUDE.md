@@ -157,7 +157,7 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
 
 ## Status
 
-`v0.5.1`. All 8 modes structurally complete, optional protein-annotation
+`v0.5.2`. All 8 modes structurally complete, optional protein-annotation
 QC (batched GenBank fetch + per-segment count check), a protein-FASTA
 output reconstructed from cached records, per-segment nucleotide length
 bounds (`segment_lengths` in virus config, applied after completeness
@@ -170,7 +170,10 @@ run ends with a one-line CLI summary (representatives/clusters selected, QC
 pass rate) or, when nothing is selected, a stderr warning naming the most
 likely cause (`cli._final_summary`). Every mode also records per-group
 before/after counts (`RunResult.group_stats`) written to
-`{prefix}_group_counts.tsv`. 150 offline regression tests cover IO,
+`{prefix}_group_counts.tsv`. Taxonomic lineage is resolved via NCBI
+`efetch` XML (`ncbi._parse_taxonomy_xml`) — the taxonomy *esummary*
+endpoint carries no lineage for viruses, which used to group every
+viral sequence under "Unknown". 152 offline regression tests cover IO,
 QC, selector, segmented logic (including per-segment length filtering),
 cache TTL, config validation, diversity selection, resolver fallback, mode
 dispatch (clustering mocked), protein parser + filter, FASTA writer, segment
