@@ -16,6 +16,7 @@ density threshold to avoid spaghetti.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import random
 from collections import Counter
@@ -32,20 +33,44 @@ DEFAULT_MAX_LINES = 500
 
 
 def _check_deps() -> None:
+    """Verify the optional plotting stack is importable.
+
+    Distinguishes "not installed" from "installed but failing to import".
+    The latter is almost always a NumPy/SciPy/numba version clash in the
+    environment — ``import umap`` then raises an ``ImportError`` of its own,
+    which the old code mistook for "umap-learn is missing" and told the user
+    to reinstall a package they already had. Surface the real error instead.
+    """
     missing: list[str] = []
-    try:
-        import matplotlib  # noqa: F401
-    except ImportError:
-        missing.append("matplotlib")
-    try:
-        import umap  # noqa: F401
-    except ImportError:
-        missing.append("umap-learn")
+    broken: list[str] = []
+    for module, pip_name in (("matplotlib", "matplotlib"), ("umap", "umap-learn")):
+        try:
+            importlib.import_module(module)
+        except ModuleNotFoundError as exc:
+            # The package itself is absent vs. one of its dependencies is.
+            if exc.name == module:
+                missing.append(pip_name)
+            else:
+                broken.append(f"{pip_name}: {exc}")
+        except ImportError as exc:
+            broken.append(f"{pip_name}: {exc}")
+
+    parts: list[str] = []
     if missing:
-        raise ImportError(
-            f"Plotting requires {', '.join(missing)}. Install the optional "
+        parts.append(
+            f"Plotting requires {', '.join(missing)} — install the optional "
             "extras with: pip install 'repseq[viz]'"
         )
+    if broken:
+        parts.append(
+            "the plotting stack is installed but failed to import ["
+            + "; ".join(broken)
+            + "] — this is almost always a NumPy/SciPy/numba version "
+            "mismatch in the environment, not a repseq problem; the cleanest "
+            "fix is a dedicated environment for repseq"
+        )
+    if parts:
+        raise ImportError("; ".join(parts))
 
 
 def write_clustering_plot(

@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..clustering.mmseqs2 import run_clustering
-from ..models import Cluster, RunResult, Sequence
+from ..models import Cluster, GroupStat, RunResult, Sequence
 from ..representative.selector import apply_representative_selection
 from .base import BaseMode
 from .taxonomic1 import _group_by_rank, _binary_search_threshold
@@ -49,14 +49,17 @@ class TaxonomicMode2(BaseMode):
     def run(self, sequences: list[Sequence]) -> RunResult:
         all_reps: list[Sequence] = []
         all_clusters: list[Cluster] = []
+        group_stats: list[GroupStat] = []
 
         # Start with all sequences, progressively refine
-        self._recurse(sequences, self.rank_levels, all_reps, all_clusters, prefix="")
+        self._recurse(sequences, self.rank_levels, all_reps, all_clusters,
+                      group_stats, prefix="")
 
         return RunResult(
             mode="taxonomic2",
             representatives=all_reps,
             clusters=all_clusters,
+            group_stats=group_stats,
             config_snapshot={
                 "rank_levels": self.rank_levels,
                 "overflow": self.overflow,
@@ -69,6 +72,7 @@ class TaxonomicMode2(BaseMode):
         remaining_levels: list[dict[str, Any]],
         all_reps: list[Sequence],
         all_clusters: list[Cluster],
+        group_stats: list[GroupStat],
         prefix: str,
     ) -> None:
         if not sequences:
@@ -92,8 +96,15 @@ class TaxonomicMode2(BaseMode):
             group_prefix = f"{prefix}/{rank}={group_label}" if prefix else f"{rank}={group_label}"
 
             if len(group_seqs) <= n_per_group:
-                # Recurse into next level without clustering
-                self._recurse(group_seqs, next_levels, all_reps, all_clusters, group_prefix)
+                # No clustering at this level; record the pass-through count
+                # before recursing into the next rank.
+                group_stats.append(GroupStat(
+                    grouping=rank, group=group_prefix,
+                    n_before=len(group_seqs), n_after=len(group_seqs),
+                    clustered=False,
+                ))
+                self._recurse(group_seqs, next_levels, all_reps, all_clusters,
+                              group_stats, group_prefix)
             else:
                 reps, threshold = _binary_search_threshold(
                     group_seqs,
@@ -102,5 +113,11 @@ class TaxonomicMode2(BaseMode):
                     self.overflow,  # type: ignore[arg-type]
                     label=group_prefix,
                 )
+                group_stats.append(GroupStat(
+                    grouping=rank, group=group_prefix,
+                    n_before=len(group_seqs), n_after=len(reps),
+                    clustered=True, cutoff=threshold,
+                ))
                 # Recurse into next level with the representatives
-                self._recurse(reps, next_levels, all_reps, all_clusters, group_prefix)
+                self._recurse(reps, next_levels, all_reps, all_clusters,
+                              group_stats, group_prefix)

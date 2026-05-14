@@ -278,6 +278,38 @@ def write_cluster_tsv(result: RunResult, path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-group selection counts TSV
+# ---------------------------------------------------------------------------
+
+def write_group_counts_tsv(result: RunResult, path: Path) -> bool:
+    """Write per-group before/after selection counts to TSV.
+
+    One row per group at whatever dimension the mode stratified on
+    (taxonomic rank, host, time window, country, custom field, hybrid
+    field combination, or the whole dataset for ``global``). ``n_before``
+    is the number of sequences entering the group — in segmented runs
+    these are the concatenated per-isolate sequences. ``cutoff`` is the
+    MMseqs2 identity threshold the binary search settled on for that
+    group, left blank when the group was small enough to keep without
+    clustering (``clustered`` is then ``false``).
+
+    Returns False without writing when the mode recorded no group stats.
+    """
+    if not result.group_stats:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("grouping\tgroup\tn_before\tn_after\tclustered\tcutoff\n")
+        for gs in result.group_stats:
+            cutoff = f"{gs.cutoff:.4f}" if gs.cutoff is not None else ""
+            fh.write(
+                f"{gs.grouping}\t{gs.group}\t{gs.n_before}\t{gs.n_after}\t"
+                f"{str(gs.clustered).lower()}\t{cutoff}\n"
+            )
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Write all reports
 # ---------------------------------------------------------------------------
 
@@ -296,6 +328,7 @@ def write_all_reports(
     write_qc_tsv(qc_report, out_dir / f"{prefix}_qc_removed.tsv")
     write_representative_tsv(result.representatives, out_dir / f"{prefix}_representatives.tsv")
     write_cluster_tsv(result, out_dir / f"{prefix}_clusters.tsv")
+    write_group_counts_tsv(result, out_dir / f"{prefix}_group_counts.tsv")
     if complete_isolates:
         write_isolate_proteins_tsv(
             complete_isolates, out_dir / f"{prefix}_isolate_proteins.tsv"

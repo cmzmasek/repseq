@@ -11,7 +11,7 @@ from typing import Any, Literal, Optional
 
 from ..clustering.diversity import select_diverse
 from ..clustering.mmseqs2 import run_clustering
-from ..models import Cluster, RunResult, Sequence
+from ..models import Cluster, GroupStat, RunResult, Sequence
 from ..representative.selector import apply_representative_selection
 from .base import BaseMode
 
@@ -136,6 +136,7 @@ class TaxonomicMode1(BaseMode):
         groups = _group_by_rank(sequences, self.rank)
         all_reps: list[Sequence] = []
         all_clusters: list[Cluster] = []
+        group_stats: list[GroupStat] = []
 
         for group_label, group_seqs in groups.items():
             if len(group_seqs) <= self.n_per_group:
@@ -148,8 +149,13 @@ class TaxonomicMode1(BaseMode):
                         )
                     )
                 all_reps.extend(group_seqs)
+                group_stats.append(GroupStat(
+                    grouping=self.rank, group=group_label,
+                    n_before=len(group_seqs), n_after=len(group_seqs),
+                    clustered=False,
+                ))
             else:
-                reps, _ = _binary_search_threshold(
+                reps, threshold = _binary_search_threshold(
                     group_seqs,
                     self.n_per_group,
                     self.cfg,
@@ -164,11 +170,17 @@ class TaxonomicMode1(BaseMode):
                             representative=rep,
                         )
                     )
+                group_stats.append(GroupStat(
+                    grouping=self.rank, group=group_label,
+                    n_before=len(group_seqs), n_after=len(reps),
+                    clustered=True, cutoff=threshold,
+                ))
 
         return RunResult(
             mode="taxonomic1",
             representatives=all_reps,
             clusters=all_clusters,
+            group_stats=group_stats,
             config_snapshot={
                 "rank": self.rank,
                 "n_per_group": self.n_per_group,

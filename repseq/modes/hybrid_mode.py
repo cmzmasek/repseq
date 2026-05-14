@@ -5,7 +5,7 @@ from __future__ import annotations
 from itertools import product
 from typing import Any, Optional
 
-from ..models import Cluster, RunResult, Sequence
+from ..models import Cluster, GroupStat, RunResult, Sequence
 from .base import BaseMode
 from .custom_mode import _get_field_value, load_metadata_table
 from .taxonomic1 import _binary_search_threshold
@@ -79,6 +79,8 @@ class HybridMode(BaseMode):
         )
         all_reps: list[Sequence] = []
         all_clusters: list[Cluster] = []
+        group_stats: list[GroupStat] = []
+        grouping = "|".join(self.fields)
 
         for key_tuple, group_seqs in sorted(groups.items()):
             label = "|".join(f"{f}={v}" for f, v in zip(self.fields, key_tuple))
@@ -89,8 +91,13 @@ class HybridMode(BaseMode):
                         Cluster(cluster_id=f"{label}|{seq.id}", representative=seq)
                     )
                 all_reps.extend(group_seqs)
+                group_stats.append(GroupStat(
+                    grouping=grouping, group=label,
+                    n_before=len(group_seqs), n_after=len(group_seqs),
+                    clustered=False,
+                ))
             else:
-                reps, _ = _binary_search_threshold(
+                reps, threshold = _binary_search_threshold(
                     group_seqs, self.n_per_group, self.cfg, self.overflow,  # type: ignore[arg-type]
                     label=label,
                 )
@@ -99,11 +106,17 @@ class HybridMode(BaseMode):
                     all_clusters.append(
                         Cluster(cluster_id=f"{label}|{rep.id}", representative=rep)
                     )
+                group_stats.append(GroupStat(
+                    grouping=grouping, group=label,
+                    n_before=len(group_seqs), n_after=len(reps),
+                    clustered=True, cutoff=threshold,
+                ))
 
         return RunResult(
             mode="hybrid",
             representatives=all_reps,
             clusters=all_clusters,
+            group_stats=group_stats,
             config_snapshot={
                 "fields": self.fields,
                 "n_per_group": self.n_per_group,

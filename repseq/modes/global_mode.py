@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from ..clustering.diversity import select_diverse
 from ..clustering.mmseqs2 import run_clustering
-from ..models import Cluster, RunResult, Sequence
+from ..models import Cluster, GroupStat, RunResult, Sequence
 from ..representative.selector import apply_representative_selection
 from .base import BaseMode
 
@@ -43,6 +43,11 @@ class GlobalMode(BaseMode):
             mode="global:threshold",
             representatives=representatives,
             clusters=clusters,
+            group_stats=[GroupStat(
+                grouping="global", group="(all)",
+                n_before=len(sequences), n_after=len(representatives),
+                clustered=True, cutoff=self.threshold,
+            )],
             config_snapshot={"threshold": self.threshold},
         )
 
@@ -52,9 +57,16 @@ class GlobalMode(BaseMode):
             Cluster(cluster_id=f"div_{i+1:06d}", representative=s)
             for i, s in enumerate(selected)
         ]
+        # Diversity selection (MaxMin), not threshold clustering — there is
+        # no identity cutoff to report.
         return RunResult(
             mode="global:count",
             representatives=selected,
             clusters=clusters,
+            group_stats=[GroupStat(
+                grouping="global", group="(all)",
+                n_before=len(sequences), n_after=len(selected),
+                clustered=False,
+            )],
             config_snapshot={"n_select": self.n_select},
         )

@@ -120,6 +120,26 @@ class Cluster:
 
 
 @dataclass
+class GroupStat:
+    """Per-group before/after counts for one stratified-selection group.
+
+    Recorded by every grouping mode (taxonomic1/2, host, time, geographic,
+    custom, hybrid) and by global mode. ``n_before`` is the number of
+    sequences entering the group — in segmented runs these are the
+    concatenated per-isolate sequences, since segmentation happens before
+    the mode runs. ``cutoff`` is the MMseqs2 identity threshold the binary
+    search settled on, or ``None`` when the group was small enough to keep
+    without clustering.
+    """
+    grouping: str            # the grouping dimension (rank name, "host", field, …)
+    group: str               # the group label/value within that dimension
+    n_before: int            # sequences entering the group
+    n_after: int             # representatives selected from the group
+    clustered: bool          # whether MMseqs2 clustering ran (vs. kept whole)
+    cutoff: Optional[float] = None   # MMseqs2 identity threshold used, if clustered
+
+
+@dataclass
 class QCReport:
     total_input: int = 0
     passed: int = 0
@@ -163,5 +183,6 @@ class RunResult:
     mode: str
     representatives: list[Sequence] = field(default_factory=list)
     clusters: list[Cluster] = field(default_factory=list)
+    group_stats: list[GroupStat] = field(default_factory=list)
     qc_report: Optional[QCReport] = None
     config_snapshot: dict = field(default_factory=dict)

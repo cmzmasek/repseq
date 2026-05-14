@@ -97,6 +97,55 @@ def test_taxonomic1_large_group_triggers_clustering(make_seq):
     assert len(result.representatives) == 2
 
 
+def test_taxonomic1_records_group_stats_for_small_groups(make_seq):
+    """Groups kept whole record clustered=False and no cutoff."""
+    s1 = _with_tax(make_seq("s1", "ACGT" * 20), genus="Foo")
+    s2 = _with_tax(make_seq("s2", "ACGT" * 20), genus="Foo")
+    s3 = _with_tax(make_seq("s3", "TGCA" * 20), genus="Bar")
+
+    with patch("repseq.modes.taxonomic1.run_clustering"):
+        result = TaxonomicMode1(_base_cfg(), rank="genus", n_per_group=5).run([s1, s2, s3])
+
+    stats = {gs.group: gs for gs in result.group_stats}
+    assert set(stats) == {"Foo", "Bar"}
+    assert all(gs.grouping == "genus" for gs in result.group_stats)
+    assert (stats["Foo"].n_before, stats["Foo"].n_after) == (2, 2)
+    assert stats["Foo"].clustered is False and stats["Foo"].cutoff is None
+
+
+def test_taxonomic1_group_stats_record_cutoff_when_clustered(make_seq):
+    """A clustered group records the binary-search threshold as its cutoff."""
+    seqs = [_with_tax(make_seq(f"s{i}", "ACGT" * 20), genus="Foo") for i in range(10)]
+    fake_clusters = [
+        Cluster(cluster_id=f"c{i}", representative=seqs[i]) for i in range(2)
+    ]
+
+    with patch("repseq.modes.taxonomic1.run_clustering", return_value=fake_clusters):
+        result = TaxonomicMode1(_base_cfg(), rank="genus", n_per_group=2).run(seqs)
+
+    assert len(result.group_stats) == 1
+    gs = result.group_stats[0]
+    assert (gs.grouping, gs.group) == ("genus", "Foo")
+    assert (gs.n_before, gs.n_after) == (10, 2)
+    assert gs.clustered is True
+    assert gs.cutoff is not None and 0.0 < gs.cutoff <= 1.0
+
+
+def test_global_mode_records_group_stats(make_seq):
+    seqs = [
+        make_seq("a", "AAAAACCCCCGGGGGTTTTT"),
+        make_seq("b", "AAAAACCCCCGGGGGTTTTC"),
+        make_seq("c", "TTTTTGGGGGCCCCCAAAAA"),
+    ]
+    result = GlobalMode(_base_cfg(), n_select=2).run(seqs)
+    assert len(result.group_stats) == 1
+    gs = result.group_stats[0]
+    assert (gs.grouping, gs.group) == ("global", "(all)")
+    assert (gs.n_before, gs.n_after) == (3, 2)
+    # Diversity selection, not threshold clustering — no cutoff.
+    assert gs.clustered is False and gs.cutoff is None
+
+
 def test_taxonomic1_missing_rank_grouped_as_unknown(make_seq):
     s1 = _with_tax(make_seq("s1", "ACGT" * 20), genus="Foo")
     s2 = make_seq("s2", "ACGT" * 20)  # no taxonomy at all

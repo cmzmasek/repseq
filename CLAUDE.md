@@ -61,7 +61,10 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
 6. The chosen mode runs (`modes/<mode>.py`), returning a `RunResult` with
    `representatives` + `clusters`.
 7. `write_results` writes the FASTA(s); `write_all_reports` writes the
-   plain-text/TSV reports — including `{prefix}_isolate_proteins.tsv`
+   plain-text/TSV reports — including `{prefix}_group_counts.tsv`
+   (one row per stratification group: `grouping, group, n_before,
+   n_after, clustered, cutoff` — populated from `RunResult.group_stats`,
+   which every mode fills in), `{prefix}_isolate_proteins.tsv`
    (one row per CDS per passing isolate, segmented mode) and
    `{prefix}_proteins.fasta` (amino-acid sequences for all proteins of
    the selected representatives). The protein FASTA is reconstructed
@@ -154,7 +157,7 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
 
 ## Status
 
-`v0.5.0`. All 8 modes structurally complete, optional protein-annotation
+`v0.5.1`. All 8 modes structurally complete, optional protein-annotation
 QC (batched GenBank fetch + per-segment count check), a protein-FASTA
 output reconstructed from cached records, per-segment nucleotide length
 bounds (`segment_lengths` in virus config, applied after completeness
@@ -165,12 +168,14 @@ lengths make a pooled median meaningless and would drop short segments,
 leaving every isolate incomplete) — use `segment_lengths` instead. Every
 run ends with a one-line CLI summary (representatives/clusters selected, QC
 pass rate) or, when nothing is selected, a stderr warning naming the most
-likely cause (`cli._final_summary`). 145 offline regression tests cover IO,
+likely cause (`cli._final_summary`). Every mode also records per-group
+before/after counts (`RunResult.group_stats`) written to
+`{prefix}_group_counts.tsv`. 150 offline regression tests cover IO,
 QC, selector, segmented logic (including per-segment length filtering),
 cache TTL, config validation, diversity selection, resolver fallback, mode
 dispatch (clustering mocked), protein parser + filter, FASTA writer, segment
-aliases, the closing CLI summary, and the clustering plot
-(auto-skipped if `umap-learn` is missing). NCBI Entrez paths have been
+aliases, the closing CLI summary, per-group count reporting, and the
+clustering plot (auto-skipped if `umap-learn` is missing). NCBI Entrez paths have been
 live-tested against the H1N1 RefSeq genome (8 segments, 11 proteins).
 
 A full pipeline audit (see git history around this note) fixed, with

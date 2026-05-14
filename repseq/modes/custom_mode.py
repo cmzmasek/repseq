@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-from ..models import Cluster, RunResult, Sequence
+from ..models import Cluster, GroupStat, RunResult, Sequence
 from .base import BaseMode
 from .taxonomic1 import _binary_search_threshold
 
@@ -127,6 +127,7 @@ class CustomMode(BaseMode):
         )
         all_reps: list[Sequence] = []
         all_clusters: list[Cluster] = []
+        group_stats: list[GroupStat] = []
 
         for group_label, group_seqs in sorted(groups.items()):
             if len(group_seqs) <= self.n_per_group:
@@ -135,8 +136,13 @@ class CustomMode(BaseMode):
                         Cluster(cluster_id=f"{self.field}={group_label}|{seq.id}", representative=seq)
                     )
                 all_reps.extend(group_seqs)
+                group_stats.append(GroupStat(
+                    grouping=self.field, group=str(group_label),
+                    n_before=len(group_seqs), n_after=len(group_seqs),
+                    clustered=False,
+                ))
             else:
-                reps, _ = _binary_search_threshold(
+                reps, threshold = _binary_search_threshold(
                     group_seqs, self.n_per_group, self.cfg, self.overflow,  # type: ignore[arg-type]
                     label=str(group_label),
                 )
@@ -145,11 +151,17 @@ class CustomMode(BaseMode):
                     all_clusters.append(
                         Cluster(cluster_id=f"{self.field}={group_label}|{rep.id}", representative=rep)
                     )
+                group_stats.append(GroupStat(
+                    grouping=self.field, group=str(group_label),
+                    n_before=len(group_seqs), n_after=len(reps),
+                    clustered=True, cutoff=threshold,
+                ))
 
         return RunResult(
             mode="custom",
             representatives=all_reps,
             clusters=all_clusters,
+            group_stats=group_stats,
             config_snapshot={
                 "field": self.field,
                 "n_per_group": self.n_per_group,

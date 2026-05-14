@@ -168,6 +168,7 @@ Everything is written to the output directory (`./repseq_output/` by default):
 | `{prefix}_representatives.fasta` | **The main result** — your selected sequences. |
 | `{prefix}_representatives.tsv` | A spreadsheet: one row per representative, with accession, organism, host, country, date, taxonomy. Opens in Excel. |
 | `{prefix}_clusters.tsv` | Which sequences ended up grouped together, and which one was picked. |
+| `{prefix}_group_counts.tsv` | One row per group (genus, host, year, country, … — whatever your mode stratified on): how many sequences went *in*, how many came *out*, whether clustering ran, and the similarity cutoff it settled on. The quickest way to see where the reduction happened. |
 | `{prefix}_qc_removed.tsv` | Every sequence that was dropped during cleaning, and *why*. Check this if you lost more than expected. |
 | `{prefix}_run.log` | Plain-text record of the settings used and the per-step counts. |
 | `{prefix}_proteins.fasta` | *(if protein QC is on)* The protein sequences of all your representatives. |
@@ -399,11 +400,22 @@ to run anywhere and finish in a couple of seconds.
 
 ## Status
 
-**`v0.5.0`** — all 8 selection modes, optional protein-annotation QC (with
+**`v0.5.1`** — all 8 selection modes, optional protein-annotation QC (with
 per-segment counts and per-segment length bounds), segment-name synonyms, a
 protein-FASTA output, and an optional UMAP plot of the clustering.
 
-New in this release:
+New in `v0.5.1`:
+
+- **Per-group counts report.** Every run now writes `{prefix}_group_counts.tsv`
+  — one row per group (genus, host, year, country, …) with how many sequences
+  went in, how many came out, whether clustering ran, and the similarity cutoff
+  used. The fastest way to see exactly where the reduction happened.
+- **Honest plot-dependency errors.** When `--plot` is skipped, the message now
+  distinguishes "the plotting extras aren't installed" from "they're installed
+  but failing to import" (usually a NumPy/SciPy version clash in the
+  environment) instead of always telling you to reinstall.
+
+New in `v0.5.0`:
 
 - **Clearer endings.** Every run finishes with a one-line summary (how many
   sequences passed cleaning, how many representatives were selected) — or, if
@@ -412,11 +424,10 @@ New in this release:
   skipped automatically in segmented mode, where a single median length is
   meaningless and would wrongly discard the short segments. Use per-segment
   `segment_lengths` instead.
+- A full pipeline audit — corrected sequence-ID handling through clustering,
+  RefSeq accession routing, the `MAG:` keyword filter, the similarity-threshold
+  search direction, NCBI host/country/date harvesting, a length-robust diversity
+  metric, and thread-safe caching.
 
-This release also folds in a full pipeline audit — corrected sequence-ID handling
-through clustering, RefSeq accession routing, the `MAG:` keyword filter, the
-similarity-threshold search direction, NCBI host/country/date harvesting, a
-length-robust diversity metric, and thread-safe caching.
-
-**145 offline regression tests pass.** The NCBI-backed paths have been tested
+**150 offline regression tests pass.** The NCBI-backed paths have been tested
 end-to-end against a live influenza A H1N1 RefSeq genome (8 segments, 11 proteins).
