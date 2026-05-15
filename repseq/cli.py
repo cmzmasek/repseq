@@ -349,6 +349,30 @@ def main():
 
 
 # ---------------------------------------------------------------------------
+# doctor — self-test
+# ---------------------------------------------------------------------------
+
+@main.command("doctor")
+@click.option("--config", "-c", "config_path", default=None,
+              help="Path to YAML config file to validate (optional).")
+@click.option("--no-network", is_flag=True, default=False,
+              help="Skip the NCBI and UniProt reachability checks.")
+def run_doctor_cmd(config_path, no_network):
+    """Self-test: check dependencies, external tools, network, and config.
+
+    Run this whenever something stops working or after a fresh install.
+    Each check is tagged [OK], [WARN] (optional piece missing), or [FAIL]
+    (something required is broken). repseq exits non-zero only if any
+    [FAIL] is reported.
+    """
+    from .doctor import run_doctor
+    cfg = load_config(config_path)
+    report = run_doctor(cfg, config_path=config_path, no_network=no_network)
+    click.echo(report.render(__version__))
+    sys.exit(1 if report.has_failures else 0)
+
+
+# ---------------------------------------------------------------------------
 # run global
 # ---------------------------------------------------------------------------
 

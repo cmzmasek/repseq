@@ -422,6 +422,13 @@ the real run, and make sure your `ncbi_email` is set in the config.
 **Lookups are slow the first time** — that's expected; they're cached, so the
 *second* run on the same data is fast. An NCBI API key speeds up the first run.
 
+**Not sure if everything's installed?** Run `repseq doctor`. It checks every
+required and optional dependency, the external tools (`mmseqs`, `cd-hit`,
+`mafft`, `FastTree`), reaches NCBI and UniProt to confirm the network is
+working, and verifies your config is valid — then tells you in plain English
+what (if anything) needs fixing. Add `--no-network` to skip the database
+pings if you're offline.
+
 **`[phylo skipped]` / `[phylo failed]`** — the `--phylo` step is fail-soft: if
 fewer than 3 representatives survived, or `mafft` / `FastTree` are missing or
 errored, the message is printed to stderr and the rest of the run's outputs

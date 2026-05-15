@@ -38,10 +38,11 @@ repseq/
 ├── modes/                  ← one file per selection mode, all extend BaseMode
 ├── output/{writer,report}.py ← FASTA + TSV/text report writers
 ├── viz/clustering_plot.py  ← UMAP scatter (optional, [viz] extras)
-└── phylo/                  ← optional MSA + tree step (--phylo)
-    ├── mafft.py            ← shells out to `mafft --auto`
-    ├── fasttree.py         ← shells out to `FastTree` (auto-picks -nt/-gtr)
-    └── pipeline.py         ← short-id remap → MAFFT → FastTree → phyloXML
+├── phylo/                  ← optional MSA + tree step (--phylo)
+│   ├── mafft.py            ← shells out to `mafft --auto`
+│   ├── fasttree.py         ← shells out to `FastTree` (auto-picks -nt/-gtr)
+│   └── pipeline.py         ← short-id remap → MAFFT → FastTree → phyloXML
+└── doctor.py               ← `repseq doctor` self-test (deps, tools, net, config)
 ```
 
 `config/default_config.yaml` is the documented config schema; the same dict
@@ -202,6 +203,28 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
   check in `validate_config`. Document in `config/default_config.yaml`.
 
 ## Status
+
+`v0.5.9` adds a **`repseq doctor`** self-test subcommand for
+bench-scientist debugging. Emits a grouped report
+(Python packages / external tools / network / configuration) with
+`[OK]`/`[WARN]`/`[FAIL]` tags and a one-line summary; exits non-zero
+only on `[FAIL]`. Policy: required Python packages (biopython, click,
+PyYAML, requests) are `FAIL` if missing; optional `[viz]` extras
+(umap-learn, matplotlib) are `WARN` (only needed for `--plot`); every
+external binary (mmseqs, cd-hit, cd-hit-est, mafft, FastTree) is
+`WARN` if missing (none is strictly required — pick a backend you
+have, or use a diversity-only mode); NCBI Entrez + UniProt REST are
+pinged with a 5s timeout and `WARN` on unreachable (you can run with
+`--no-resolve`); cache directory unwritable is `FAIL`; missing
+`taxonomy.ncbi_email` is `WARN` (works but rate-limited). The actual
+import is attempted (not just `find_spec`) so a broken install
+— e.g. a numpy/scipy ABI mismatch — is reported as missing rather
+than silently passing. `--no-network` skips the database pings.
+`_package_version` reads version via `importlib.metadata` so click 9.x
+losing `__version__` is a non-issue. 17 new tests cover the WARN-vs-
+FAIL policy, the network unreachable/timeout branches, cache-dir
+write failure, config validation surfacing, and the click-CLI exit
+codes. 424 offline tests total.
 
 `v0.5.8` adds an optional **phylogeny step** behind the new
 `--phylo` flag (works on every mode command). Builds an MSA with MAFFT
