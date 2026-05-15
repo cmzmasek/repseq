@@ -16,7 +16,7 @@ from .models import SequenceSource
 from .models import RunResult
 from .output.report import write_all_reports
 from .output.writer import write_results
-from .qc.pipeline import run_qc
+from .qc.pipeline import remove_duplicates, run_qc
 from .qc.protein_qc import run_protein_qc
 from .segmented.completeness import (
     build_concatenated_sequences,
@@ -174,6 +174,24 @@ def _handle_segmented(sequences, cfg, qc_report):
     click.echo(f"  Complete isolates : {len(complete_isolates)}")
     click.echo(f"  Individual seqs   : {len(kept)}")
     concat_seqs = build_concatenated_sequences(complete_isolates)
+
+    # Exact-duplicate removal was skipped on the segment pool (a conserved
+    # segment shared between distinct isolates must not knock either isolate
+    # out as incomplete). Apply it now, on the concatenated isolates: two
+    # isolates are true duplicates only if every segment is identical.
+    if qc_report.dedup_skipped:
+        before = len(concat_seqs)
+        concat_seqs = remove_duplicates(concat_seqs, qc_report)
+        dropped = before - len(concat_seqs)
+        if dropped:
+            # Drop the de-duplicated isolates from complete_isolates too, so the
+            # per-segment output files don't resurrect them. concatenate_isolate
+            # carries the complete_isolates key through as Sequence.isolate_id.
+            survivors = {s.isolate_id for s in concat_seqs}
+            complete_isolates = {
+                k: v for k, v in complete_isolates.items() if k in survivors
+            }
+        click.echo(f"  Duplicate isolates: {dropped} removed")
     return concat_seqs, complete_isolates, virus_cfg.get("segments")
 
 

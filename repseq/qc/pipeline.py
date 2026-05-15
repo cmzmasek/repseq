@@ -192,9 +192,18 @@ def run_qc(sequences: list[Sequence], cfg: dict[str, Any]) -> tuple[list[Sequenc
     report.total_input = len(sequences)
 
     qc_cfg = cfg.get("qc", {})
+    segmented = bool(cfg.get("segmented", {}).get("enabled"))
 
     if qc_cfg.get("remove_duplicates", True):
-        sequences = remove_duplicates(sequences, report)
+        # In segmented mode a single segment can be byte-identical between two
+        # otherwise distinct isolates; dropping it here would leave one isolate
+        # missing that segment and the whole isolate would be discarded as
+        # incomplete. Dedup is instead applied to the concatenated per-isolate
+        # sequences after build_concatenated_sequences (see cli._handle_segmented).
+        if segmented:
+            report.dedup_skipped = True
+        else:
+            sequences = remove_duplicates(sequences, report)
 
     # In segmented mode the input is a mixed pool of individual segments with
     # wildly different lengths (e.g. influenza PB2 ~2300 nt vs NS ~890 nt). A
@@ -202,7 +211,7 @@ def run_qc(sequences: list[Sequence], cfg: dict[str, Any]) -> tuple[list[Sequenc
     # would wrongly drop the short segments, leaving every isolate "incomplete"
     # at the completeness step. Per-segment bounds are applied later via
     # segmented.viruses.<v>.segment_lengths instead, so skip the global filter.
-    if cfg.get("segmented", {}).get("enabled"):
+    if segmented:
         report.length_filter_skipped = True
     else:
         sequences = length_filter(sequences, qc_cfg.get("length_filter", {}), report)

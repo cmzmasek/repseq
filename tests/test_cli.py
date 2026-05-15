@@ -1,7 +1,7 @@
 """CLI helpers: the closing run summary / no-output warning."""
 from __future__ import annotations
 
-from repseq.cli import _final_summary
+from repseq.cli import _final_summary, _handle_segmented
 from repseq.models import Cluster, QCReport, RunResult
 
 
@@ -70,3 +70,57 @@ def test_final_summary_warns_when_selection_produced_nothing(make_seq, capsys):
     err = capsys.readouterr().err
     assert "selection produced" in err
     assert "MMseqs2" in err
+
+
+# ---------------------------------------------------------------------------
+# _handle_segmented — dedup applied to concatenated isolates, not segments
+# ---------------------------------------------------------------------------
+
+def _segmented_cfg():
+    return {
+        "segmented": {
+            "enabled": True,
+            "virus": "test",
+            "viruses": {
+                "test": {
+                    "expected_segments": 2,
+                    "segments": ["S", "L"],
+                    "isolate_regex": r"(?P<isolate>iso\d+)",
+                }
+            },
+        }
+    }
+
+
+def test_handle_segmented_keeps_isolates_sharing_a_conserved_segment(make_seq):
+    # Regression: iso1 and iso2 have a byte-identical S segment but differ on
+    # L. Neither isolate may be dropped — they are not duplicates.
+    seqs = [
+        make_seq("a_S", "ACGTACGTACGT", header="iso1", segment="S"),
+        make_seq("a_L", "TTTTGGGGTTTT", header="iso1", segment="L"),
+        make_seq("b_S", "ACGTACGTACGT", header="iso2", segment="S"),  # identical S
+        make_seq("b_L", "CCCCAAAACCCC", header="iso2", segment="L"),
+    ]
+    report = QCReport()
+    report.dedup_skipped = True  # run_qc would have set this in segmented mode
+    concat, complete, segments = _handle_segmented(seqs, _segmented_cfg(), report)
+    assert sorted(s.isolate_id for s in concat) == ["iso1", "iso2"]
+    assert set(complete.keys()) == {"iso1", "iso2"}
+    assert report.removed_duplicates == 0
+
+
+def test_handle_segmented_collapses_fully_identical_isolates(make_seq):
+    # iso3 is byte-identical to iso1 across *both* segments — a true duplicate
+    # isolate, which must collapse to one concatenated representative.
+    seqs = [
+        make_seq("a_S", "ACGTACGTACGT", header="iso1", segment="S"),
+        make_seq("a_L", "TTTTGGGGTTTT", header="iso1", segment="L"),
+        make_seq("c_S", "ACGTACGTACGT", header="iso3", segment="S"),
+        make_seq("c_L", "TTTTGGGGTTTT", header="iso3", segment="L"),
+    ]
+    report = QCReport()
+    report.dedup_skipped = True
+    concat, complete, segments = _handle_segmented(seqs, _segmented_cfg(), report)
+    assert [s.isolate_id for s in concat] == ["iso1"]
+    assert set(complete.keys()) == {"iso1"}
+    assert report.removed_duplicates == 1

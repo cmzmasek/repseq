@@ -400,9 +400,21 @@ to run anywhere and finish in a couple of seconds.
 
 ## Status
 
-**`v0.5.2`** — all 8 selection modes, optional protein-annotation QC (with
+**`v0.5.3`** — all 8 selection modes, optional protein-annotation QC (with
 per-segment counts and per-segment length bounds), segment-name synonyms, a
 protein-FASTA output, and an optional UMAP plot of the clustering.
+
+New in `v0.5.3`:
+
+- **Correct duplicate removal for segmented viruses.** Exact-duplicate
+  removal used to run on the pool of individual segments *before*
+  concatenation. A segment that happens to be identical between two
+  otherwise distinct isolates (a conserved segment) would get one copy
+  dropped — and the affected isolate was then silently discarded as
+  "incomplete". Duplicate removal now runs on the *concatenated isolates*
+  instead: two isolates collapse only when every segment matches. This
+  only affects segmented-mode runs; you may now see slightly more isolates
+  retained.
 
 New in `v0.5.2`:
 
@@ -441,5 +453,5 @@ New in `v0.5.0`:
   search direction, NCBI host/country/date harvesting, a length-robust diversity
   metric, and thread-safe caching.
 
-**152 offline regression tests pass.** The NCBI-backed paths have been tested
+**156 offline regression tests pass.** The NCBI-backed paths have been tested
 end-to-end against a live influenza A H1N1 RefSeq genome (8 segments, 11 proteins).

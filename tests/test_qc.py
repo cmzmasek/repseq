@@ -128,6 +128,38 @@ def test_run_qc_skips_length_filter_in_segmented_mode(make_seq):
     assert report.length_filter_skipped is True
 
 
+def test_run_qc_skips_dedup_in_segmented_mode(make_seq):
+    # Regression: a segment can be byte-identical between two otherwise
+    # distinct isolates (a conserved segment). If run_qc deduplicated the
+    # segment pool it would drop one copy, and the completeness step would
+    # then discard a whole legitimate isolate as "missing" that segment.
+    # Dedup must be skipped here and applied to concatenated isolates instead.
+    seqs = [
+        make_seq("a_S", "ACGTACGTACGT", segment="S"),
+        make_seq("b_S", "ACGTACGTACGT", segment="S"),  # identical S, different isolate
+        make_seq("a_L", "TTTTGGGGTTTT", segment="L"),
+        make_seq("b_L", "CCCCAAAACCCC", segment="L"),
+    ]
+    cfg = {"qc": {}, "segmented": {"enabled": True}}
+    kept, report = run_qc(seqs, cfg)
+    assert {s.id for s in kept} == {"a_S", "b_S", "a_L", "b_L"}
+    assert report.removed_duplicates == 0
+    assert report.dedup_skipped is True
+
+
+def test_run_qc_applies_dedup_when_not_segmented(make_seq):
+    seqs = [
+        make_seq("a", "ACGTACGTACGT"),
+        make_seq("b", "ACGTACGTACGT"),  # exact dup
+        make_seq("c", "TTTTGGGGTTTT"),
+    ]
+    cfg = {"qc": {}, "segmented": {"enabled": False}}
+    kept, report = run_qc(seqs, cfg)
+    assert {s.id for s in kept} == {"a", "c"}
+    assert report.removed_duplicates == 1
+    assert report.dedup_skipped is False
+
+
 def test_run_qc_applies_length_filter_when_not_segmented(make_seq):
     seqs = [
         make_seq("L1", "A" * 6000),

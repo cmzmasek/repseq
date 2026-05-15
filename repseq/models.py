@@ -153,6 +153,12 @@ class QCReport:
     # mix of segments of very different lengths; per-segment bounds are
     # applied later via segmented.viruses.<v>.segment_lengths instead).
     length_filter_skipped: bool = False
+    # Exact-duplicate removal is likewise skipped on the segment pool in
+    # segmented mode: a segment can be byte-identical between two otherwise
+    # distinct isolates, and dropping it would leave one isolate incomplete.
+    # Dedup is instead applied to the concatenated per-isolate sequences
+    # after build_concatenated_sequences.
+    dedup_skipped: bool = False
     details: list[dict] = field(default_factory=list)
 
     def add_removed(self, seq_id: str, reason: str) -> None:
@@ -164,11 +170,17 @@ class QCReport:
             if self.length_filter_skipped
             else f"  Removed (length)    : {self.removed_length}"
         )
+        dup_line = (
+            f"  Removed (duplicates): {self.removed_duplicates} "
+            "(applied to concatenated isolates)"
+            if self.dedup_skipped
+            else f"  Removed (duplicates): {self.removed_duplicates}"
+        )
         lines = [
             f"QC Summary",
             f"  Input sequences     : {self.total_input}",
             f"  Passed QC           : {self.passed}",
-            f"  Removed (duplicates): {self.removed_duplicates}",
+            dup_line,
             length_line,
             f"  Removed (ambiguous) : {self.removed_ambiguous}",
             f"  Removed (annotation): {self.removed_annotation}",
