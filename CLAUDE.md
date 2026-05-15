@@ -167,7 +167,7 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
 
 ## Status
 
-`v0.5.4`. All 8 modes structurally complete, optional protein-annotation
+`v0.5.5`. All 8 modes structurally complete, optional protein-annotation
 QC (batched GenBank fetch + per-segment count check), a protein-FASTA
 output reconstructed from cached records, per-segment nucleotide length
 bounds (`segment_lengths` in virus config, applied after completeness
@@ -187,7 +187,7 @@ before/after counts (`RunResult.group_stats`) written to
 `{prefix}_group_counts.tsv`. Taxonomic lineage is resolved via NCBI
 `efetch` XML (`ncbi._parse_taxonomy_xml`) — the taxonomy *esummary*
 endpoint carries no lineage for viruses, which used to group every
-viral sequence under "Unknown". 160 offline regression tests cover IO,
+viral sequence under "Unknown". Offline regression tests cover IO,
 QC, selector, segmented logic (including per-segment length filtering),
 cache TTL, config validation, diversity selection, resolver fallback, mode
 dispatch (clustering mocked), protein parser + filter, FASTA writer, segment
@@ -204,3 +204,28 @@ the target), NCBI host/country/date now harvested from esummary
 `subtype`/`subname` with the DB taking precedence over header heuristics,
 a length-robust containment distance for diversity selection, thread-safe
 caches and rate limiters, and assorted QC/parsing corrections.
+
+`v0.5.5` hardens every place where header or identifier text crosses a
+format boundary. The trigger was a Peribunyaviridae run where a 73-seq
+genus came out of clustering as 73 reps at `cutoff = 1.0000`: isolate
+names like `yaba-7 virus strain yaba 7` contain whitespace, so the
+normalised id (and the derived `CONCAT|<isolate>` `seq.id`) carried
+spaces; MMseqs2 truncates a FASTA header token at the first whitespace,
+the parser then could not match cluster-TSV rows back to inputs, and
+the binary search misread the empty cluster list as "≤ target" — falling
+through to the final `best_reps = list(sequences)` fallback at `hi = 1.0`.
+Fixes, with regression tests:
+`_normalise_isolate_id` replaces both whitespace **and** the pipe
+separator with `_` so `seq.id` survives MMseqs2 truncation and
+`split("|")[1]` CONCAT parsing; `run_clustering` raises
+`MMseqs2Error("Cluster round-trip mismatch...")` if the parsed cluster
+membership does not account for every input; both FASTA writers
+(`io/fasta.write_fasta`, `clustering/mmseqs2._write_id_fasta`)
+collapse embedded `\r`/`\n` in headers to a space so a malformed
+header cannot inject a phantom record; every TSV writer routes free-
+text fields through a new `output/report._tsv_safe` helper that
+neutralises tab and line-break characters so a stray value cannot
+shift columns or rows. A 200-case brittleness probe
+(`tests/test_unusual_characters.py`) exercises every (surface,
+character) pair across whitespace and the punctuation classes most
+common in viral metadata. 362 offline regression tests total.

@@ -41,8 +41,24 @@ def extract_isolate_id(seq: Sequence, isolate_regex: str) -> Optional[str]:
 
 
 def _normalise_isolate_id(raw: str) -> str:
-    """Normalise an isolate ID for comparison (lowercase, collapse whitespace)."""
-    return re.sub(r"\s+", " ", raw.strip().lower())
+    """Normalise an isolate ID for comparison and downstream identification.
+
+    Lowercases and replaces any whitespace run with ``_``; also replaces
+    the pipe character (our own CONCAT separator) with ``_``. The result
+    is used both as the dict key when grouping segments and — propagated
+    through ``concatenate_isolate`` — as the ``seq.id`` of the resulting
+    CONCAT sequence. Two downstream parsers depend on these constraints:
+
+      * MMseqs2 takes the first whitespace-delimited token of a FASTA
+        header as the sequence identifier, so whitespace inside seq.id
+        silently breaks the cluster-TSV round-trip.
+      * The segmented FASTA writer and the protein-fasta report read
+        the isolate back out of seq.id via ``split("|")[1]``; a stray
+        pipe inside the captured name would truncate the recovered id.
+    """
+    out = re.sub(r"\s+", "_", raw.strip().lower())
+    out = out.replace("|", "_")
+    return out
 
 
 # ---------------------------------------------------------------------------

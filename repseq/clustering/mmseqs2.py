@@ -39,7 +39,12 @@ def _write_id_fasta(sequences: list[Sequence], path: Path, line_width: int = 70)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fh:
         for seq in sequences:
-            fh.write(f">{seq.id}\n")
+            # Defensive: a seq.id with a stray newline or carriage
+            # return would split one record into two in the FASTA we
+            # hand to MMseqs2, and the post-break fragment would then
+            # appear as a phantom "sequence" with junk content.
+            safe_id = seq.id.replace("\n", " ").replace("\r", " ")
+            fh.write(f">{safe_id}\n")
             s = seq.sequence
             for i in range(0, len(s), line_width):
                 fh.write(s[i : i + line_width] + "\n")
@@ -106,6 +111,22 @@ def run_clustering(
         clusters = _parse_cluster_tsv(
             tsv_path=result_prefix + "_cluster.tsv",
             sequences=sequences,
+        )
+
+    # Defensive sanity check: every input sequence must appear in exactly
+    # one cluster (rep or member). A mismatch means the cluster-TSV IDs
+    # could not be matched back to the input — typically because the
+    # input seq.id contained whitespace and MMseqs2 truncated it. Without
+    # this check, _parse_cluster_tsv silently drops the unmatched rows
+    # and the binary-search caller misreads the empty result as a
+    # successful undershoot, returning all sequences at threshold = 1.0.
+    accounted = sum(1 + len(c.members) for c in clusters)
+    if accounted != len(sequences):
+        raise MMseqs2Error(
+            f"Cluster round-trip mismatch: {len(sequences)} sequences in, "
+            f"{accounted} accounted for across {len(clusters)} clusters. "
+            "Likely an ID/whitespace issue between input FASTA and the "
+            "cluster TSV."
         )
 
     return clusters

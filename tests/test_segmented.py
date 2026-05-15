@@ -211,6 +211,36 @@ def test_concatenate_isolate_joins_in_order(make_seq):
     assert out.isolate_id == "ISO1"
 
 
+def test_filter_complete_isolates_whitespace_in_isolate_id_is_underscored(make_seq):
+    # Regression: viral isolate names like "yaba-7 virus strain yaba 7"
+    # contain spaces. The normalised isolate_id (and therefore the
+    # CONCAT seq.id derived from it) must be whitespace-free, otherwise
+    # MMseqs2 truncates the FASTA header token and the cluster TSV
+    # round-trip silently drops every cluster.
+    cfg = {
+        "expected_segments": 2,
+        "segments": ["L", "S"],
+        "isolate_regex": r"\|(?P<isolate>.+?)(?:\s+segment|\|)",
+    }
+    seqs = [
+        make_seq("acc1", "A" * 100,
+                 header="X|yaba-7 virus strain yaba 7|acc1 segment L",
+                 segment="L"),
+        make_seq("acc2", "C" * 100,
+                 header="X|yaba-7 virus strain yaba 7|acc2 segment S",
+                 segment="S"),
+    ]
+    report = QCReport()
+    kept, complete = filter_complete_isolates(seqs, cfg, report)
+    assert len(complete) == 1
+    [(iso_id, _segs)] = complete.items()
+    assert " " not in iso_id
+    assert iso_id == "yaba-7_virus_strain_yaba_7"
+    concats = build_concatenated_sequences(complete)
+    assert len(concats) == 1
+    assert " " not in concats[0].id
+
+
 def test_concatenate_isolate_has_no_single_accession(make_seq):
     # A concatenated isolate spans several segments — it must not claim a
     # single segment's accession. Identity is carried by isolate_id; the

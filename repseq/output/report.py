@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import datetime
 import platform
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,25 @@ from typing import Any, Optional
 import yaml
 
 from ..models import QCReport, RunResult, Sequence
+
+
+# A field value bound for a TSV row must contain neither tabs (column
+# separator) nor line breaks (record separator); otherwise a single
+# record silently splits into extras or drops/gains columns. Tabs and
+# line breaks aren't expected in biological metadata, but they sneak in
+# from copy-paste, malformed source files, and free-text NCBI fields.
+_TSV_UNSAFE_RE = re.compile(r"[\t\r\n]+")
+
+
+def _tsv_safe(value: Any) -> str:
+    """Coerce a field value into a single TSV-safe cell.
+
+    ``None`` becomes the empty string; tabs and line breaks collapse to
+    a single space so the surrounding row keeps its column count.
+    """
+    if value is None:
+        return ""
+    return _TSV_UNSAFE_RE.sub(" ", str(value))
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +107,7 @@ def write_qc_tsv(qc_report: QCReport, path: Path) -> None:
     with open(path, "w") as fh:
         fh.write("sequence_id\treason\n")
         for entry in qc_report.details:
-            fh.write(f"{entry['id']}\t{entry['reason']}\n")
+            fh.write(f"{_tsv_safe(entry['id'])}\t{_tsv_safe(entry['reason'])}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -108,24 +128,24 @@ def write_representative_tsv(representatives: list[Sequence], path: Path) -> Non
         for seq in representatives:
             tax = seq.taxonomy
             row = [
-                seq.accession or "",
-                seq.organism or "",
-                seq.description or "",
-                seq.strain or "",
-                seq.host or "",
-                seq.collection_date or "",
-                seq.country or "",
-                seq.segment or "",
-                seq.isolate_id or "",
-                seq.seq_type.value,
-                str(seq.length),
+                _tsv_safe(seq.accession),
+                _tsv_safe(seq.organism),
+                _tsv_safe(seq.description),
+                _tsv_safe(seq.strain),
+                _tsv_safe(seq.host),
+                _tsv_safe(seq.collection_date),
+                _tsv_safe(seq.country),
+                _tsv_safe(seq.segment),
+                _tsv_safe(seq.isolate_id),
+                _tsv_safe(seq.seq_type.value),
+                _tsv_safe(seq.length),
                 str(seq.is_refseq).lower(),
                 str(seq.is_reviewed).lower(),
-                str(tax.taxid) if tax and tax.taxid else "",
-                tax.species or "" if tax else "",
-                tax.genus or "" if tax else "",
-                tax.family or "" if tax else "",
-                tax.order or "" if tax else "",
+                _tsv_safe(tax.taxid) if tax and tax.taxid else "",
+                _tsv_safe(tax.species) if tax else "",
+                _tsv_safe(tax.genus) if tax else "",
+                _tsv_safe(tax.family) if tax else "",
+                _tsv_safe(tax.order) if tax else "",
             ]
             fh.write("\t".join(row) + "\n")
 
@@ -249,12 +269,12 @@ def write_isolate_proteins_tsv(
                     continue
                 for prot in seq.proteins:
                     fh.write(
-                        f"{isolate_id}\t"
-                        f"{seq.segment or ''}\t"
-                        f"{seq.accession or seq.id}\t"
-                        f"{prot.get('protein_id') or ''}\t"
-                        f"{prot.get('product') or ''}\t"
-                        f"{prot.get('length') if prot.get('length') is not None else ''}\n"
+                        f"{_tsv_safe(isolate_id)}\t"
+                        f"{_tsv_safe(seq.segment)}\t"
+                        f"{_tsv_safe(seq.accession or seq.id)}\t"
+                        f"{_tsv_safe(prot.get('protein_id'))}\t"
+                        f"{_tsv_safe(prot.get('product'))}\t"
+                        f"{_tsv_safe(prot.get('length'))}\n"
                     )
     return True
 
@@ -271,8 +291,8 @@ def write_cluster_tsv(result: RunResult, path: Path) -> None:
         for cluster in result.clusters:
             rep = cluster.representative
             fh.write(
-                f"{cluster.cluster_id}\t{rep.accession or rep.id}\t"
-                f"{rep.organism or ''}\t{cluster.size}\t"
+                f"{_tsv_safe(cluster.cluster_id)}\t{_tsv_safe(rep.accession or rep.id)}\t"
+                f"{_tsv_safe(rep.organism)}\t{cluster.size}\t"
                 f"{str(rep.is_refseq).lower()}\t{str(rep.is_reviewed).lower()}\n"
             )
 
@@ -303,7 +323,7 @@ def write_group_counts_tsv(result: RunResult, path: Path) -> bool:
         for gs in result.group_stats:
             cutoff = f"{gs.cutoff:.4f}" if gs.cutoff is not None else ""
             fh.write(
-                f"{gs.grouping}\t{gs.group}\t{gs.n_before}\t{gs.n_after}\t"
+                f"{_tsv_safe(gs.grouping)}\t{_tsv_safe(gs.group)}\t{gs.n_before}\t{gs.n_after}\t"
                 f"{str(gs.clustered).lower()}\t{cutoff}\n"
             )
     return True

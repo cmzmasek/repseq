@@ -273,12 +273,26 @@ def read_fasta(
         yield _emit(current_header, current_lines)
 
 
+_HEADER_BREAK_RE = re.compile(r"[\r\n]+")
+
+
+def _safe_fasta_header(header: str) -> str:
+    """Collapse embedded line breaks in a FASTA header to a single space.
+
+    A header carrying ``\\n`` or ``\\r`` (e.g. from poorly cleaned input
+    or a metadata field that was joined verbatim into a description)
+    would otherwise split a single record into two when written, or
+    leak the post-break fragment into the sequence body when read back.
+    """
+    return _HEADER_BREAK_RE.sub(" ", header)
+
+
 def write_fasta(sequences: list[Sequence], path: str | Path, line_width: int = 70) -> None:
     """Write a list of Sequence objects to a FASTA file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fh:
         for seq in sequences:
-            fh.write(f">{seq.header}\n")
+            fh.write(f">{_safe_fasta_header(seq.header)}\n")
             for i in range(0, len(seq.sequence), line_width):
                 fh.write(seq.sequence[i : i + line_width] + "\n")

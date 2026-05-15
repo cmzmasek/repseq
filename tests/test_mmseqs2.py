@@ -7,7 +7,17 @@ sequences.
 """
 from __future__ import annotations
 
-from repseq.clustering.mmseqs2 import _parse_cluster_tsv, _write_id_fasta
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from repseq.clustering.mmseqs2 import (
+    MMseqs2Error,
+    _parse_cluster_tsv,
+    _write_id_fasta,
+    run_clustering,
+)
 from repseq.models import Sequence, SequenceType
 from repseq.segmented.completeness import concatenate_isolate
 
@@ -69,3 +79,36 @@ def test_parse_cluster_tsv_matches_id_headers(tmp_path):
     assert set(by_rep) == {"P12345", "CONCAT|ISO/2009"}
     assert [m.id for m in by_rep["P12345"].members] == ["P67890"]
     assert by_rep["CONCAT|ISO/2009"].members == []
+
+
+def test_run_clustering_raises_when_round_trip_drops_sequences(tmp_path):
+    # Regression: if the cluster TSV references IDs that don't match
+    # any input seq.id (e.g. because the input id contained whitespace
+    # and MMseqs2 truncated it), the parser silently drops those rows.
+    # The wrapper must catch this and raise rather than returning a
+    # short/empty cluster list, because callers like the taxonomic1
+    # binary search misread an empty result as a successful undershoot
+    # and return every input sequence at threshold = 1.0.
+    seqs = [
+        _seq("seq with space 1", "ACGTACGT"),
+        _seq("seq with space 2", "ACGTACGT"),
+    ]
+
+    def fake_run(cmd, **kwargs):
+        # run_clustering passes positional args
+        # [mmseqs, mode, input_fasta, result_prefix, mmseqs_tmp, ...flags]
+        result_prefix = cmd[3]
+        tsv = Path(result_prefix + "_cluster.tsv")
+        # MMseqs2 would emit the truncated tokens (first whitespace word).
+        tsv.write_text(
+            "seq\tseq\n"
+        )
+        class _R:
+            stderr = ""
+            stdout = ""
+        return _R()
+
+    with patch("repseq.clustering.mmseqs2._check_mmseqs2", return_value="mmseqs"), \
+         patch("repseq.clustering.mmseqs2.subprocess.run", side_effect=fake_run):
+        with pytest.raises(MMseqs2Error, match="round-trip"):
+            run_clustering(seqs, 0.9, {"temp_dir": str(tmp_path)})
