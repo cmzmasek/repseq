@@ -147,6 +147,10 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
   representatives list contains synthetic `CONCAT|<isolate_id>` entries.
   `output/writer._write_segmented` expands these back into per-segment
   files.
+- **Output directory must be empty**: `_load_and_validate` calls
+  `_check_output_dir`, which aborts (exit 1) if `output.dir` already
+  exists and is non-empty — runs never overwrite or mix into prior
+  results. Tests that exercise the writers point at a fresh `tmp_path`.
 
 ## When making changes
 
@@ -163,7 +167,7 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
 
 ## Status
 
-`v0.5.3`. All 8 modes structurally complete, optional protein-annotation
+`v0.5.4`. All 8 modes structurally complete, optional protein-annotation
 QC (batched GenBank fetch + per-segment count check), a protein-FASTA
 output reconstructed from cached records, per-segment nucleotide length
 bounds (`segment_lengths` in virus config, applied after completeness
@@ -183,7 +187,7 @@ before/after counts (`RunResult.group_stats`) written to
 `{prefix}_group_counts.tsv`. Taxonomic lineage is resolved via NCBI
 `efetch` XML (`ncbi._parse_taxonomy_xml`) — the taxonomy *esummary*
 endpoint carries no lineage for viruses, which used to group every
-viral sequence under "Unknown". 156 offline regression tests cover IO,
+viral sequence under "Unknown". 160 offline regression tests cover IO,
 QC, selector, segmented logic (including per-segment length filtering),
 cache TTL, config validation, diversity selection, resolver fallback, mode
 dispatch (clustering mocked), protein parser + filter, FASTA writer, segment

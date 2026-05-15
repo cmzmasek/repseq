@@ -92,7 +92,32 @@ def _load_and_validate(config_path, output_dir, prefix, threads, seed) -> dict:
         for e in errors:
             click.echo(f"[config error] {e}", err=True)
         sys.exit(1)
+    _check_output_dir(cfg)
     return cfg
+
+
+def _check_output_dir(cfg: dict) -> None:
+    """Abort before doing any work if the output directory already exists and
+    is not empty, so a previous run's files are never silently overwritten or
+    mixed with a new run's results."""
+    out_dir = Path(cfg["output"]["dir"])
+    if not out_dir.exists():
+        return
+    if not out_dir.is_dir():
+        click.echo(
+            f"[error] output path '{out_dir}' already exists and is not a "
+            f"directory. Choose another location with --output-dir.",
+            err=True,
+        )
+        sys.exit(1)
+    if any(out_dir.iterdir()):
+        click.echo(
+            f"[error] output directory '{out_dir}' already exists and is not "
+            f"empty.\n        Remove it, empty it, or pick a different one "
+            f"with --output-dir so results from separate runs are not mixed.",
+            err=True,
+        )
+        sys.exit(1)
 
 
 _SOURCE_MAP = {

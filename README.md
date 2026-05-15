@@ -400,9 +400,16 @@ to run anywhere and finish in a couple of seconds.
 
 ## Status
 
-**`v0.5.3`** — all 8 selection modes, optional protein-annotation QC (with
+**`v0.5.4`** — all 8 selection modes, optional protein-annotation QC (with
 per-segment counts and per-segment length bounds), segment-name synonyms, a
 protein-FASTA output, and an optional UMAP plot of the clustering.
+
+New in `v0.5.4`:
+
+- **Won't overwrite a previous run.** If the output directory already exists
+  and is not empty, the program now stops immediately with a clear error
+  instead of writing new files alongside (or on top of) the old ones. Empty
+  it, delete it, or point `--output-dir` somewhere else.
 
 New in `v0.5.3`:
 
@@ -453,5 +460,5 @@ New in `v0.5.0`:
   search direction, NCBI host/country/date harvesting, a length-robust diversity
   metric, and thread-safe caching.
 
-**156 offline regression tests pass.** The NCBI-backed paths have been tested
+**160 offline regression tests pass.** The NCBI-backed paths have been tested
 end-to-end against a live influenza A H1N1 RefSeq genome (8 segments, 11 proteins).

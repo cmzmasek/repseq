@@ -1,7 +1,9 @@
 """CLI helpers: the closing run summary / no-output warning."""
 from __future__ import annotations
 
-from repseq.cli import _final_summary, _handle_segmented
+import pytest
+
+from repseq.cli import _check_output_dir, _final_summary, _handle_segmented
 from repseq.models import Cluster, QCReport, RunResult
 
 
@@ -124,3 +126,37 @@ def test_handle_segmented_collapses_fully_identical_isolates(make_seq):
     assert [s.isolate_id for s in concat] == ["iso1"]
     assert set(complete.keys()) == {"iso1"}
     assert report.removed_duplicates == 1
+
+
+# ---------------------------------------------------------------------------
+# _check_output_dir — refuse to run into a non-empty output directory
+# ---------------------------------------------------------------------------
+
+def test_check_output_dir_passes_when_missing(tmp_path):
+    cfg = {"output": {"dir": str(tmp_path / "does_not_exist")}}
+    _check_output_dir(cfg)  # must not raise
+
+
+def test_check_output_dir_passes_when_empty(tmp_path):
+    cfg = {"output": {"dir": str(tmp_path)}}  # tmp_path exists but is empty
+    _check_output_dir(cfg)  # must not raise
+
+
+def test_check_output_dir_aborts_when_non_empty(tmp_path, capsys):
+    (tmp_path / "repseq_representatives.fasta").write_text(">x\nACGT\n")
+    cfg = {"output": {"dir": str(tmp_path)}}
+    with pytest.raises(SystemExit) as exc:
+        _check_output_dir(cfg)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "already exists and is not" in err
+
+
+def test_check_output_dir_aborts_when_path_is_a_file(tmp_path, capsys):
+    file_path = tmp_path / "not_a_dir"
+    file_path.write_text("oops")
+    cfg = {"output": {"dir": str(file_path)}}
+    with pytest.raises(SystemExit) as exc:
+        _check_output_dir(cfg)
+    assert exc.value.code == 1
+    assert "not a directory" in capsys.readouterr().err
