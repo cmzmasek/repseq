@@ -172,7 +172,7 @@ Everything is written to the output directory (`./repseq_output/` by default):
 | `{prefix}_qc_removed.tsv` | Every sequence that was dropped during cleaning, and *why*. Check this if you lost more than expected. |
 | `{prefix}_run.log` | Plain-text record of the settings used and the per-step counts. |
 | `{prefix}_proteins.fasta` | *(if protein QC is on)* The protein sequences of all your representatives. |
-| `{prefix}_isolate_proteins.tsv` | *(segmented + protein QC)* One row per gene per kept isolate. |
+| `{prefix}_isolate_proteins.tsv` | *(segmented + protein QC)* One row per gene per kept isolate. Columns: `protein_id`, `product`, `length` (aa), `isolate_id`, `segment`, `segment_length` (nt), `accession`, and the taxonomic ranks `species`, `subgenus`, `genus`, `subfamily`, `family`, `suborder`, `order`, `subclass`, `class` (sub-ranks come from the NCBI lineage and are often blank for viruses). |
 | `{prefix}_clustering.png` | *(if `--plot`)* A diagnostic scatter plot of the clustering — see below. |
 
 Segmented-virus runs also write `{prefix}_concatenated.fasta` (all segments of an

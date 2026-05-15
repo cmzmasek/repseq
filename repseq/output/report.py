@@ -243,11 +243,32 @@ def write_proteins_fasta(
     return True
 
 
+_ISOLATE_PROTEINS_TAX_RANKS = (
+    "species",
+    "subgenus",
+    "genus",
+    "subfamily",
+    "family",
+    "suborder",
+    "order",
+    "subclass",
+    "class",
+)
+
+
 def write_isolate_proteins_tsv(
     complete_isolates: dict[str, list[Sequence]],
     path: Path,
 ) -> bool:
     """Write proteins per segment per isolate, one row per protein.
+
+    Columns: ``protein_id``, ``product``, ``length`` (protein length, aa),
+    ``isolate_id``, ``segment``, ``segment_length`` (nt length of the parent
+    segment), ``accession``, then the taxonomic ranks ``species``,
+    ``subgenus``, ``genus``, ``subfamily``, ``family``, ``suborder``,
+    ``order``, ``subclass``, ``class``. Sub-ranks are populated from the
+    resolver's lineage map (NCBI ``LineageEx``) and are commonly empty for
+    viruses, where ICTV often does not assign every intermediate rank.
 
     Only emits a file when at least one segment has populated `proteins`.
     Returns True if the file was written, False if skipped.
@@ -259,22 +280,31 @@ def write_isolate_proteins_tsv(
         return False
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        "protein_id\tproduct\tlength\tisolate_id\tsegment\tsegment_length\t"
+        "accession\t" + "\t".join(_ISOLATE_PROTEINS_TAX_RANKS) + "\n"
+    )
     with open(path, "w") as fh:
-        fh.write(
-            "isolate_id\tsegment\taccession\tprotein_id\tproduct\tlength\n"
-        )
+        fh.write(header)
         for isolate_id, segs in complete_isolates.items():
             for seq in segs:
                 if not seq.proteins:
                     continue
+                tax = seq.taxonomy
+                tax_cells = "\t".join(
+                    _tsv_safe(tax.get_rank(r) if tax else None)
+                    for r in _ISOLATE_PROTEINS_TAX_RANKS
+                )
                 for prot in seq.proteins:
                     fh.write(
-                        f"{_tsv_safe(isolate_id)}\t"
-                        f"{_tsv_safe(seq.segment)}\t"
-                        f"{_tsv_safe(seq.accession or seq.id)}\t"
                         f"{_tsv_safe(prot.get('protein_id'))}\t"
                         f"{_tsv_safe(prot.get('product'))}\t"
-                        f"{_tsv_safe(prot.get('length'))}\n"
+                        f"{_tsv_safe(prot.get('length'))}\t"
+                        f"{_tsv_safe(isolate_id)}\t"
+                        f"{_tsv_safe(seq.segment)}\t"
+                        f"{_tsv_safe(seq.length)}\t"
+                        f"{_tsv_safe(seq.accession or seq.id)}\t"
+                        f"{tax_cells}\n"
                     )
     return True
 

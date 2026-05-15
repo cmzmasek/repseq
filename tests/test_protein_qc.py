@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from repseq.models import Cluster, QCReport, RunResult, SequenceSource
+from repseq.models import Cluster, QCReport, RunResult, SequenceSource, TaxonomyInfo
 from repseq.output.report import write_isolate_proteins_tsv, write_proteins_fasta
 from repseq.qc.protein_qc import (
     attach_proteins,
@@ -310,9 +310,23 @@ def test_run_protein_qc_end_to_end_min_proteins(make_seq):
 # ---------------------------------------------------------------------------
 
 def test_write_isolate_proteins_tsv(tmp_path: Path, make_seq):
-    s1 = make_seq("s1", "ACGT", segment="HA", accession="NC_001.1")
+    tax = TaxonomyInfo(
+        species="Influenza A virus",
+        genus="Alphainfluenzavirus",
+        family="Orthomyxoviridae",
+        order="Articulavirales",
+        class_="Insthoviricetes",
+        lineage={
+            "species": "Influenza A virus",
+            "genus": "Alphainfluenzavirus",
+            "family": "Orthomyxoviridae",
+            "order": "Articulavirales",
+            "class": "Insthoviricetes",
+        },
+    )
+    s1 = make_seq("s1", "ACGT" * 400, segment="HA", accession="NC_001.1", taxonomy=tax)
     s1.proteins = [{"protein_id": "HA_P1", "product": "hemagglutinin", "length": 566}]
-    s2 = make_seq("s2", "ACGT", segment="NA", accession="NC_002.1")
+    s2 = make_seq("s2", "ACGT" * 350, segment="NA", accession="NC_002.1", taxonomy=tax)
     s2.proteins = [{"protein_id": "NA_P1", "product": "neuraminidase", "length": 469}]
     complete_isolates = {"A/duck/HK/1/97": [s1, s2]}
 
@@ -321,10 +335,88 @@ def test_write_isolate_proteins_tsv(tmp_path: Path, make_seq):
     assert wrote is True
 
     lines = path.read_text().strip().splitlines()
-    assert lines[0] == "isolate_id\tsegment\taccession\tprotein_id\tproduct\tlength"
+    assert lines[0] == (
+        "protein_id\tproduct\tlength\tisolate_id\tsegment\tsegment_length\t"
+        "accession\tspecies\tsubgenus\tgenus\tsubfamily\tfamily\tsuborder\t"
+        "order\tsubclass\tclass"
+    )
     assert len(lines) == 3  # header + 2 protein rows
-    assert "HA_P1\themagglutinin\t566" in lines[1]
-    assert "NA_P1\tneuraminidase\t469" in lines[2]
+
+    row1 = lines[1].split("\t")
+    assert row1[0] == "HA_P1"
+    assert row1[1] == "hemagglutinin"
+    assert row1[2] == "566"
+    assert row1[3] == "A/duck/HK/1/97"
+    assert row1[4] == "HA"
+    assert row1[5] == "1600"           # len("ACGT" * 400)
+    assert row1[6] == "NC_001.1"
+    assert row1[7] == "Influenza A virus"
+    assert row1[8] == ""                # subgenus (absent)
+    assert row1[9] == "Alphainfluenzavirus"
+    assert row1[10] == ""               # subfamily (absent)
+    assert row1[11] == "Orthomyxoviridae"
+    assert row1[12] == ""               # suborder (absent)
+    assert row1[13] == "Articulavirales"
+    assert row1[14] == ""               # subclass (absent)
+    assert row1[15] == "Insthoviricetes"
+
+    row2 = lines[2].split("\t")
+    assert row2[0] == "NA_P1"
+    assert row2[4] == "NA"
+    assert row2[5] == "1400"            # len("ACGT" * 350)
+
+
+def test_write_isolate_proteins_tsv_emits_sub_ranks_from_lineage(
+    tmp_path: Path, make_seq
+):
+    """Sub-ranks (subgenus/subfamily/suborder/subclass) come only via the
+    lineage map — they have no standard TaxonomyInfo field. Confirm they
+    round-trip into the output."""
+    tax = TaxonomyInfo(
+        species="Schmallenberg virus",
+        genus="Orthobunyavirus",
+        family="Peribunyaviridae",
+        order="Elliovirales",
+        class_="Ellioviricetes",
+        lineage={
+            "species": "Schmallenberg virus",
+            "subgenus": "Simbu serogroup",
+            "genus": "Orthobunyavirus",
+            "subfamily": "Bunyavirinae",
+            "family": "Peribunyaviridae",
+            "suborder": "Bunyavirales-suborder",
+            "order": "Elliovirales",
+            "subclass": "Some-subclass",
+            "class": "Ellioviricetes",
+        },
+    )
+    s = make_seq("s1", "ACGT", segment="L", accession="ACC.1", taxonomy=tax)
+    s.proteins = [{"protein_id": "P1", "product": "L protein", "length": 2200}]
+
+    path = tmp_path / "iso_proteins.tsv"
+    assert write_isolate_proteins_tsv({"ISO1": [s]}, path) is True
+    row = path.read_text().strip().splitlines()[1].split("\t")
+    assert row[8] == "Simbu serogroup"           # subgenus
+    assert row[10] == "Bunyavirinae"             # subfamily
+    assert row[12] == "Bunyavirales-suborder"    # suborder
+    assert row[14] == "Some-subclass"            # subclass
+
+
+def test_write_isolate_proteins_tsv_no_taxonomy_leaves_rank_cells_blank(
+    tmp_path: Path, make_seq
+):
+    s = make_seq("s1", "ACGT", segment="HA", accession="ACC.1", taxonomy=None)
+    s.proteins = [{"protein_id": "P1", "product": "x", "length": 10}]
+    path = tmp_path / "iso_proteins.tsv"
+    assert write_isolate_proteins_tsv({"ISO1": [s]}, path) is True
+    # Use splitlines() without strip() — trailing empty TSV cells matter
+    # and would otherwise be eaten as trailing whitespace on the last row.
+    rows = path.read_text().splitlines()
+    row = rows[1].split("\t")
+    assert row[0] == "P1"
+    assert row[5] == "4"   # segment_length
+    # All 9 taxonomy cells (indices 7..15) are blank
+    assert row[7:] == [""] * 9
 
 
 def test_write_proteins_fasta_segmented(tmp_path: Path, make_seq):

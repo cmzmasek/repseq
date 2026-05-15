@@ -71,7 +71,11 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
    (one row per stratification group: `grouping, group, n_before,
    n_after, clustered, cutoff` — populated from `RunResult.group_stats`,
    which every mode fills in), `{prefix}_isolate_proteins.tsv`
-   (one row per CDS per passing isolate, segmented mode) and
+   (one row per CDS per passing isolate, segmented mode — columns:
+   `protein_id, product, length, isolate_id, segment, segment_length,
+   accession, species, subgenus, genus, subfamily, family, suborder,
+   order, subclass, class`; the four sub-ranks are populated only from
+   the resolver lineage map and commonly blank for viruses) and
    `{prefix}_proteins.fasta` (amino-acid sequences for all proteins of
    the selected representatives). The protein FASTA is reconstructed
    from the same cached GenBank records — no extra network calls.
@@ -167,7 +171,7 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
 
 ## Status
 
-`v0.5.5`. All 8 modes structurally complete, optional protein-annotation
+`v0.5.6`. All 8 modes structurally complete, optional protein-annotation
 QC (batched GenBank fetch + per-segment count check), a protein-FASTA
 output reconstructed from cached records, per-segment nucleotide length
 bounds (`segment_lengths` in virus config, applied after completeness
@@ -229,3 +233,20 @@ shift columns or rows. A 200-case brittleness probe
 (`tests/test_unusual_characters.py`) exercises every (surface,
 character) pair across whitespace and the punctuation classes most
 common in viral metadata. 362 offline regression tests total.
+
+`v0.5.6` enriches `{prefix}_isolate_proteins.tsv`. The previous six
+columns (`isolate_id, segment, accession, protein_id, product, length`)
+are reordered and extended to sixteen: `protein_id, product, length,
+isolate_id, segment, segment_length, accession, species, subgenus,
+genus, subfamily, family, suborder, order, subclass, class`. The
+protein columns lead so the table reads as "what gene, on which
+segment of which isolate, in what organism." `segment_length` is the
+nucleotide length of the parent segment (`seq.length`). Taxonomy is
+read via `TaxonomyInfo.get_rank(rank)`, which checks the standard
+fields first and falls back to the resolver's lineage map (NCBI
+`LineageEx`); the four sub-ranks (`subgenus`, `subfamily`, `suborder`,
+`subclass`) have no standard field and come exclusively from the
+lineage map — they are commonly blank for viruses, where ICTV often
+skips intermediate ranks. Two regression tests cover the lineage-
+backed sub-ranks and the missing-taxonomy fallback (all 9 rank cells
+blank). 364 offline regression tests total.
