@@ -1,0 +1,11 @@
+"""Optional phylogeny step: MAFFT alignment + FastTree → phyloXML.
+
+The orchestrator (``pipeline.run_phylogeny``) is the public surface; the
+backend wrappers (``mafft``, ``fasttree``) are kept as separate modules
+so they can be mocked in tests and replaced individually if we ever add
+alternatives.
+"""
+
+from .pipeline import PhyloError, run_phylogeny
+
+__all__ = ["PhyloError", "run_phylogeny"]

@@ -79,6 +79,18 @@ result:
 pip install -e '.[viz]'
 ```
 
+**MSA + tree (optional, `--phylo`)** — to build a multiple-sequence alignment
+and an approximate-ML phylogeny over the final representatives, install
+MAFFT and FastTree:
+
+```bash
+brew install mafft fasttree                     # macOS
+conda install -c bioconda mafft fasttree        # Linux (conda)
+```
+
+If either is missing the rest of the run still finishes; `repseq` just skips
+the tree step with a warning.
+
 ---
 
 ## Quickstart
@@ -187,6 +199,10 @@ Everything is written to the output directory (`./repseq_output/` by default):
 | `{prefix}_proteins.fasta` | *(if protein QC is on)* The protein sequences of all your representatives. |
 | `{prefix}_isolate_proteins.tsv` | *(segmented + protein QC)* One row per gene per kept isolate. Columns: `protein_id`, `product`, `length` (aa), `isolate_id`, `segment`, `segment_length` (nt), `accession`, and the taxonomic ranks `species`, `subgenus`, `genus`, `subfamily`, `family`, `suborder`, `order`, `subclass`, `class` (sub-ranks come from the NCBI lineage and are often blank for viruses). |
 | `{prefix}_clustering.png` | *(if `--plot`)* A diagnostic scatter plot of the clustering — see below. |
+| `{prefix}_msa.fasta` | *(if `--phylo`)* MAFFT alignment of the representatives, FASTA headers are short ids (`S0001`…) for compatibility with downstream tools. |
+| `{prefix}_tree.nwk` | *(if `--phylo`)* FastTree Newick — leaf names are the same short ids as in the MSA. |
+| `{prefix}_tree.xml` | *(if `--phylo`)* **The tree you'll usually open** — phyloXML with the original sequence names restored on every leaf. |
+| `{prefix}_tree_id_map.tsv` | *(if `--phylo`)* Two columns, `short_id` ↔ `original_id`, for decoding the MSA / Newick. |
 
 Segmented-virus runs also write `{prefix}_concatenated.fasta` (all segments of an
 isolate joined head-to-tail) and one `{prefix}_segment_<name>.fasta` per segment.
@@ -405,6 +421,12 @@ the real run, and make sure your `ncbi_email` is set in the config.
 
 **Lookups are slow the first time** — that's expected; they're cached, so the
 *second* run on the same data is fast. An NCBI API key speeds up the first run.
+
+**`[phylo skipped]` / `[phylo failed]`** — the `--phylo` step is fail-soft: if
+fewer than 3 representatives survived, or `mafft` / `FastTree` are missing or
+errored, the message is printed to stderr and the rest of the run's outputs
+are still written. To enable it, install MAFFT and FastTree (see
+[Installation](#installation)).
 
 ---
 

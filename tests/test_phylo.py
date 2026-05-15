@@ -1,0 +1,254 @@
+"""Phylogeny step: id-remap round-trip, skip rules, Newick→phyloXML.
+
+The MAFFT and FastTree subprocesses are mocked: each test stubs out
+``run_mafft`` and ``run_fasttree`` to write deterministic intermediate
+files, so the orchestrator's id assignment, name restoration, and skip
+behaviour can be locked without touching real binaries.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import patch
+from xml.etree import ElementTree as ET
+
+import pytest
+
+from repseq.models import Sequence, SequenceType
+from repseq.phylo.fasttree import FastTreeError
+from repseq.phylo.mafft import MafftError
+from repseq.phylo.pipeline import (
+    PhyloError,
+    _build_id_map,
+    _newick_to_phyloxml,
+    _write_id_map,
+    _write_short_id_fasta,
+    run_phylogeny,
+)
+
+
+def _seq(sid: str, seq: str, seq_type: SequenceType = SequenceType.PROTEIN) -> Sequence:
+    return Sequence(id=sid, header=sid, sequence=seq, seq_type=seq_type, accession=sid)
+
+
+# ---------------------------------------------------------------------------
+# Short-id assignment
+# ---------------------------------------------------------------------------
+
+def test_build_id_map_deterministic_order():
+    reps = [_seq("alpha", "MK"), _seq("CONCAT|iso-1", "MK"), _seq("β-name", "MK")]
+    m = _build_id_map(reps)
+    assert list(m.items()) == [
+        ("S0001", "alpha"),
+        ("S0002", "CONCAT|iso-1"),
+        ("S0003", "β-name"),
+    ]
+
+
+def test_write_short_id_fasta_uses_short_id_as_sole_header(tmp_path):
+    reps = [_seq("CONCAT|iso 1 with space", "MKLPQE"),
+            _seq("very long descriptor that would choke FastTree", "MMMMMM")]
+    id_map = _build_id_map(reps)
+    out = tmp_path / "input.fasta"
+    _write_short_id_fasta(reps, id_map, out)
+
+    header_tokens = [
+        line[1:].strip()
+        for line in out.read_text().splitlines()
+        if line.startswith(">")
+    ]
+    assert header_tokens == ["S0001", "S0002"]
+
+
+def test_write_id_map_writes_round_trip_tsv(tmp_path):
+    id_map = {"S0001": "alpha", "S0002": "CONCAT|iso-1"}
+    out = tmp_path / "id_map.tsv"
+    _write_id_map(id_map, out)
+
+    rows = out.read_text().splitlines()
+    assert rows[0] == "short_id\toriginal_id"
+    assert set(rows[1:]) == {"S0001\talpha", "S0002\tCONCAT|iso-1"}
+
+
+# ---------------------------------------------------------------------------
+# Newick → phyloXML conversion
+# ---------------------------------------------------------------------------
+
+def test_newick_to_phyloxml_restores_terminal_names(tmp_path):
+    # Three-leaf rooted tree with FastTree-style support on internal nodes.
+    newick = tmp_path / "tree.nwk"
+    newick.write_text("(S0001:0.1,(S0002:0.2,S0003:0.3)0.97:0.05);\n")
+    id_map = {"S0001": "alpha", "S0002": "CONCAT|iso-1", "S0003": "β-name"}
+    xml_path = tmp_path / "tree.xml"
+
+    _newick_to_phyloxml(newick, xml_path, id_map)
+
+    # phyloXML names should be the originals, not the short ids.
+    text = xml_path.read_text()
+    assert "S0001" not in text
+    assert "alpha" in text
+    assert "CONCAT|iso-1" in text  # phyloXML XML-encoding is fine for | and -
+    assert "β-name" in text
+
+
+def test_newick_to_phyloxml_leaves_internal_support_intact(tmp_path):
+    newick = tmp_path / "tree.nwk"
+    newick.write_text("(S0001:0.1,(S0002:0.2,S0003:0.3)0.97:0.05);\n")
+    id_map = {"S0001": "a", "S0002": "b", "S0003": "c"}
+    xml_path = tmp_path / "tree.xml"
+
+    _newick_to_phyloxml(newick, xml_path, id_map)
+
+    # phyloXML stores support as <confidence> on the internal clade. The
+    # rename loop only touches terminals, so the internal-node confidence
+    # value 0.97 must still appear.
+    text = xml_path.read_text()
+    assert "0.97" in text
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator: skip rules + happy path with mocked binaries
+# ---------------------------------------------------------------------------
+
+def test_run_phylogeny_skips_with_fewer_than_three_reps(tmp_path):
+    reps = [_seq("a", "MK"), _seq("b", "MK")]
+    with pytest.raises(PhyloError, match="need >= 3"):
+        run_phylogeny(reps, {}, tmp_path, "test")
+
+
+def _stub_mafft_writes_alignment(input_fasta: Path, output_fasta: Path, cfg):
+    # Echo the input back as a "trivial alignment" — same headers, same
+    # sequences. The orchestrator never inspects the alignment content,
+    # only its path, so an identity copy is enough.
+    output_fasta.parent.mkdir(parents=True, exist_ok=True)
+    output_fasta.write_text(input_fasta.read_text())
+
+
+def _stub_fasttree_writes_newick(short_ids: list[str]):
+    """Build a stub that writes a balanced Newick over the given short ids."""
+
+    def _run(msa_fasta: Path, output_newick: Path, cfg, is_protein):
+        # Ladder topology — every leaf is named with its short id so the
+        # orchestrator's rename step has something to match on.
+        body = short_ids[0]
+        for sid in short_ids[1:]:
+            body = f"({body}:0.1,{sid}:0.1)"
+        output_newick.parent.mkdir(parents=True, exist_ok=True)
+        output_newick.write_text(body + ";\n")
+
+    return _run
+
+
+def test_run_phylogeny_happy_path_writes_all_outputs(tmp_path):
+    reps = [
+        _seq("alpha", "MKLPQEFIL"),
+        _seq("beta",  "MKLPQEFIA"),
+        _seq("gamma", "MKLPQEFIY"),
+    ]
+    short_ids = ["S0001", "S0002", "S0003"]
+
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft_writes_alignment), \
+         patch("repseq.phylo.pipeline.run_fasttree",
+               side_effect=_stub_fasttree_writes_newick(short_ids)):
+        files = run_phylogeny(reps, {}, tmp_path, "test")
+
+    names = [f.name for f in files]
+    assert names == [
+        "test_msa.fasta",
+        "test_tree.nwk",
+        "test_tree.xml",
+        "test_tree_id_map.tsv",
+    ]
+    # phyloXML: terminal names restored.
+    xml = (tmp_path / "test_tree.xml").read_text()
+    for original in ("alpha", "beta", "gamma"):
+        assert original in xml
+    for short in short_ids:
+        assert short not in xml
+    # Newick keeps the short ids — by design, since it is what FastTree
+    # produced and the id_map.tsv lets downstream tools decode it.
+    nwk = (tmp_path / "test_tree.nwk").read_text()
+    for short in short_ids:
+        assert short in nwk
+    # The temp input FASTA should have been cleaned up.
+    assert not (tmp_path / "test_phylo_input.fasta").exists()
+
+
+def test_run_phylogeny_picks_nucleotide_model_for_nt_reps(tmp_path):
+    reps = [
+        _seq(f"n{i}", "ACGTACGT", seq_type=SequenceType.NUCLEOTIDE) for i in range(3)
+    ]
+    seen_is_protein: list[bool] = []
+
+    def _fasttree(msa_fasta, output_newick, cfg, is_protein):
+        seen_is_protein.append(is_protein)
+        # Write a valid 3-leaf tree so the orchestrator can proceed.
+        output_newick.write_text("(S0001:0.1,(S0002:0.1,S0003:0.1):0.1);\n")
+
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft_writes_alignment), \
+         patch("repseq.phylo.pipeline.run_fasttree", side_effect=_fasttree):
+        run_phylogeny(reps, {}, tmp_path, "test")
+
+    assert seen_is_protein == [False]
+
+
+def test_run_phylogeny_wraps_mafft_error_as_phyloerror(tmp_path):
+    reps = [_seq(f"p{i}", "MK") for i in range(3)]
+
+    def _boom(input_fasta, output_fasta, cfg):
+        raise MafftError("mafft segfaulted")
+
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_boom):
+        with pytest.raises(PhyloError, match="mafft segfaulted"):
+            run_phylogeny(reps, {}, tmp_path, "test")
+
+
+def test_run_phylogeny_wraps_fasttree_error_as_phyloerror(tmp_path):
+    reps = [_seq(f"p{i}", "MK") for i in range(3)]
+
+    def _boom(msa_fasta, output_newick, cfg, is_protein):
+        raise FastTreeError("FastTree exit 137")
+
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft_writes_alignment), \
+         patch("repseq.phylo.pipeline.run_fasttree", side_effect=_boom):
+        with pytest.raises(PhyloError, match="FastTree exit 137"):
+            run_phylogeny(reps, {}, tmp_path, "test")
+
+
+# ---------------------------------------------------------------------------
+# CLI integration: --phylo skip is surfaced to stderr without aborting
+# ---------------------------------------------------------------------------
+
+def test_write_output_phylo_skip_does_not_abort(tmp_path, capsys):
+    # When the phylo step raises PhyloError, _write_output should swallow
+    # it and emit "[phylo skipped] ..." on stderr — matching the existing
+    # --plot behaviour. The rest of _write_output must still complete.
+    from repseq.cli import _write_output
+    from repseq.models import Cluster, RunResult
+
+    rep = _seq("only_one", "MK")
+    result = RunResult(
+        mode="global:count",
+        representatives=[rep],
+        clusters=[Cluster(cluster_id="c1", representative=rep)],
+        group_stats=[],
+        config_snapshot={},
+    )
+    cfg = {
+        "output": {"dir": str(tmp_path), "prefix": "t"},
+        "qc": {"remove_duplicates": False},
+        "seed": 42, "threads": 1,
+    }
+
+    # write_results would itself need a full config; stub it so we only
+    # exercise the phylo branch.
+    with patch("repseq.cli.write_results", return_value=[]), \
+         patch("repseq.cli.write_all_reports"):
+        _write_output(
+            result, qc_report=None, cfg=cfg, input_paths=[],
+            complete_isolates=None, segment_names=None,
+            phylo=True,
+        )
+
+    err = capsys.readouterr().err
+    assert "[phylo skipped]" in err
+    assert "need >= 3" in err

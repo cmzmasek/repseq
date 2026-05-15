@@ -104,6 +104,20 @@ def test_validate_config_rejects_cdhit_non_bool_global():
     assert any("global_alignment" in e for e in errors)
 
 
+def test_validate_config_accepts_phylo_extra_args():
+    cfg = load_config(None)
+    cfg["phylo"]["mafft"]["extra_args"] = ["--maxiterate", "1000"]
+    cfg["phylo"]["fasttree"]["extra_args"] = ["-fastest"]
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_phylo_non_string_extra_args():
+    cfg = load_config(None)
+    cfg["phylo"]["mafft"]["extra_args"] = [123]
+    errors = validate_config(cfg)
+    assert any("phylo.mafft.extra_args" in e for e in errors)
+
+
 def test_validate_config_requires_longest_in_priority():
     cfg = load_config(None)
     cfg["representative"]["priority"] = ["refseq", "reviewed_uniprot"]

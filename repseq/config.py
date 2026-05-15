@@ -90,6 +90,23 @@ DEFAULTS: dict[str, Any] = {
     "representative": {
         "priority": ["refseq", "reviewed_uniprot", "longest"],
     },
+    "phylo": {
+        # Optional MSA + phylogeny step. Triggered with --phylo on any
+        # mode subcommand; skipped automatically if fewer than 3
+        # representatives survive selection.
+        "mafft": {
+            # Raw mafft flags appended to "mafft --auto --thread N <input>".
+            # Examples: ["--maxiterate", "1000"] for L-INS-i; or
+            # ["--retree", "1"] for a faster pass on a very large input.
+            "extra_args": [],
+        },
+        "fasttree": {
+            # Raw FastTree flags appended to its argv. The protein /
+            # nucleotide model is picked automatically from the rep
+            # alphabet (default JTT for protein, -nt -gtr for nucleotide).
+            "extra_args": [],
+        },
+    },
     "taxonomy": {
         "ncbi_email": None,
         "ncbi_api_key": None,
@@ -378,6 +395,14 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         extra = cdhit_cfg.get("extra_args", [])
         if not isinstance(extra, list) or not all(isinstance(x, str) for x in extra):
             errors.append("clustering.cdhit.extra_args must be a list of strings")
+
+    # Phylo
+    phylo_cfg = cfg.get("phylo", {}) or {}
+    for tool in ("mafft", "fasttree"):
+        tool_cfg = phylo_cfg.get(tool, {}) or {}
+        extra = tool_cfg.get("extra_args", [])
+        if not isinstance(extra, list) or not all(isinstance(x, str) for x in extra):
+            errors.append(f"phylo.{tool}.extra_args must be a list of strings")
 
     # Representative priority
     priority = cfg.get("representative", {}).get("priority", [])

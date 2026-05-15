@@ -37,7 +37,11 @@ repseq/
 ├── representative/selector.py ← RefSeq > reviewed > longest priority
 ├── modes/                  ← one file per selection mode, all extend BaseMode
 ├── output/{writer,report}.py ← FASTA + TSV/text report writers
-└── viz/clustering_plot.py  ← UMAP scatter (optional, [viz] extras)
+├── viz/clustering_plot.py  ← UMAP scatter (optional, [viz] extras)
+└── phylo/                  ← optional MSA + tree step (--phylo)
+    ├── mafft.py            ← shells out to `mafft --auto`
+    ├── fasttree.py         ← shells out to `FastTree` (auto-picks -nt/-gtr)
+    └── pipeline.py         ← short-id remap → MAFFT → FastTree → phyloXML
 ```
 
 `config/default_config.yaml` is the documented config schema; the same dict
@@ -87,6 +91,18 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
    2000-point subsample (representatives always kept); skipped when
    the run produced no clusters. Requires the `[viz]` extras
    (`matplotlib` + `umap-learn`) — `ImportError` is surfaced gracefully.
+9. If `--phylo` is passed, `phylo.run_phylogeny` builds an MSA (MAFFT
+   `--auto`) and an approximate-ML tree (FastTree) over the
+   representatives. Auto-picks the substitution model from the rep
+   alphabet (FastTree `-nt -gtr` for nucleotide; default JTT for
+   protein). Every rep gets a deterministic short id `S0001…SNNNN`
+   for the MAFFT/FastTree pipeline (long names, whitespace, and pipes
+   break many phylo tools); the final phyloXML restores each terminal
+   clade's name to `seq.id` via `Bio.Phylo`, while the intermediate
+   Newick keeps the short ids. Outputs: `{prefix}_msa.fasta`,
+   `{prefix}_tree.nwk`, `{prefix}_tree.xml`, `{prefix}_tree_id_map.tsv`.
+   Skipped with a stderr warning if `<3` reps or if MAFFT / FastTree
+   are missing or fail (mirrors `--plot` failure handling).
 
 ## Invariants worth knowing
 
@@ -164,7 +180,9 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
 - **Concatenated sequences in output**: in segmented mode, the
   representatives list contains synthetic `CONCAT|<isolate_id>` entries.
   `output/writer._write_segmented` expands these back into per-segment
-  files.
+  files. The `--phylo` step also operates on those concatenated reps
+  directly, so the tree groups isolates (one leaf per isolate) rather
+  than segments.
 - **Output directory must be empty**: `_load_and_validate` calls
   `_check_output_dir`, which aborts (exit 1) if `output.dir` already
   exists and is non-empty — runs never overwrite or mix into prior
@@ -184,6 +202,25 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
   check in `validate_config`. Document in `config/default_config.yaml`.
 
 ## Status
+
+`v0.5.8` adds an optional **phylogeny step** behind the new
+`--phylo` flag (works on every mode command). Builds an MSA with MAFFT
+(`--auto`) and an approximate-ML tree with FastTree on the final
+representative sequences (which in segmented mode are the concatenated
+per-isolate sequences, so the tree's leaves are isolates not segments).
+Every rep gets a deterministic short id (`S0001`…) before the MSA step
+because long names, whitespace, and pipes break many phylo tools; the
+final phyloXML restores each terminal clade's name to `seq.id` via
+`Bio.Phylo`, while the intermediate Newick keeps the short ids
+(decodable from `{prefix}_tree_id_map.tsv`). FastTree's substitution
+model is auto-picked from the rep alphabet (`-nt -gtr` for nucleotide,
+default JTT for protein). The step is fail-soft: skipped with a stderr
+`[phylo skipped]` when there are `<3` reps, when `mafft` or `FastTree`
+are missing, or when either subprocess errors — the rest of the run's
+outputs are always written. New tests cover short-id round-trip, name
+restoration in phyloXML (including pipe / non-ASCII originals), the
+`<3` skip rule, NT-vs-AA model selection, and the `[phylo skipped]`
+stderr path. 407 offline tests total.
 
 `v0.5.7` adds an optional **cd-hit clustering backend** alongside
 the existing MMseqs2 one. `cfg["clustering"]["backend"]` selects

@@ -143,6 +143,25 @@ representative:
     - reviewed_uniprot
     - longest
 
+# Optional MSA + phylogeny step (triggered with --phylo on any mode command).
+# Skipped automatically if fewer than 3 representatives survive selection.
+# Output files: {prefix}_msa.fasta (short ids), {prefix}_tree.nwk (Newick,
+# short ids), {prefix}_tree.xml (phyloXML, original names restored), and
+# {prefix}_tree_id_map.tsv (short ↔ original mapping). The short-id rename
+# avoids breaking MAFFT/FastTree on long, whitespace- or pipe-containing
+# names; the mapping file lets you decode the MSA and Newick yourself.
+phylo:
+  mafft:
+    # Raw mafft flags appended to "mafft --auto --thread N <input>".
+    # Examples: ["--maxiterate", "1000"] for accurate L-INS-i;
+    #           ["--retree", "1"] to speed a very large pass.
+    extra_args: []
+  fasttree:
+    # Raw FastTree flags. The substitution model is picked automatically:
+    # default JTT for protein, "-nt -gtr" for nucleotide.
+    # Example: ["-fastest"] for the quickest pass on very large MSAs.
+    extra_args: []
+
 output:
   dir: ./repseq_output
   prefix: repseq
