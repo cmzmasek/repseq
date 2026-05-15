@@ -53,6 +53,12 @@ segmented:
   enabled: false
   # Set 'virus' to the key in 'viruses' that you want to use
   virus: null
+  # Prefer GenBank source-feature qualifiers (/isolate, /strain, /segment)
+  # over the header-regex parse. The regex still runs as a fallback when an
+  # accession is missing, when the source is UniProt, when --no-resolve is
+  # set, or when a record lacks the qualifier. Set to false to bypass the
+  # GenBank lookup entirely (header-regex only — the v0.5.x behaviour).
+  use_genbank_metadata: true
   # Schema for each virus entry:
   #   <name>:
   #     expected_segments: <int>

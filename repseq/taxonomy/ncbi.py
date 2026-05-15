@@ -225,14 +225,59 @@ class NCBITaxonomy:
 
         Network calls are batched (up to ``batch_size`` per ``efetch``).
         Per-accession results are cached under the ``ncbi_proteins`` source,
-        so subsequent runs incur no network cost for the same inputs.
+        so subsequent runs incur no network cost for the same inputs. The
+        cache entry also carries source-feature qualifiers (isolate, strain,
+        segment) extracted from the same GenBank record — read via
+        ``fetch_source_metadata_batch`` to avoid a second network round trip.
         """
-        results: dict[str, list[dict]] = {}
+        records = self._fetch_genbank_batch(accessions, batch_size)
+        return {acc: rec.get("proteins", []) for acc, rec in records.items()}
+
+    def fetch_source_metadata_batch(
+        self,
+        accessions: list[str],
+        batch_size: int = _GENBANK_BATCH_SIZE,
+    ) -> dict[str, dict[str, Optional[str]]]:
+        """Fetch source-feature qualifiers (isolate, strain, segment).
+
+        Returns ``accession → {"isolate": ..., "strain": ..., "segment": ...}``.
+        Values are ``None`` when the qualifier is absent on the GenBank source
+        feature. Accessions with no record map to all-None.
+
+        Shares the ``ncbi_proteins`` cache with ``fetch_proteins_batch`` — a
+        single efetch populates both the protein list and the source metadata,
+        so running protein QC and segmented metadata extraction together costs
+        one round trip. Cache entries written by older repseq versions did not
+        store source metadata; for those, all fields come back ``None`` (the
+        caller falls back to header parsing).
+        """
+        records = self._fetch_genbank_batch(accessions, batch_size)
+        empty: dict[str, Optional[str]] = {
+            "isolate": None, "strain": None, "segment": None,
+        }
+        return {acc: dict(rec.get("source") or empty) for acc, rec in records.items()}
+
+    def _fetch_genbank_batch(
+        self,
+        accessions: list[str],
+        batch_size: int,
+    ) -> dict[str, dict[str, Any]]:
+        """Cached-batched GenBank fetch shared by protein and source-metadata APIs.
+
+        Returns ``accession → {"proteins": [...], "source": {...}}``. The
+        ``source`` value may be ``None`` for accessions cached by earlier
+        repseq versions that did not capture source qualifiers — callers
+        should treat that as "fall back to other means".
+        """
+        results: dict[str, dict[str, Any]] = {}
         to_fetch: list[str] = []
         for acc in accessions:
             cached = self._cache.get(_SOURCE_PROTEINS, acc)
             if cached is not None:
-                results[acc] = cached.get("proteins", [])
+                results[acc] = {
+                    "proteins": cached.get("proteins", []),
+                    "source": cached.get("source"),
+                }
             else:
                 to_fetch.append(acc)
 
@@ -248,14 +293,17 @@ class NCBITaxonomy:
                 fetched = {}
 
             for acc in chunk:
-                proteins = fetched.get(acc, [])
-                self._cache.set(_SOURCE_PROTEINS, acc, {"proteins": proteins})
-                results[acc] = proteins
+                rec = fetched.get(acc, {"proteins": [], "source": None})
+                self._cache.set(_SOURCE_PROTEINS, acc, rec)
+                results[acc] = rec
 
         return results
 
-    def _fetch_genbank_chunk(self, accessions: list[str]) -> dict[str, list[dict]]:
-        """One efetch call → parsed CDS features per accession.
+    def _fetch_genbank_chunk(
+        self,
+        accessions: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """One efetch call → parsed CDS features and source qualifiers per accession.
 
         Records from NCBI carry version suffixes (e.g. ``MW626064.1``); we
         match each parsed record back to the caller's accession with and
@@ -281,33 +329,44 @@ class NCBITaxonomy:
         )
         resp.raise_for_status()
 
-        by_acc_full: dict[str, list[dict]] = {}
-        by_acc_no_version: dict[str, list[dict]] = {}
+        by_acc_full: dict[str, dict[str, Any]] = {}
+        by_acc_no_version: dict[str, dict[str, Any]] = {}
         for record in SeqIO.parse(StringIO(resp.text), "genbank"):
             proteins: list[dict] = []
+            source: dict[str, Optional[str]] = {
+                "isolate": None, "strain": None, "segment": None,
+            }
             for feat in record.features:
-                if feat.type != "CDS":
-                    continue
-                q = feat.qualifiers
-                translation = q.get("translation", [None])[0]
-                proteins.append({
-                    "protein_id": q.get("protein_id", [None])[0],
-                    "product": q.get("product", [None])[0],
-                    "length": len(translation) if translation else None,
-                    # Amino-acid sequence from the GenBank /translation=
-                    # qualifier. Stored so we can later emit a proteins.fasta
-                    # without a second network call.
-                    "sequence": translation,
-                })
-            by_acc_full[record.id] = proteins
-            by_acc_no_version[record.id.split(".")[0]] = proteins
+                if feat.type == "source":
+                    q = feat.qualifiers
+                    source["isolate"] = q.get("isolate", [None])[0]
+                    source["strain"] = q.get("strain", [None])[0]
+                    source["segment"] = q.get("segment", [None])[0]
+                elif feat.type == "CDS":
+                    q = feat.qualifiers
+                    translation = q.get("translation", [None])[0]
+                    proteins.append({
+                        "protein_id": q.get("protein_id", [None])[0],
+                        "product": q.get("product", [None])[0],
+                        "length": len(translation) if translation else None,
+                        # Amino-acid sequence from the GenBank /translation=
+                        # qualifier. Stored so we can later emit a proteins.fasta
+                        # without a second network call.
+                        "sequence": translation,
+                    })
+            rec = {"proteins": proteins, "source": source}
+            by_acc_full[record.id] = rec
+            by_acc_no_version[record.id.split(".")[0]] = rec
 
-        results: dict[str, list[dict]] = {}
+        results: dict[str, dict[str, Any]] = {}
         for acc in accessions:
             if acc in by_acc_full:
                 results[acc] = by_acc_full[acc]
             else:
-                results[acc] = by_acc_no_version.get(acc.split(".")[0], [])
+                results[acc] = by_acc_no_version.get(
+                    acc.split(".")[0],
+                    {"proteins": [], "source": None},
+                )
         return results
 
 

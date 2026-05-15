@@ -57,6 +57,14 @@ DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "virus": None,
         "viruses": {},
+        # When true (the default), repseq fetches the GenBank source feature
+        # for each NCBI-sourced sequence and uses its /isolate, /strain, and
+        # /segment qualifiers in preference to the header-regex parse. The
+        # regex still runs as a fallback for sequences without an accession,
+        # for UniProt input, when --no-resolve is set, or when the GenBank
+        # record lacks the qualifier. Set to false to bypass the GenBank
+        # lookup entirely (header-regex only).
+        "use_genbank_metadata": True,
     },
     "clustering": {
         "backend": "mmseqs2",              # "mmseqs2" | "cdhit"
@@ -225,6 +233,10 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
 
     # Segmented virus
     seg = cfg.get("segmented", {})
+    if "use_genbank_metadata" in seg and not isinstance(
+        seg["use_genbank_metadata"], bool
+    ):
+        errors.append("segmented.use_genbank_metadata must be a boolean")
     if seg.get("enabled"):
         virus_name = seg.get("virus")
         if not virus_name:

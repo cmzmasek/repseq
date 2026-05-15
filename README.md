@@ -255,16 +255,24 @@ Segmented viruses store their genome in several separate pieces. NCBI gives you
 one FASTA record per segment, so a single isolate is spread across multiple
 records. `repseq` can stitch them back together:
 
-1. **Group records by isolate** — using a pattern (regex) that matches the strain
-   name in the header.
-2. **Identify each record's segment** — by its name, its number, or a synonym you
-   define (e.g. `hemagglutinin` → `HA`).
+1. **Group records by isolate** — by default, `repseq` reads the `/isolate`
+   (or `/strain`) qualifier from each record's GenBank source feature.
+   The strain-name regex below is the fallback for sequences that don't have
+   an NCBI accession (e.g. UniProt input) or whose record lacks the qualifier.
+2. **Identify each record's segment** — by default from the GenBank `/segment`
+   qualifier, or by its name / number / a synonym you define
+   (e.g. `hemagglutinin` → `HA`).
 3. **Keep only complete isolates** — an isolate missing any expected segment is
    dropped.
 4. **(Optional) length-check each segment** — drop an isolate if, say, its HA
    segment is suspiciously short.
 5. **Concatenate** the segments of each complete isolate into one sequence, so the
    normal grouping/selection can run on whole isolates.
+
+The GenBank lookup reuses the same cache as the protein-annotation QC, so if
+you have both turned on, repseq only fetches each record once. To turn the
+lookup off entirely (and rely on the regex below for *every* record), set
+`segmented.use_genbank_metadata: false`.
 
 Configure it under `segmented:` and turn it on with `--segmented` on the command
 line (or `enabled: true` in the config):
@@ -289,10 +297,12 @@ segmented:
 
 `config/examples/influenza_a.yaml` is a complete, commented example you can copy.
 
-> The `isolate_regex` is the part people get wrong most often. It has to match the
-> strain identifier as it appears in *your* headers, and it must capture it either
-> as a group named `isolate` or as the first parenthesised group. If no isolates
-> come through, this is the first thing to check.
+> The `isolate_regex` is a *fallback* — by default (`use_genbank_metadata: true`),
+> repseq prefers the GenBank source-feature `/isolate` qualifier. The regex still
+> needs to match for sequences without an NCBI accession or whose record has no
+> isolate qualifier. If isolate identification fails for those records, it has to
+> match the strain identifier as it appears in *your* headers, and it must capture
+> it either as a group named `isolate` or as the first parenthesised group.
 
 ---
 

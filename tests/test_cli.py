@@ -1,10 +1,17 @@
 """CLI helpers: the closing run summary / no-output warning."""
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
-from repseq.cli import _check_output_dir, _final_summary, _handle_segmented
-from repseq.models import Cluster, QCReport, RunResult
+from repseq.cli import (
+    _check_output_dir,
+    _final_summary,
+    _handle_segmented,
+    _populate_genbank_isolate_segment,
+)
+from repseq.models import Cluster, QCReport, RunResult, SequenceSource
 
 
 def _result(make_seq, n_reps=0, n_clusters=0):
@@ -126,6 +133,111 @@ def test_handle_segmented_collapses_fully_identical_isolates(make_seq):
     assert [s.isolate_id for s in concat] == ["iso1"]
     assert set(complete.keys()) == {"iso1"}
     assert report.removed_duplicates == 1
+
+
+# ---------------------------------------------------------------------------
+# _populate_genbank_isolate_segment — GenBank-first, header-regex fallback
+# ---------------------------------------------------------------------------
+
+def _cfg_with_toggle(use_genbank_metadata: bool = True) -> dict:
+    return {
+        "segmented": {
+            "enabled": True,
+            "use_genbank_metadata": use_genbank_metadata,
+            "virus": "test",
+            "viruses": {
+                "test": {
+                    "expected_segments": 2,
+                    "segments": ["S", "L"],
+                    "isolate_regex": r"(?P<isolate>iso\d+)",
+                }
+            },
+        }
+    }
+
+
+def test_populate_genbank_isolate_segment_sets_fields(make_seq):
+    a = make_seq("a", "ACGT", source=SequenceSource.NCBI, accession="NC_001.1")
+    b = make_seq("b", "ACGT", source=SequenceSource.NCBI, accession="NC_002.1")
+    ncbi = MagicMock()
+    ncbi.fetch_source_metadata_batch.return_value = {
+        "NC_001.1": {"isolate": "SNV-1", "strain": "S1", "segment": "L"},
+        "NC_002.1": {"isolate": "SNV-2", "strain": None, "segment": "S"},
+    }
+    _populate_genbank_isolate_segment([a, b], _cfg_with_toggle(), ncbi)
+    assert a.isolate_id == "SNV-1"
+    assert a.segment == "L"
+    assert a.strain == "S1"
+    assert b.isolate_id == "SNV-2"
+    assert b.segment == "S"
+    assert b.strain is None
+    ncbi.fetch_source_metadata_batch.assert_called_once_with(
+        ["NC_001.1", "NC_002.1"]
+    )
+
+
+def test_populate_genbank_isolate_segment_falls_back_to_strain(make_seq):
+    """When /isolate is absent, /strain takes its place as the isolate id."""
+    a = make_seq("a", "ACGT", source=SequenceSource.NCBI, accession="NC_001.1")
+    ncbi = MagicMock()
+    ncbi.fetch_source_metadata_batch.return_value = {
+        "NC_001.1": {"isolate": None, "strain": "Convict Creek 107", "segment": "L"},
+    }
+    _populate_genbank_isolate_segment([a], _cfg_with_toggle(), ncbi)
+    assert a.isolate_id == "Convict Creek 107"
+    assert a.segment == "L"
+
+
+def test_populate_genbank_isolate_segment_preserves_existing_fields(make_seq):
+    """If a field is already set, the fetch does not overwrite it."""
+    a = make_seq(
+        "a", "ACGT", source=SequenceSource.NCBI, accession="NC_001.1",
+        isolate_id="prior", segment="prior_seg",
+    )
+    a.strain = "prior_strain"
+    ncbi = MagicMock()
+    ncbi.fetch_source_metadata_batch.return_value = {
+        "NC_001.1": {"isolate": "NEW", "strain": "NEW_S", "segment": "NEW_SEG"},
+    }
+    _populate_genbank_isolate_segment([a], _cfg_with_toggle(), ncbi)
+    assert a.isolate_id == "prior"
+    assert a.segment == "prior_seg"
+    assert a.strain == "prior_strain"
+
+
+def test_populate_genbank_isolate_segment_skips_uniprot_and_no_accession(make_seq):
+    """UniProt sequences and sequences without an accession are not fetched."""
+    up = make_seq("u", "MEEP", source=SequenceSource.UNIPROT, accession="P12345")
+    no_acc = make_seq("n", "ACGT", source=SequenceSource.NCBI)
+    no_acc.accession = None
+    ncbi = MagicMock()
+    _populate_genbank_isolate_segment([up, no_acc], _cfg_with_toggle(), ncbi)
+    ncbi.fetch_source_metadata_batch.assert_not_called()
+
+
+def test_populate_genbank_isolate_segment_no_op_when_toggle_off(make_seq):
+    """Toggle set to false bypasses the GenBank fetch entirely."""
+    a = make_seq("a", "ACGT", source=SequenceSource.NCBI, accession="NC_001.1")
+    ncbi = MagicMock()
+    _populate_genbank_isolate_segment([a], _cfg_with_toggle(False), ncbi)
+    ncbi.fetch_source_metadata_batch.assert_not_called()
+    assert a.isolate_id is None  # untouched — falls through to regex later
+
+
+def test_populate_genbank_isolate_segment_no_op_without_ncbi(make_seq):
+    """--no-resolve leaves ncbi=None — the helper must be a silent no-op."""
+    a = make_seq("a", "ACGT", source=SequenceSource.NCBI, accession="NC_001.1")
+    _populate_genbank_isolate_segment([a], _cfg_with_toggle(), ncbi=None)
+    assert a.isolate_id is None
+
+
+def test_populate_genbank_isolate_segment_no_op_when_not_segmented(make_seq):
+    """Segmented mode disabled → no GenBank fetch, even if ncbi is present."""
+    a = make_seq("a", "ACGT", source=SequenceSource.NCBI, accession="NC_001.1")
+    ncbi = MagicMock()
+    cfg = {"segmented": {"enabled": False}}
+    _populate_genbank_isolate_segment([a], cfg, ncbi)
+    ncbi.fetch_source_metadata_batch.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -64,16 +64,29 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
    `NCBITaxonomy.fetch_proteins_batch` (200 accessions per request, cached
    in SQLite under source `ncbi_proteins`), populates `seq.proteins`, and
    drops sequences failing the count check.
-5. If `segmented.enabled`, `_handle_segmented` runs `filter_complete_isolates`
+5. If `segmented.enabled` *and* `segmented.use_genbank_metadata` (default
+   true) *and* an NCBI client is available, `_populate_genbank_isolate_segment`
+   pulls `/isolate`, `/strain`, `/segment` from the GenBank source feature
+   for every NCBI-sourced sequence and writes them onto `seq.isolate_id`,
+   `seq.strain`, `seq.segment`. Shares the `ncbi_proteins` cache with
+   protein QC via `fetch_source_metadata_batch`, so a run that also does
+   protein QC pays one efetch round trip, not two. UniProt sequences and
+   sequences without an accession are skipped — they fall through to the
+   header-regex parse in step 6. The toggle exists so a user who would
+   rather not depend on NCBI lookups can revert to the pre-v0.6 behaviour.
+6. If `segmented.enabled`, `_handle_segmented` runs `filter_complete_isolates`
    then `build_concatenated_sequences`, replacing the sequence list with one
-   concatenated sequence per complete isolate. Exact-duplicate removal is then
-   applied here, on the *concatenated* sequences (not the segment pool — a
-   conserved segment shared between two distinct isolates must not knock
-   either out as incomplete); de-duplicated isolates are also pruned from
+   concatenated sequence per complete isolate. `filter_complete_isolates`
+   prefers `seq.isolate_id` / `seq.segment` (populated in step 5) and only
+   falls back to `isolate_regex` and the segment alias/header scan when
+   those fields are unset. Exact-duplicate removal is then applied here,
+   on the *concatenated* sequences (not the segment pool — a conserved
+   segment shared between two distinct isolates must not knock either out
+   as incomplete); de-duplicated isolates are also pruned from
    `complete_isolates` so the per-segment output files stay consistent.
-6. The chosen mode runs (`modes/<mode>.py`), returning a `RunResult` with
+7. The chosen mode runs (`modes/<mode>.py`), returning a `RunResult` with
    `representatives` + `clusters`.
-7. `write_results` writes the FASTA(s); `write_all_reports` writes the
+8. `write_results` writes the FASTA(s); `write_all_reports` writes the
    plain-text/TSV reports — including `{prefix}_group_counts.tsv`
    (one row per stratification group: `grouping, group, n_before,
    n_after, clustered, cutoff` — populated from `RunResult.group_stats`,
@@ -86,13 +99,13 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
    `{prefix}_proteins.fasta` (amino-acid sequences for all proteins of
    the selected representatives). The protein FASTA is reconstructed
    from the same cached GenBank records — no extra network calls.
-8. If `--plot` is passed, `viz.clustering_plot.write_clustering_plot`
+9. If `--plot` is passed, `viz.clustering_plot.write_clustering_plot`
    embeds the clustered sequences with UMAP on k-mer Jaccard distance
    and writes `{prefix}_clustering.png`. Cost-bounded by a default
    2000-point subsample (representatives always kept); skipped when
    the run produced no clusters. Requires the `[viz]` extras
    (`matplotlib` + `umap-learn`) — `ImportError` is surfaced gracefully.
-9. If `--phylo` is passed, `phylo.run_phylogeny` builds an MSA (MAFFT
+10. If `--phylo` is passed, `phylo.run_phylogeny` builds an MSA (MAFFT
    `--auto`) and an approximate-ML tree (FastTree) over the
    representatives. Auto-picks the substitution model from the rep
    alphabet (FastTree `-nt -gtr` for nucleotide; default JTT for
@@ -116,7 +129,12 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
   to `cluster.members`.
 - **Segmented mode** requires three fields per virus in config:
   `expected_segments`, `segments`, `isolate_regex`. The regex must capture
-  either a named group `isolate` or group 1.
+  either a named group `isolate` or group 1. The regex is now a *fallback*:
+  with `segmented.use_genbank_metadata: true` (default), `seq.isolate_id`
+  and `seq.segment` come from the GenBank source feature
+  (`/isolate`/`/strain`/`/segment`) first; the regex only fires for sequences
+  the GenBank lookup can't fill (UniProt input, missing accession, missing
+  qualifier, or `--no-resolve` / toggle off).
 - **Taxonomy cache** keys are `(source, key)`; TTL eviction happens lazily
   on `get` (expired entries are deleted in place).
 - **Threads**: only `MetadataResolver.resolve_batch` and the clustering
@@ -203,6 +221,27 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
   check in `validate_config`. Document in `config/default_config.yaml`.
 
 ## Status
+
+`v0.5.10` makes segmented mode prefer **GenBank source-feature
+qualifiers** (`/isolate`, `/strain`, `/segment`) over the
+header-regex parse. Behind the new `segmented.use_genbank_metadata`
+toggle (default `true`). The new
+`NCBITaxonomy.fetch_source_metadata_batch` reuses the existing
+`ncbi_proteins` SQLite cache — a run with protein QC and segmented
+metadata extraction pays one efetch round trip, not two. Fetch happens
+in a new CLI helper `_populate_genbank_isolate_segment` that runs after
+`_run_protein_qc` and before `_handle_segmented`; UniProt sequences,
+sequences without an accession, and `--no-resolve` runs all fall back
+to the regex transparently (no warning, no error). `extract_isolate_id`
+and `identify_segment` in `segmented/completeness.py` were already
+written to short-circuit when `seq.isolate_id` / `seq.segment` are set
+— no changes needed there. Cache entries written by v0.5.9 are
+forwards-compatible: missing `source` key returns all-None and the
+regex fallback fires. 13 new tests cover the source-feature parser
+(qualifier present / absent), cache-sharing with protein QC,
+legacy-cache forward compatibility, all six branches of the CLI
+helper's gating, the strain-as-isolate fallback, and the bool config
+validation. 437 offline tests total.
 
 `v0.5.9` adds a **`repseq doctor`** self-test subcommand for
 bench-scientist debugging. Emits a grouped report

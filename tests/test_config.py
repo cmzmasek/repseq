@@ -118,6 +118,19 @@ def test_validate_config_rejects_phylo_non_string_extra_args():
     assert any("phylo.mafft.extra_args" in e for e in errors)
 
 
+def test_validate_config_default_use_genbank_metadata_is_true():
+    cfg = load_config(None)
+    assert cfg["segmented"]["use_genbank_metadata"] is True
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_non_bool_use_genbank_metadata():
+    cfg = load_config(None)
+    cfg["segmented"]["use_genbank_metadata"] = "yes"
+    errors = validate_config(cfg)
+    assert any("use_genbank_metadata" in e for e in errors)
+
+
 def test_validate_config_requires_longest_in_priority():
     cfg = load_config(None)
     cfg["representative"]["priority"] = ["refseq", "reviewed_uniprot"]

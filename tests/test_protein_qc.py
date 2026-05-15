@@ -57,6 +57,26 @@ ORIGIN
 //
 """
 
+_GB_WITH_SOURCE_QUALIFIERS = """\
+LOCUS       MW626064                1234 bp    cRNA    linear   VRL 01-JAN-2020
+DEFINITION  Hantavirus L segment.
+ACCESSION   MW626064
+VERSION     MW626064.1
+FEATURES             Location/Qualifiers
+     source          1..1234
+                     /organism="Sin Nombre virus"
+                     /isolate="SNV-NM-H10"
+                     /strain="Convict Creek 107"
+                     /segment="L"
+     CDS             1..759
+                     /protein_id="QQQ12345.1"
+                     /product="RNA-dependent RNA polymerase"
+                     /translation="MSLLTEVETYVLSIVPSGPLKAEIAQRLEDVFAGKNTDLEALMEW"
+ORIGIN
+        1 atgagccttc taaccgaggt cgaaacgtac gttctctcta tcgtcccgtc aggccccctc
+//
+"""
+
 
 # ---------------------------------------------------------------------------
 # fetch_proteins_batch
@@ -151,6 +171,82 @@ def test_fetch_proteins_batch_network_failure_caches_empty(tmp_cache_dir):
         out = ncbi.fetch_proteins_batch(["A.1", "B.1"])
 
     assert out == {"A.1": [], "B.1": []}
+
+
+# ---------------------------------------------------------------------------
+# fetch_source_metadata_batch — isolate/strain/segment from /source feature
+# ---------------------------------------------------------------------------
+
+def test_fetch_source_metadata_batch_extracts_qualifiers(tmp_cache_dir):
+    """Source feature carries /isolate, /strain, /segment — all captured."""
+    cache = TaxonomyCache(tmp_cache_dir)
+    ncbi = NCBITaxonomy(cache, email="t@e.com")
+
+    fake_resp = MagicMock()
+    fake_resp.text = _GB_WITH_SOURCE_QUALIFIERS
+    fake_resp.raise_for_status = lambda: None
+
+    with patch("repseq.taxonomy.ncbi.requests.get", return_value=fake_resp):
+        out = ncbi.fetch_source_metadata_batch(["MW626064.1"])
+
+    meta = out["MW626064.1"]
+    assert meta["isolate"] == "SNV-NM-H10"
+    assert meta["strain"] == "Convict Creek 107"
+    assert meta["segment"] == "L"
+
+
+def test_fetch_source_metadata_batch_handles_missing_qualifiers(tmp_cache_dir):
+    """A source feature with only /organism returns all-None for our keys."""
+    cache = TaxonomyCache(tmp_cache_dir)
+    ncbi = NCBITaxonomy(cache, email="t@e.com")
+
+    fake_resp = MagicMock()
+    fake_resp.text = _GB_NO_CDS
+    fake_resp.raise_for_status = lambda: None
+
+    with patch("repseq.taxonomy.ncbi.requests.get", return_value=fake_resp):
+        out = ncbi.fetch_source_metadata_batch(["XX000001.1"])
+
+    assert out["XX000001.1"] == {"isolate": None, "strain": None, "segment": None}
+
+
+def test_fetch_source_metadata_batch_shares_cache_with_proteins(tmp_cache_dir):
+    """One efetch populates both protein list and source metadata."""
+    cache = TaxonomyCache(tmp_cache_dir)
+    ncbi = NCBITaxonomy(cache, email="t@e.com")
+
+    fake_resp = MagicMock()
+    fake_resp.text = _GB_WITH_SOURCE_QUALIFIERS
+    fake_resp.raise_for_status = lambda: None
+
+    with patch(
+        "repseq.taxonomy.ncbi.requests.get", return_value=fake_resp,
+    ) as mock_get:
+        # First call: hits network.
+        proteins = ncbi.fetch_proteins_batch(["MW626064.1"])
+        # Second call for source metadata on the same accession: cache hit.
+        meta = ncbi.fetch_source_metadata_batch(["MW626064.1"])
+
+    assert mock_get.call_count == 1
+    assert len(proteins["MW626064.1"]) == 1
+    assert meta["MW626064.1"]["segment"] == "L"
+
+
+def test_fetch_source_metadata_batch_legacy_cache_returns_none(tmp_cache_dir):
+    """Old cache entries (proteins only, no 'source' key) yield all-None."""
+    from repseq.taxonomy.cache import TaxonomyCache as _TC
+    cache = _TC(tmp_cache_dir)
+    cache.set("ncbi_proteins", "ZZ000001.1", {"proteins": []})  # v0.5.9 shape
+    ncbi = NCBITaxonomy(cache, email="t@e.com")
+
+    # No network call should be made — entry is "cached", just incomplete.
+    with patch(
+        "repseq.taxonomy.ncbi.requests.get",
+        side_effect=AssertionError("should not hit network"),
+    ):
+        out = ncbi.fetch_source_metadata_batch(["ZZ000001.1"])
+
+    assert out["ZZ000001.1"] == {"isolate": None, "strain": None, "segment": None}
 
 
 # ---------------------------------------------------------------------------

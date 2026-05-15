@@ -195,6 +195,56 @@ def _run_protein_qc(sequences, cfg, qc_report, ncbi):
     return kept
 
 
+def _populate_genbank_isolate_segment(sequences, cfg, ncbi):
+    """Populate seq.isolate_id / seq.segment / seq.strain from the GenBank
+    source feature, when segmented mode is on and the toggle is enabled.
+
+    The downstream segmented filter prefers these fields over its regex fallback
+    (extract_isolate_id and identify_segment both short-circuit when the
+    Sequence already carries the value). UniProt input and sequences without
+    an accession are skipped — the regex remains the fallback for those.
+    A failed/empty NCBI fetch is also silent: the regex still runs.
+    """
+    if ncbi is None:
+        return  # --no-resolve
+    seg_cfg = cfg.get("segmented", {})
+    if not seg_cfg.get("enabled"):
+        return
+    if not seg_cfg.get("use_genbank_metadata", True):
+        return
+    accessions: list[str] = []
+    by_acc: dict[str, list] = {}
+    for seq in sequences:
+        if seq.source == SequenceSource.UNIPROT:
+            continue
+        if not seq.accession:
+            continue
+        accessions.append(seq.accession)
+        by_acc.setdefault(seq.accession, []).append(seq)
+    if not accessions:
+        return
+    click.echo("Fetching GenBank source metadata for segmented mode ...")
+    meta_by_acc = ncbi.fetch_source_metadata_batch(accessions)
+    populated = 0
+    for acc, meta in meta_by_acc.items():
+        isolate = meta.get("isolate") or meta.get("strain")
+        segment = meta.get("segment")
+        strain = meta.get("strain")
+        for seq in by_acc.get(acc, []):
+            if isolate and not seq.isolate_id:
+                seq.isolate_id = isolate
+            if segment and not seq.segment:
+                seq.segment = segment
+            if strain and not seq.strain:
+                seq.strain = strain
+            if isolate or segment:
+                populated += 1
+    click.echo(
+        f"  Populated isolate/segment fields on {populated} of "
+        f"{len(sequences)} sequences from GenBank metadata."
+    )
+
+
 def _handle_segmented(sequences, cfg, qc_report):
     virus_cfg = get_virus_config(cfg)
     if not virus_cfg:
@@ -400,6 +450,7 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.global_mode import GlobalMode
@@ -434,6 +485,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.taxonomic1 import TaxonomicMode1
@@ -472,6 +524,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.taxonomic2 import TaxonomicMode2
@@ -504,6 +557,7 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.host_mode import HostMode
@@ -538,6 +592,7 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.time_mode import TimeMode
@@ -570,6 +625,7 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.geographic_mode import GeographicMode
@@ -609,6 +665,7 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.custom_mode import CustomMode
@@ -652,6 +709,7 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
     from .modes.hybrid_mode import HybridMode
