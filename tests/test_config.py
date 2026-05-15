@@ -67,6 +67,43 @@ def test_validate_config_rejects_out_of_range_ambiguous():
     assert any("ambiguous_threshold" in e for e in errors)
 
 
+def test_validate_config_accepts_cdhit_backend():
+    cfg = load_config(None)
+    cfg["clustering"]["backend"] = "cdhit"
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_unknown_backend():
+    cfg = load_config(None)
+    cfg["clustering"]["backend"] = "psi-cd-hit"
+    errors = validate_config(cfg)
+    assert any("clustering.backend" in e for e in errors)
+
+
+def test_validate_config_rejects_cdhit_word_size_out_of_range():
+    cfg = load_config(None)
+    cfg["clustering"]["backend"] = "cdhit"
+    cfg["clustering"]["cdhit"]["word_size"] = 12
+    errors = validate_config(cfg)
+    assert any("word_size" in e for e in errors)
+
+
+def test_validate_config_rejects_cdhit_negative_memory():
+    cfg = load_config(None)
+    cfg["clustering"]["backend"] = "cdhit"
+    cfg["clustering"]["cdhit"]["memory_mb"] = -1
+    errors = validate_config(cfg)
+    assert any("memory_mb" in e for e in errors)
+
+
+def test_validate_config_rejects_cdhit_non_bool_global():
+    cfg = load_config(None)
+    cfg["clustering"]["backend"] = "cdhit"
+    cfg["clustering"]["cdhit"]["global_alignment"] = "yes"
+    errors = validate_config(cfg)
+    assert any("global_alignment" in e for e in errors)
+
+
 def test_validate_config_requires_longest_in_priority():
     cfg = load_config(None)
     cfg["representative"]["priority"] = ["refseq", "reviewed_uniprot"]

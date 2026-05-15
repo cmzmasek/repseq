@@ -46,18 +46,31 @@ pip install -e .
 
 That's it for most uses. Two optional pieces:
 
-**MMseqs2** — a fast sequence-clustering program. `repseq` calls it to group
-sequences *by similarity*. You only need it for the similarity-based modes (see
-the table below); if you group by genus/host/year and your groups are small, or
-you just want N diverse sequences, you can skip it. Install it with:
+**A sequence-clustering program** — `repseq` calls one to group sequences
+*by similarity*. You only need it for the similarity-based modes (see the
+table below); if you group by genus/host/year and your groups are small, or
+you just want N diverse sequences, you can skip it. Two backends are
+supported; pick **one**.
+
+*MMseqs2* (default — fast, scales to very large datasets):
 
 ```bash
 brew install mmseqs2                       # macOS
 conda install -c bioconda mmseqs2          # Linux (conda)
 ```
 
-`repseq` finds it automatically as long as `mmseqs` is on your `PATH` (i.e. you
-can type `mmseqs` in a terminal and it runs).
+*cd-hit* (classic alternative — set `clustering.backend: cdhit` in your
+config). Slower than MMseqs2 on big inputs and has minimum-identity floors
+(0.40 for protein, 0.80 for nucleotide), but produces tight, all-vs-all
+clusters that many groups prefer for reference-set work:
+
+```bash
+brew install cd-hit                        # macOS
+conda install -c bioconda cd-hit           # Linux (conda)
+```
+
+`repseq` finds whichever binary it needs (`mmseqs`, or `cd-hit` /
+`cd-hit-est`) on your `PATH` automatically.
 
 **Plots** — if you want the optional diagnostic scatter plot of the clustering
 result:
@@ -329,8 +342,11 @@ taxonomy:
   ncbi_api_key: null              # optional — get one from NCBI for faster lookups
 
 clustering:
+  backend: mmseqs2                # or "cdhit"
   mmseqs2_mode: easy-linclust     # fast; use easy-cluster for tighter, slower clustering
   coverage: 0.8
+  # cd-hit options (only used when backend == cdhit) live under
+  # `clustering.cdhit:` — see default_config.yaml for the full block.
 
 representative:
   priority: [refseq, reviewed_uniprot, longest]   # tie-break order for picking the "best"
@@ -372,10 +388,16 @@ usual ones are:
   often the `isolate_regex` doesn't match your headers; also check the segment
   names/aliases and any `segment_lengths` bounds.
 
-**`MMseqs2Error` / "mmseqs not found"** — the similarity-clustering program isn't
-installed or isn't on your `PATH`. Install it (see [Installation](#installation)),
-or use a mode that doesn't need it (`global -n`, or a stratified mode where every
-group is already small).
+**`MMseqs2Error` / "mmseqs not found"** (or **`CDHitError` / "cd-hit not
+found"** if you've set `clustering.backend: cdhit`) — the similarity-clustering
+program isn't installed or isn't on your `PATH`. Install it (see
+[Installation](#installation)), or use a mode that doesn't need it (`global -n`,
+or a stratified mode where every group is already small).
+
+**`cd-hit identity threshold X is below the supported floor`** — cd-hit refuses
+identities below 0.40 (protein) or 0.80 (nucleotide). Either raise your
+threshold to the floor, or switch the backend to `mmseqs2`, which has no
+identity floor.
 
 **Everything is grouped under "Unknown"** in a taxonomic/host/geographic run — the
 metadata lookups didn't run or didn't find anything. Don't use `--no-resolve` for

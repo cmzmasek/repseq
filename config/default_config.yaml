@@ -81,7 +81,16 @@ taxonomy:
   cache_ttl_days: 30
 
 clustering:
+  # Two backends are supported:
+  #   mmseqs2 — fast, scales to very large datasets, identity floor 0.0
+  #   cdhit   — classic, slower (no linear-time mode); cd-hit-est refuses
+  #             identity < 0.80, cd-hit (protein) refuses < 0.40
+  # Identical numeric thresholds will NOT produce identical clusters
+  # across backends — different alignment heuristics, different word-size
+  # rules. Pick one and stick with it for a given reference set.
   backend: mmseqs2
+
+  # ---- MMseqs2 backend options (used when backend == mmseqs2) ----
   # easy-linclust: linear-time, scales to very large datasets, but APPROXIMATE
   #   — it does not guarantee every pair within a cluster meets --min-seq-id,
   #   so clusters can be looser than the nominal threshold.
@@ -99,6 +108,32 @@ clustering:
   #   4 = query-in-target coverage
   coverage_mode: 0
   extra_args: []
+
+  # ---- cd-hit backend options (used when backend == cdhit) ----
+  cdhit:
+    # Binary auto-selected from input alphabet:
+    #   protein  -> cd-hit
+    #   nucleic  -> cd-hit-est
+    # Set to a name or absolute path to override.
+    binary: null
+    # Word size (-n). null = auto-pick from threshold per cd-hit's table
+    # (cd-hit refuses out-of-range -n for a given -c). Override only if
+    # you know what you're doing.
+    word_size: null
+    # Shorter-sequence coverage (-aS); only honoured when global_alignment
+    # is false. Analogous to mmseqs2.coverage above.
+    coverage: 0.8
+    # -G: true = global identity (cd-hit default), false = local.
+    # Local lets short seqs match into longer clusters; -aS only applies
+    # in local mode.
+    global_alignment: true
+    # -g: false = greedy (fast, default), true = compare each input
+    # against every existing cluster (slower, better cluster assignment).
+    accurate: false
+    # -M: memory cap in MB (0 = unlimited).
+    memory_mb: 0
+    # Raw cd-hit flags appended verbatim, e.g. ["-s", "0.8"].
+    extra_args: []
 
 representative:
   # Priority order for selecting cluster representatives.

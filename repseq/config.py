@@ -59,11 +59,33 @@ DEFAULTS: dict[str, Any] = {
         "viruses": {},
     },
     "clustering": {
-        "backend": "mmseqs2",
+        "backend": "mmseqs2",              # "mmseqs2" | "cdhit"
         "mmseqs2_mode": "easy-linclust",   # "easy-linclust" | "easy-cluster"
         "coverage": 0.8,
         "coverage_mode": 0,
         "extra_args": [],
+        "cdhit": {
+            # Binary auto-selected from input alphabet:
+            #   protein  -> cd-hit
+            #   nucleic  -> cd-hit-est
+            # Override to pin a specific path or variant.
+            "binary": None,
+            # Word size (-n). None = auto-pick from threshold per the cd-hit
+            # user guide; cd-hit refuses out-of-range -n for a given -c.
+            "word_size": None,
+            # Shorter-sequence coverage (-aS); only honoured when
+            # global_alignment is False (cd-hit's -G 0).
+            "coverage": 0.8,
+            # -G: True = global identity (cd-hit default), False = local.
+            "global_alignment": True,
+            # -g: False = greedy (fast, default), True = accurate
+            # (slower; compares each input against every existing cluster).
+            "accurate": False,
+            # -M: memory cap in MB. 0 = unlimited (cd-hit default).
+            "memory_mb": 0,
+            # Raw cd-hit flags appended verbatim (e.g. ["-s", "0.8"]).
+            "extra_args": [],
+        },
     },
     "representative": {
         "priority": ["refseq", "reviewed_uniprot", "longest"],
@@ -319,14 +341,43 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
 
     # Clustering backend
     backend = cfg.get("clustering", {}).get("backend")
-    if backend not in ("mmseqs2",):
-        errors.append(f"clustering.backend '{backend}' is not supported (use 'mmseqs2')")
+    if backend not in ("mmseqs2", "cdhit"):
+        errors.append(
+            f"clustering.backend '{backend}' is not supported "
+            f"(use 'mmseqs2' or 'cdhit')"
+        )
 
     mmseqs2_mode = cfg.get("clustering", {}).get("mmseqs2_mode")
     if mmseqs2_mode not in ("easy-linclust", "easy-cluster"):
         errors.append(
             f"clustering.mmseqs2_mode must be 'easy-linclust' or 'easy-cluster', got '{mmseqs2_mode}'"
         )
+
+    cdhit_cfg = cfg.get("clustering", {}).get("cdhit", {}) or {}
+    if cdhit_cfg:
+        ws = cdhit_cfg.get("word_size")
+        if ws is not None and (
+            not isinstance(ws, int) or isinstance(ws, bool) or not (2 <= ws <= 11)
+        ):
+            errors.append(
+                "clustering.cdhit.word_size must be an integer in [2, 11] or null "
+                "(auto-pick from threshold)"
+            )
+        cov = cdhit_cfg.get("coverage", 0.8)
+        if not isinstance(cov, (int, float)) or not (0 <= cov <= 1):
+            errors.append("clustering.cdhit.coverage must be a number between 0 and 1")
+        mem = cdhit_cfg.get("memory_mb", 0)
+        if not isinstance(mem, int) or isinstance(mem, bool) or mem < 0:
+            errors.append(
+                "clustering.cdhit.memory_mb must be a non-negative integer "
+                "(0 = unlimited)"
+            )
+        for flag in ("global_alignment", "accurate"):
+            if flag in cdhit_cfg and not isinstance(cdhit_cfg[flag], bool):
+                errors.append(f"clustering.cdhit.{flag} must be a boolean")
+        extra = cdhit_cfg.get("extra_args", [])
+        if not isinstance(extra, list) or not all(isinstance(x, str) for x in extra):
+            errors.append("clustering.cdhit.extra_args must be a list of strings")
 
     # Representative priority
     priority = cfg.get("representative", {}).get("priority", [])

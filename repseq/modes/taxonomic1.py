@@ -9,8 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal, Optional
 
+from ..clustering import min_threshold, run_clustering
 from ..clustering.diversity import select_diverse
-from ..clustering.mmseqs2 import run_clustering
 from ..models import Cluster, GroupStat, RunResult, Sequence
 from ..representative.selector import apply_representative_selection
 from .base import BaseMode
@@ -42,12 +42,12 @@ def _binary_search_threshold(
     max_iter: int = 12,
     label: str = "",
 ) -> tuple[list[Sequence], float]:
-    """Binary-search for the MMseqs2 threshold that yields ~n_target clusters.
+    """Binary-search for the clustering threshold that yields ~n_target clusters.
 
-    MMseqs2 ``--min-seq-id`` semantics: a *higher* identity threshold makes
-    clustering stricter and produces *more*, smaller clusters; a *lower*
-    threshold merges more aggressively into *fewer* clusters. The search
-    moves accordingly.
+    Identity-threshold semantics (same direction for both supported
+    backends): a *higher* threshold makes clustering stricter and produces
+    *more*, smaller clusters; a *lower* threshold merges more aggressively
+    into *fewer* clusters. The search moves accordingly.
 
     Cluster count is a step function of the threshold, so an exact landing
     on ``n_target`` is often impossible. The result kept is the one whose
@@ -57,8 +57,23 @@ def _binary_search_threshold(
     warning — silently returning far fewer representatives than requested
     is a real footgun.
 
+    The lower bound is clamped to ``min_threshold(cfg, sequences)`` so the
+    search never asks the backend for a threshold it would refuse — cd-hit
+    rejects ``-c`` below 0.40 (protein) or 0.80 (nucleotide); mmseqs2's
+    floor is 0.0, so this is a no-op there.
+
     Returns (representatives, threshold_used).
     """
+    floor = min_threshold(cfg, sequences)
+    if floor > lo:
+        lo = floor
+    if lo >= hi:
+        raise ValueError(
+            f"Binary search cannot run: clustering backend floor ({floor}) "
+            f"is at or above the search upper bound ({hi}). Lower the "
+            f"backend's threshold floor or switch backends."
+        )
+
     best_reps: list[Sequence] = []
     best_count = -1
     best_threshold = hi

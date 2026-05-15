@@ -797,15 +797,43 @@ def init_config(output):
     cfg["taxonomy"]["cache_ttl_days"] = click.prompt("Cache TTL (days)", default=30, type=int)
 
     # Clustering
-    cfg["clustering"] = {
-        "backend": "mmseqs2",
-        "mmseqs2_mode": click.prompt(
+    backend = click.prompt(
+        "Clustering backend",
+        type=click.Choice(["mmseqs2", "cdhit"]),
+        default="mmseqs2",
+    )
+    cfg["clustering"] = {"backend": backend}
+    if backend == "mmseqs2":
+        cfg["clustering"]["mmseqs2_mode"] = click.prompt(
             "MMseqs2 mode", type=click.Choice(["easy-linclust", "easy-cluster"]),
-            default="easy-linclust"
-        ),
-        "coverage": click.prompt("Coverage threshold", default=0.8, type=float),
-        "coverage_mode": click.prompt("Coverage mode (0-4)", default=0, type=int),
-    }
+            default="easy-linclust",
+        )
+        cfg["clustering"]["coverage"] = click.prompt(
+            "Coverage threshold", default=0.8, type=float,
+        )
+        cfg["clustering"]["coverage_mode"] = click.prompt(
+            "Coverage mode (0-4)", default=0, type=int,
+        )
+    else:
+        # cd-hit: defaults are reasonable; leave word_size on auto-pick.
+        cfg["clustering"]["cdhit"] = {
+            "binary": None,
+            "word_size": None,
+            "coverage": click.prompt(
+                "cd-hit coverage (-aS, used only when global_alignment=false)",
+                default=0.8, type=float,
+            ),
+            "global_alignment": click.confirm(
+                "Use global identity (-G 1)?", default=True,
+            ),
+            "accurate": click.confirm(
+                "Use accurate mode (-g 1, slower)?", default=False,
+            ),
+            "memory_mb": click.prompt(
+                "Memory cap MB (0 = unlimited)", default=0, type=int,
+            ),
+            "extra_args": [],
+        }
 
     # Output
     cfg["output"] = {

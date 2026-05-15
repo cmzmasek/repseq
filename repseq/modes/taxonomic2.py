@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..clustering.mmseqs2 import run_clustering
+from ..clustering import run_clustering
 from ..models import Cluster, GroupStat, RunResult, Sequence
 from ..representative.selector import apply_representative_selection
 from .base import BaseMode

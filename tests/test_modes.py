@@ -186,6 +186,39 @@ def test_binary_search_climbs_toward_target(make_seq):
     assert len(reps) >= 8
 
 
+def test_binary_search_respects_cdhit_floor(make_seq):
+    # When the backend is cd-hit-est, the wrapper refuses identity < 0.80.
+    # The binary search must clamp ``lo`` to that floor so it never
+    # presents the backend with a value it would reject. We give the
+    # cluster mock a function that depends on threshold so we can see
+    # the lo-clamp in the (lo, hi) endpoints.
+    from repseq.modes.taxonomic1 import _binary_search_threshold
+    from repseq.models import SequenceType
+
+    seqs = [make_seq(f"s{i}", "ACGT" * 10, seq_type=SequenceType.NUCLEOTIDE)
+            for i in range(20)]
+    cfg = _base_cfg()
+    cfg["clustering"]["backend"] = "cdhit"
+
+    seen_thresholds: list[float] = []
+
+    def fake_run_clustering(sequences, threshold, cfg_, tmp_dir=None):
+        seen_thresholds.append(threshold)
+        # Always produce enough clusters to force the search to lower
+        # the threshold; the floor should stop it at 0.80.
+        return [
+            Cluster(cluster_id=f"c{i}", representative=sequences[i])
+            for i in range(len(sequences))
+        ]
+
+    with patch("repseq.modes.taxonomic1.run_clustering", side_effect=fake_run_clustering):
+        _binary_search_threshold(seqs, n_target=2, cfg=cfg, overflow="keep")
+
+    # Mid is always >= lo, and lo is clamped to 0.80 for cd-hit-est.
+    assert seen_thresholds, "binary search did not iterate"
+    assert min(seen_thresholds) >= 0.80
+
+
 def test_binary_search_trim_enforces_exact_count(make_seq):
     from repseq.modes.taxonomic1 import _binary_search_threshold
 

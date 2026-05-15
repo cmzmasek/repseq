@@ -30,7 +30,9 @@ repseq/
 │   ├── uniprot.py          ← UniProt REST client
 │   └── resolver.py         ← DB → header → strain-label fallback chain
 ├── clustering/
+│   ├── __init__.py         ← `run_clustering` dispatcher + `min_threshold`
 │   ├── mmseqs2.py          ← shells out to `mmseqs`
+│   ├── cdhit.py            ← shells out to `cd-hit` / `cd-hit-est`
 │   └── diversity.py        ← MaxMin selection (alignment-free, k-mer Jaccard)
 ├── representative/selector.py ← RefSeq > reviewed > longest priority
 ├── modes/                  ← one file per selection mode, all extend BaseMode
@@ -100,8 +102,18 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
   either a named group `isolate` or group 1.
 - **Taxonomy cache** keys are `(source, key)`; TTL eviction happens lazily
   on `get` (expired entries are deleted in place).
-- **Threads**: only `MetadataResolver.resolve_batch` and the MMseqs2 binary
-  consume `cfg["threads"]`. Internal Python work is single-threaded.
+- **Threads**: only `MetadataResolver.resolve_batch` and the clustering
+  binary (MMseqs2 or cd-hit) consume `cfg["threads"]`. Internal Python
+  work is single-threaded.
+- **Clustering backend**: `cfg["clustering"]["backend"]` selects
+  `"mmseqs2"` (default) or `"cdhit"`. Modes import
+  `from ..clustering import run_clustering` (the dispatcher), never from
+  a backend module directly. The cd-hit wrapper auto-picks `cd-hit` for
+  protein input and `cd-hit-est` for nucleotide. Identity floors differ
+  by backend: mmseqs2 = 0.0, cd-hit protein = 0.40, cd-hit-est = 0.80.
+  `clustering.min_threshold(cfg, sequences)` returns the active floor;
+  `_binary_search_threshold` clamps `lo` to it so the search never asks
+  a backend for a value it would refuse.
 
 ## Modes
 
@@ -110,9 +122,10 @@ share the same shape:
 
 1. Group sequences by some key (rank / host / decade / country / custom field).
 2. For each group, either keep all (if `<= n_per_group`) or run a
-   **binary-search over MMseqs2 thresholds** to land at `n_per_group`
+   **binary-search over clustering thresholds** to land at `n_per_group`
    clusters (see `taxonomic1._binary_search_threshold` for the canonical
-   implementation; other modes import or mirror this).
+   implementation; other modes import or mirror this). The search lower
+   bound is clamped to the active backend's identity floor.
 3. `--overflow keep` returns whatever cluster count the binary search
    produced; `--overflow trim` follows up with `select_diverse` to enforce
    an exact count.
@@ -140,7 +153,8 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
 - **MMseqs2 not in PATH** ⇒ `MMseqs2Error` from `clustering/mmseqs2.py`.
   Cluster-based modes fail; `--no-resolve` does not help — only `global -n`
   (diversity-only) and modes where every group is small enough to skip
-  clustering will run without it.
+  clustering will run without it. Same failure mode for `CDHitError` when
+  `clustering.backend: cdhit` and `cd-hit` / `cd-hit-est` are missing.
 - **No taxonomy info** ⇒ taxonomic modes fall back to grouping under
   `"Unknown"`. Always run with metadata resolution unless you've
   pre-resolved.
@@ -170,6 +184,25 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
   check in `validate_config`. Document in `config/default_config.yaml`.
 
 ## Status
+
+`v0.5.7` adds an optional **cd-hit clustering backend** alongside
+the existing MMseqs2 one. `cfg["clustering"]["backend"]` selects
+`"mmseqs2"` (default, unchanged behaviour) or `"cdhit"`. The cd-hit
+wrapper (`clustering/cdhit.py`) auto-picks `cd-hit` for protein input,
+`cd-hit-est` for nucleotide; auto-picks `-n` (word size) from the
+threshold per cd-hit's required table; writes input FASTAs through
+`_write_id_fasta` (so cd-hit's whitespace-truncation cannot corrupt the
+round-trip) and parses `.clstr` output via the `>id...` token marked
+with `*`. A shared dispatcher (`clustering/__init__.py:run_clustering`)
+routes modes between backends — modes now import from `..clustering`
+instead of `..clustering.mmseqs2`. Identity floors differ:
+mmseqs2 = 0.0, cd-hit (protein) = 0.40, cd-hit-est (nucleotide) = 0.80;
+`clustering.min_threshold(cfg, sequences)` returns the active floor and
+`_binary_search_threshold` clamps `lo` to it so the search never asks
+the backend for a value it would refuse. New regression tests cover the
+`.clstr` parser, auto-binary selection, threshold floor, dispatch, the
+binary-search floor-clamp, and config validation of the new
+`clustering.cdhit` block. 394 offline tests total.
 
 `v0.5.6`. All 8 modes structurally complete, optional protein-annotation
 QC (batched GenBank fetch + per-segment count check), a protein-FASTA
