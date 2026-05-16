@@ -90,6 +90,27 @@ def test_check_binaries_fasttree_accepts_lowercase_alias():
     assert "fasttree" in ft.detail
 
 
+def test_check_binaries_iqtree_accepts_either_name():
+    """Doctor accepts both iqtree2 and the older iqtree."""
+    def which(name):
+        return "/usr/bin/iqtree" if name == "iqtree" else None
+
+    with patch("repseq.doctor.shutil.which", side_effect=which):
+        results = check_binaries()
+
+    iq = next(r for r in results if r.label == "iqtree2")
+    assert iq.status == OK
+    assert "iqtree" in iq.detail
+
+
+def test_check_binaries_iqtree_missing_is_warn_only():
+    """Phylo is optional → missing IQ-TREE is WARN, not FAIL."""
+    with patch("repseq.doctor.shutil.which", return_value=None):
+        results = check_binaries()
+    iq = next(r for r in results if r.label == "iqtree2")
+    assert iq.status == WARN
+
+
 # ---------------------------------------------------------------------------
 # Network
 # ---------------------------------------------------------------------------

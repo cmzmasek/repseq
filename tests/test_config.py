@@ -108,6 +108,7 @@ def test_validate_config_accepts_phylo_extra_args():
     cfg = load_config(None)
     cfg["phylo"]["mafft"]["extra_args"] = ["--maxiterate", "1000"]
     cfg["phylo"]["fasttree"]["extra_args"] = ["-fastest"]
+    cfg["phylo"]["iqtree"]["extra_args"] = ["-alrt", "1000"]
     assert validate_config(cfg) == []
 
 
@@ -116,6 +117,56 @@ def test_validate_config_rejects_phylo_non_string_extra_args():
     cfg["phylo"]["mafft"]["extra_args"] = [123]
     errors = validate_config(cfg)
     assert any("phylo.mafft.extra_args" in e for e in errors)
+
+
+def test_validate_config_default_phylo_tool_is_auto():
+    cfg = load_config(None)
+    assert cfg["phylo"]["tool"] == "auto"
+    assert cfg["phylo"]["iqtree"]["model"] == "MFP"
+    assert cfg["phylo"]["iqtree"]["ultrafast_bootstrap"] == 1000
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_accepts_phylo_tool_iqtree_or_fasttree():
+    cfg = load_config(None)
+    for tool in ("iqtree", "fasttree", "auto"):
+        cfg["phylo"]["tool"] = tool
+        assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_unknown_phylo_tool():
+    cfg = load_config(None)
+    cfg["phylo"]["tool"] = "raxml"
+    errors = validate_config(cfg)
+    assert any("phylo.tool" in e for e in errors)
+
+
+def test_validate_config_rejects_negative_ufboot():
+    cfg = load_config(None)
+    cfg["phylo"]["iqtree"]["ultrafast_bootstrap"] = -1
+    errors = validate_config(cfg)
+    assert any("ultrafast_bootstrap" in e for e in errors)
+
+
+def test_validate_config_rejects_non_int_ufboot():
+    cfg = load_config(None)
+    cfg["phylo"]["iqtree"]["ultrafast_bootstrap"] = "1000"
+    errors = validate_config(cfg)
+    assert any("ultrafast_bootstrap" in e for e in errors)
+
+
+def test_validate_config_rejects_non_string_iqtree_model():
+    cfg = load_config(None)
+    cfg["phylo"]["iqtree"]["model"] = 42
+    errors = validate_config(cfg)
+    assert any("phylo.iqtree.model" in e for e in errors)
+
+
+def test_validate_config_rejects_non_string_iqtree_binary():
+    cfg = load_config(None)
+    cfg["phylo"]["iqtree"]["binary"] = 7
+    errors = validate_config(cfg)
+    assert any("phylo.iqtree.binary" in e for e in errors)
 
 
 def test_validate_config_default_alphabet_is_protein():

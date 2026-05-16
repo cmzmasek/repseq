@@ -9,3 +9,4 @@ alternatives.
 from .pipeline import PhyloError, run_phylogeny
 
 __all__ = ["PhyloError", "run_phylogeny"]
+

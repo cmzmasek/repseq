@@ -194,6 +194,13 @@ representative:
 # avoids breaking MAFFT/FastTree on long, whitespace- or pipe-containing
 # names; the mapping file lets you decode the MSA and Newick yourself.
 phylo:
+  # Tree-builder selection:
+  #   "auto"     — IQ-TREE for protein alignments, FastTree for nucleotide.
+  #                Matches each tool to what it's best at; the default.
+  #   "iqtree"   — always IQ-TREE (slower; principled model selection
+  #                via ModelFinder, ultrafast bootstrap support values)
+  #   "fasttree" — always FastTree (faster, approximate-ML)
+  tool: auto
   mafft:
     # Raw mafft flags appended to "mafft --auto --thread N <input>".
     # Examples: ["--maxiterate", "1000"] for accurate L-INS-i;
@@ -203,6 +210,28 @@ phylo:
     # Raw FastTree flags. The substitution model is picked automatically:
     # default JTT for protein, "-nt -gtr" for nucleotide.
     # Example: ["-fastest"] for the quickest pass on very large MSAs.
+    extra_args: []
+  iqtree:
+    # Binary auto-detected: tries iqtree2 first, then iqtree.
+    # Set to a name or absolute path to pin a specific build.
+    binary: null
+    # Substitution model.
+    #   MFP     — ModelFinder Plus: scans available models and picks
+    #             the best by BIC, then infers the ML tree. Recommended
+    #             for protein (JTT/WAG/LG/FLU/HIVb/... can change topology).
+    #             Adds minutes for hundreds of reps.
+    #   LG+G4   — pin LG matrix with gamma rate heterogeneity (fast,
+    #             sane default for most viral proteins).
+    #   JTT+G4  — pin JTT (FastTree's default; fastest).
+    # Any model accepted by IQ-TREE's -m flag is allowed.
+    model: MFP
+    # Ultrafast bootstrap replicates.
+    # 0 disables bootstrap (faster); IQ-TREE recommends >= 1000 for
+    # interpretable branch-support values. Each replicate is a full tree
+    # search, so this is the main runtime knob.
+    ultrafast_bootstrap: 1000
+    # Raw flags appended verbatim, e.g. ["-alrt", "1000"] for SH-aLRT
+    # alongside UFBoot, or ["--allnni"] for thorough NNI search.
     extra_args: []
 
 output:

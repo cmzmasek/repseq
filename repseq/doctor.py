@@ -14,9 +14,9 @@ WARN vs FAIL policy:
   * optional Python packages (umap-learn, matplotlib) → WARN — only used
     by ``--plot``.
   * every external clustering / phylogeny binary (mmseqs, cd-hit,
-    cd-hit-est, mafft, FastTree) → WARN. None of them is strictly
-    required: you can pick the backend you have installed, or use
-    diversity-only modes that don't shell out.
+    cd-hit-est, mafft, FastTree, iqtree2) → WARN. None of them is
+    strictly required: you can pick the backend you have installed,
+    or use diversity-only modes that don't shell out.
   * network checks (NCBI Entrez + UniProt REST) → WARN when unreachable;
     you can still run with ``--no-resolve``.
   * cache directory writable → FAIL if not, since every resolved run
@@ -133,7 +133,8 @@ _EXTERNAL_BINARIES: tuple[tuple[str, str], ...] = (
     ("cd-hit",     "clustering (alternative backend, protein)"),
     ("cd-hit-est", "clustering (alternative backend, nucleotide)"),
     ("mafft",      "MSA, --phylo only"),
-    ("FastTree",   "phylogeny, --phylo only (also accepts 'fasttree')"),
+    ("FastTree",   "phylogeny, --phylo only on nucleotide (also accepts 'fasttree')"),
+    ("iqtree2",    "phylogeny, --phylo only on protein (also accepts 'iqtree')"),
 )
 
 
@@ -151,6 +152,8 @@ def check_binaries() -> list[CheckResult]:
     for name, note in _EXTERNAL_BINARIES:
         if name == "FastTree":
             path = _which_either("FastTree", "fasttree")
+        elif name == "iqtree2":
+            path = _which_either("iqtree2", "iqtree")
         else:
             path = shutil.which(name)
         if path:

@@ -42,7 +42,8 @@ repseq/
 ├── phylo/                  ← optional MSA + tree step (--phylo)
 │   ├── mafft.py            ← shells out to `mafft --auto`
 │   ├── fasttree.py         ← shells out to `FastTree` (auto-picks -nt/-gtr)
-│   └── pipeline.py         ← short-id remap → MAFFT → FastTree → phyloXML
+│   ├── iqtree.py           ← shells out to `iqtree2` (ModelFinder + UFBoot)
+│   └── pipeline.py         ← short-id remap → MAFFT → IQ-TREE/FastTree → phyloXML
 └── doctor.py               ← `repseq doctor` self-test (deps, tools, net, config)
 ```
 
@@ -134,20 +135,30 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
     the run produced no clusters. Requires the `[viz]` extras
     (`matplotlib` + `umap-learn`) — `ImportError` is surfaced gracefully.
 11. If `--phylo` is passed, `phylo.run_phylogeny` builds an MSA (MAFFT
-    `--auto`) and an approximate-ML tree (FastTree) over the
-    representatives. When `clustering.alphabet=protein` and every rep
-    carries a `protein_sequence`, the MSA/tree are built on the AA
-    strings (FastTree's default JTT model); otherwise the alphabet
-    comes from the rep `seq_type` (FastTree `-nt -gtr` for nucleotide,
-    JTT for protein). Single `{prefix}_msa.fasta` either way. Every
-    rep gets a deterministic short id `S0001…SNNNN` for the
-    MAFFT/FastTree pipeline (long names, whitespace, and pipes break
-    many phylo tools); the final phyloXML restores each terminal
-    clade's name to `seq.id` via `Bio.Phylo`, while the intermediate
-    Newick keeps the short ids. Outputs: `{prefix}_msa.fasta`,
-    `{prefix}_tree.nwk`, `{prefix}_tree.xml`, `{prefix}_tree_id_map.tsv`.
-    Skipped with a stderr warning if `<3` reps or if MAFFT / FastTree
-    are missing or fail (mirrors `--plot` failure handling).
+    `--auto`) and an ML tree over the representatives. The tree-builder
+    is selected by `phylo.tool` (`auto` | `iqtree` | `fasttree`); `auto`
+    (the default) picks **IQ-TREE for protein alignments, FastTree for
+    nucleotide** — IQ-TREE's ModelFinder is the killer feature for
+    protein (JTT/WAG/LG/etc. can change topology), while FastTree's
+    `-nt -gtr` is well-understood and orders of magnitude faster on NT.
+    When `clustering.alphabet=protein` and every rep carries a
+    `protein_sequence`, the MSA/tree are built on the AA strings;
+    otherwise the alphabet comes from the rep `seq_type`. Every rep
+    gets a deterministic short id `S0001…SNNNN` for the MAFFT pipeline
+    (long names, whitespace, and pipes break many phylo tools); the
+    final phyloXML restores each terminal clade's name to `seq.id` via
+    `Bio.Phylo`, while the intermediate Newick keeps the short ids.
+    IQ-TREE's `--prefix` lands all its scratch files in a temp dir
+    that's wiped at end of run; only the canonical `.treefile` is
+    copied to `{prefix}_tree.nwk` and the `.iqtree` model-selection
+    report is copied to `{prefix}_iqtree_summary.txt`. IQ-TREE refuses
+    UFBoot with `<4` sequences, so the wrapper auto-drops bootstrap
+    (keeps the tree) when the MSA has 3 reps. Outputs:
+    `{prefix}_msa.fasta`, `{prefix}_tree.nwk`, `{prefix}_tree.xml`,
+    `{prefix}_tree_id_map.tsv`, and (IQ-TREE only)
+    `{prefix}_iqtree_summary.txt`. Skipped with a stderr warning if
+    `<3` reps or if any of the binaries are missing or fail (mirrors
+    `--plot` failure handling).
 
 ## Invariants worth knowing
 
@@ -268,6 +279,37 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
   check in `validate_config`. Document in `config/default_config.yaml`.
 
 ## Status
+
+`v0.6.1` adds **IQ-TREE as the protein tree-builder**. New
+`phylo.tool` knob (`auto` | `iqtree` | `fasttree`); `auto` (default)
+picks IQ-TREE for protein alignments and FastTree for nucleotide.
+IQ-TREE is invoked with **ModelFinder Plus** (`-m MFP`, scans
+substitution models and picks by BIC — JTT vs WAG vs LG can change
+topology on viral proteins) and **1000 ultrafast-bootstrap replicates**
+(`-B 1000`, IQ-TREE's recommended minimum for interpretable support).
+Binary auto-detected: tries `iqtree2` first, then `iqtree`; overridable
+via `phylo.iqtree.binary`. The wrapper runs IQ-TREE under a temp
+`--prefix` so its ~8 auxiliary files (`.iqtree`, `.log`, `.bionj`,
+`.mldist`, `.contree`, `.splits.nex`, `.ckp.gz`) land in scratch and
+get deleted; only the canonical `.treefile` (→ `{prefix}_tree.nwk`)
+and the human-readable `.iqtree` model-selection report (→
+`{prefix}_iqtree_summary.txt`) are kept. UFBoot refuses `<4`
+sequences, so the wrapper auto-drops bootstrap with a stderr note when
+the MSA has 3 reps (keeps the tree). `doctor` gains `iqtree2` /
+`iqtree` to the external-binaries check (WARN-only). 27 new tests
+cover IQ-TREE binary auto-detect (4: prefer iqtree2, fall back to
+iqtree, override honoured, all-missing raises), argv construction
+(model / threads / seed / UFBoot / extra_args, 3), the UFBoot
+auto-skip below 4 seqs (1), config-disable of UFBoot (1), missing
+summary path (1), subprocess failure → IQTreeError (1), missing
+treefile detection (1), MSA record counting (1); dispatcher
+auto-by-alphabet (2: iqtree-for-protein, fasttree-for-NT), explicit
+tool override (1), IQ-TREE summary appended to output list (2:
+present and absent), IQ-TREE-error → PhyloError wrapping (1); config
+validation (8: defaults, tool override accepted/rejected, ufboot
+non-negative + integer, model + binary string typing); doctor
+binary check (2: dual-name accepted, missing-is-warn). 501 offline
+tests total.
 
 `v0.6.0` switches **clustering to amino-acid sequences by default**.
 The new `clustering.alphabet` knob (`protein` default, `nucleotide`,

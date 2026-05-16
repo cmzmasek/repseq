@@ -37,6 +37,7 @@ from Bio import Phylo
 
 from ..models import Sequence, SequenceType
 from .fasttree import FastTreeError, run_fasttree
+from .iqtree import IQTreeError, run_iqtree
 from .mafft import MafftError, run_mafft
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,26 @@ class PhyloError(RuntimeError):
 
 
 _SHORT_ID_FMT = "S{:04d}"
+
+
+def _pick_tree_tool(cfg: Optional[dict[str, Any]], is_protein: bool) -> str:
+    """Choose ``"iqtree"`` or ``"fasttree"`` for this run.
+
+    ``phylo.tool`` is the override (`auto` | `iqtree` | `fasttree`); the
+    `auto` default delegates to alphabet — IQ-TREE for protein,
+    FastTree for nucleotide. The alphabet check matches the rest of the
+    pipeline: protein alignments benefit from IQ-TREE's ModelFinder
+    (JTT vs WAG vs LG can change topology), while FastTree's `-nt -gtr`
+    is well-understood and orders of magnitude faster on NT.
+    """
+    if cfg is None:
+        return "iqtree" if is_protein else "fasttree"
+    tool = (cfg.get("phylo", {}) or {}).get("tool", "auto")
+    if tool == "iqtree":
+        return "iqtree"
+    if tool == "fasttree":
+        return "fasttree"
+    return "iqtree" if is_protein else "fasttree"
 
 
 def _use_protein_sequence(reps: list[Sequence], cfg: Optional[dict[str, Any]]) -> bool:
@@ -158,6 +179,7 @@ def run_phylogeny(
 
     use_protein = _use_protein_sequence(representatives, cfg)
     is_protein = use_protein or _is_protein(representatives)
+    tree_tool = _pick_tree_tool(cfg, is_protein)
     id_map = _build_id_map(representatives)
 
     input_fasta = out_dir / f"{prefix}_phylo_input.fasta"
@@ -165,6 +187,7 @@ def run_phylogeny(
     newick_path = out_dir / f"{prefix}_tree.nwk"
     phyloxml_path = out_dir / f"{prefix}_tree.xml"
     id_map_path = out_dir / f"{prefix}_tree_id_map.tsv"
+    iqtree_summary_path = out_dir / f"{prefix}_iqtree_summary.txt"
 
     _write_short_id_fasta(representatives, id_map, input_fasta, use_protein=use_protein)
     _write_id_map(id_map, id_map_path)
@@ -174,10 +197,23 @@ def run_phylogeny(
     except MafftError as exc:
         raise PhyloError(str(exc)) from exc
 
-    try:
-        run_fasttree(msa_fasta, newick_path, cfg, is_protein=is_protein)
-    except FastTreeError as exc:
-        raise PhyloError(str(exc)) from exc
+    written_extras: list[Path] = []
+    if tree_tool == "iqtree":
+        try:
+            run_iqtree(
+                msa_fasta, newick_path, cfg,
+                is_protein=is_protein,
+                summary_path=iqtree_summary_path,
+            )
+        except IQTreeError as exc:
+            raise PhyloError(str(exc)) from exc
+        if iqtree_summary_path.exists():
+            written_extras.append(iqtree_summary_path)
+    else:
+        try:
+            run_fasttree(msa_fasta, newick_path, cfg, is_protein=is_protein)
+        except FastTreeError as exc:
+            raise PhyloError(str(exc)) from exc
 
     try:
         _newick_to_phyloxml(newick_path, phyloxml_path, id_map)
@@ -190,4 +226,4 @@ def run_phylogeny(
     except OSError:
         pass
 
-    return [msa_fasta, newick_path, phyloxml_path, id_map_path]
+    return [msa_fasta, newick_path, phyloxml_path, id_map_path] + written_extras

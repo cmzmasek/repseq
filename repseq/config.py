@@ -115,6 +115,14 @@ DEFAULTS: dict[str, Any] = {
         # Optional MSA + phylogeny step. Triggered with --phylo on any
         # mode subcommand; skipped automatically if fewer than 3
         # representatives survive selection.
+        #
+        # Tree-builder selection:
+        #   "auto"     — IQ-TREE for protein alignments, FastTree for
+        #                nucleotide. Default; matches what each tool is
+        #                best at.
+        #   "iqtree"   — always IQ-TREE (slower; ModelFinder + UFBoot)
+        #   "fasttree" — always FastTree (faster; approximate-ML)
+        "tool": "auto",
         "mafft": {
             # Raw mafft flags appended to "mafft --auto --thread N <input>".
             # Examples: ["--maxiterate", "1000"] for L-INS-i; or
@@ -125,6 +133,20 @@ DEFAULTS: dict[str, Any] = {
             # Raw FastTree flags appended to its argv. The protein /
             # nucleotide model is picked automatically from the rep
             # alphabet (default JTT for protein, -nt -gtr for nucleotide).
+            "extra_args": [],
+        },
+        "iqtree": {
+            # Binary auto-detected: tries iqtree2 first, then iqtree.
+            # Set to a name or absolute path to pin a specific build.
+            "binary": None,
+            # Substitution model. "MFP" runs ModelFinder Plus (recommended
+            # for protein — JTT/WAG/LG/etc. tested by BIC). Pin a model
+            # like "LG+G4" or "JTT+G4" for a faster fixed-model pass.
+            "model": "MFP",
+            # Ultrafast bootstrap replicates. 0 disables bootstrap (faster).
+            # IQ-TREE recommends >= 1000 when reporting branch support.
+            "ultrafast_bootstrap": 1000,
+            # Raw flags appended verbatim, e.g. ["-alrt", "1000"] for SH-aLRT.
             "extra_args": [],
         },
     },
@@ -463,11 +485,31 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
 
     # Phylo
     phylo_cfg = cfg.get("phylo", {}) or {}
-    for tool in ("mafft", "fasttree"):
-        tool_cfg = phylo_cfg.get(tool, {}) or {}
+    tool = phylo_cfg.get("tool", "auto")
+    if tool not in ("auto", "iqtree", "fasttree"):
+        errors.append(
+            f"phylo.tool '{tool}' is not supported "
+            f"(use 'auto', 'iqtree', or 'fasttree')"
+        )
+    for tool_name in ("mafft", "fasttree", "iqtree"):
+        tool_cfg = phylo_cfg.get(tool_name, {}) or {}
         extra = tool_cfg.get("extra_args", [])
         if not isinstance(extra, list) or not all(isinstance(x, str) for x in extra):
-            errors.append(f"phylo.{tool}.extra_args must be a list of strings")
+            errors.append(f"phylo.{tool_name}.extra_args must be a list of strings")
+
+    iq_cfg = phylo_cfg.get("iqtree", {}) or {}
+    if "model" in iq_cfg and not isinstance(iq_cfg["model"], str):
+        errors.append("phylo.iqtree.model must be a string (e.g. 'MFP', 'LG+G4')")
+    if "binary" in iq_cfg and iq_cfg["binary"] is not None and not isinstance(
+        iq_cfg["binary"], str
+    ):
+        errors.append("phylo.iqtree.binary must be a string or null")
+    ufb = iq_cfg.get("ultrafast_bootstrap", 0)
+    if not isinstance(ufb, int) or isinstance(ufb, bool) or ufb < 0:
+        errors.append(
+            "phylo.iqtree.ultrafast_bootstrap must be a non-negative integer "
+            "(0 disables; IQ-TREE recommends >= 1000 for interpretable support)"
+        )
 
     # Representative priority
     priority = cfg.get("representative", {}).get("priority", [])

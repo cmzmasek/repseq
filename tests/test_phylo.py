@@ -145,11 +145,14 @@ def test_run_phylogeny_happy_path_writes_all_outputs(tmp_path):
         _seq("gamma", "MKLPQEFIY"),
     ]
     short_ids = ["S0001", "S0002", "S0003"]
+    # Pin FastTree so the test stays alphabet-agnostic; the IQ-TREE
+    # dispatch path has its own dedicated test.
+    cfg = {"phylo": {"tool": "fasttree"}}
 
     with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft_writes_alignment), \
          patch("repseq.phylo.pipeline.run_fasttree",
                side_effect=_stub_fasttree_writes_newick(short_ids)):
-        files = run_phylogeny(reps, {}, tmp_path, "test")
+        files = run_phylogeny(reps, cfg, tmp_path, "test")
 
     names = [f.name for f in files]
     assert names == [
@@ -184,6 +187,7 @@ def test_run_phylogeny_picks_nucleotide_model_for_nt_reps(tmp_path):
         # Write a valid 3-leaf tree so the orchestrator can proceed.
         output_newick.write_text("(S0001:0.1,(S0002:0.1,S0003:0.1):0.1);\n")
 
+    # auto picks FastTree for NT input, so no need to pin the tool.
     with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft_writes_alignment), \
          patch("repseq.phylo.pipeline.run_fasttree", side_effect=_fasttree):
         run_phylogeny(reps, {}, tmp_path, "test")
@@ -217,7 +221,13 @@ def test_run_phylogeny_uses_protein_sequence_when_alphabet_protein(tmp_path):
 
     with patch("repseq.phylo.pipeline.run_mafft", side_effect=_mafft), \
          patch("repseq.phylo.pipeline.run_fasttree", side_effect=_fasttree):
-        run_phylogeny(reps, {"clustering": {"alphabet": "protein"}}, tmp_path, "test")
+        # Pin FastTree to keep the assertions on this code path; the
+        # IQ-TREE-on-protein dispatch is covered separately.
+        run_phylogeny(
+            reps,
+            {"clustering": {"alphabet": "protein"}, "phylo": {"tool": "fasttree"}},
+            tmp_path, "test",
+        )
 
     assert seen_is_protein == [True]
     # MSA input must come from protein_sequence, not seq.sequence (the NT one).
@@ -245,6 +255,139 @@ def test_run_phylogeny_wraps_fasttree_error_as_phyloerror(tmp_path):
     with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft_writes_alignment), \
          patch("repseq.phylo.pipeline.run_fasttree", side_effect=_boom):
         with pytest.raises(PhyloError, match="FastTree exit 137"):
+            run_phylogeny(reps, {"phylo": {"tool": "fasttree"}}, tmp_path, "test")
+
+
+# ---------------------------------------------------------------------------
+# IQ-TREE dispatch and run
+# ---------------------------------------------------------------------------
+
+def _stub_iqtree_writes_newick(short_ids: list[str], summary_text: str = ""):
+    """Stub for run_iqtree: mirrors the FastTree stub but also writes a
+    minimal summary file when summary_path is provided."""
+
+    def _run(msa_fasta, output_newick, cfg, is_protein, summary_path=None):
+        body = short_ids[0]
+        for sid in short_ids[1:]:
+            body = f"({body}:0.1,{sid}:0.1)"
+        output_newick.parent.mkdir(parents=True, exist_ok=True)
+        output_newick.write_text(body + ";\n")
+        if summary_path is not None and summary_text:
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            summary_path.write_text(summary_text)
+
+    return _run
+
+
+def test_run_phylogeny_picks_iqtree_for_protein_by_default(tmp_path):
+    """`phylo.tool=auto` (the default) picks IQ-TREE for protein reps."""
+    reps = [_seq(f"p{i}", "MK") for i in range(3)]
+    short_ids = ["S0001", "S0002", "S0003"]
+    called: list[str] = []
+
+    def _iqtree(msa_fasta, output_newick, cfg, is_protein, summary_path=None):
+        called.append("iqtree")
+        _stub_iqtree_writes_newick(short_ids)(
+            msa_fasta, output_newick, cfg, is_protein, summary_path=summary_path,
+        )
+
+    def _fasttree(*a, **kw):
+        called.append("fasttree")
+
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft_writes_alignment), \
+         patch("repseq.phylo.pipeline.run_iqtree", side_effect=_iqtree), \
+         patch("repseq.phylo.pipeline.run_fasttree", side_effect=_fasttree):
+        run_phylogeny(reps, {}, tmp_path, "test")
+
+    assert called == ["iqtree"]
+
+
+def test_run_phylogeny_picks_fasttree_for_nucleotide_by_default(tmp_path):
+    """`phylo.tool=auto` picks FastTree for nucleotide reps."""
+    reps = [
+        _seq(f"n{i}", "ACGTACGT", seq_type=SequenceType.NUCLEOTIDE) for i in range(3)
+    ]
+    short_ids = ["S0001", "S0002", "S0003"]
+    called: list[str] = []
+
+    def _iqtree(*a, **kw):
+        called.append("iqtree")
+
+    def _fasttree(msa_fasta, output_newick, cfg, is_protein):
+        called.append("fasttree")
+        _stub_fasttree_writes_newick(short_ids)(msa_fasta, output_newick, cfg, is_protein)
+
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft_writes_alignment), \
+         patch("repseq.phylo.pipeline.run_iqtree", side_effect=_iqtree), \
+         patch("repseq.phylo.pipeline.run_fasttree", side_effect=_fasttree):
+        run_phylogeny(reps, {}, tmp_path, "test")
+
+    assert called == ["fasttree"]
+
+
+def test_run_phylogeny_iqtree_summary_file_appended_to_output_list(tmp_path):
+    reps = [_seq(f"p{i}", "MK") for i in range(3)]
+    short_ids = ["S0001", "S0002", "S0003"]
+
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft_writes_alignment), \
+         patch(
+             "repseq.phylo.pipeline.run_iqtree",
+             side_effect=_stub_iqtree_writes_newick(short_ids, "BIC model: LG+G4\n"),
+         ):
+        files = run_phylogeny(reps, {}, tmp_path, "test")
+
+    names = [f.name for f in files]
+    assert "test_iqtree_summary.txt" in names
+    assert (tmp_path / "test_iqtree_summary.txt").read_text() == "BIC model: LG+G4\n"
+
+
+def test_run_phylogeny_iqtree_no_summary_means_no_extra_file(tmp_path):
+    """The `.iqtree` summary is optional — if the wrapper didn't write one,
+    the output list does not include the path."""
+    reps = [_seq(f"p{i}", "MK") for i in range(3)]
+    short_ids = ["S0001", "S0002", "S0003"]
+
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft_writes_alignment), \
+         patch(
+             "repseq.phylo.pipeline.run_iqtree",
+             side_effect=_stub_iqtree_writes_newick(short_ids),  # no summary text
+         ):
+        files = run_phylogeny(reps, {}, tmp_path, "test")
+
+    assert all(f.name != "test_iqtree_summary.txt" for f in files)
+
+
+def test_run_phylogeny_explicit_tool_iqtree_overrides_alphabet(tmp_path):
+    """`phylo.tool=iqtree` picks IQ-TREE even for nucleotide reps."""
+    reps = [
+        _seq(f"n{i}", "ACGTACGT", seq_type=SequenceType.NUCLEOTIDE) for i in range(3)
+    ]
+    short_ids = ["S0001", "S0002", "S0003"]
+    called: list[str] = []
+
+    def _iqtree(msa_fasta, output_newick, cfg, is_protein, summary_path=None):
+        called.append("iqtree")
+        _stub_iqtree_writes_newick(short_ids)(
+            msa_fasta, output_newick, cfg, is_protein, summary_path=summary_path,
+        )
+
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft_writes_alignment), \
+         patch("repseq.phylo.pipeline.run_iqtree", side_effect=_iqtree):
+        run_phylogeny(reps, {"phylo": {"tool": "iqtree"}}, tmp_path, "test")
+
+    assert called == ["iqtree"]
+
+
+def test_run_phylogeny_wraps_iqtree_error_as_phyloerror(tmp_path):
+    from repseq.phylo.iqtree import IQTreeError
+    reps = [_seq(f"p{i}", "MK") for i in range(3)]
+
+    def _boom(msa_fasta, output_newick, cfg, is_protein, summary_path=None):
+        raise IQTreeError("IQ-TREE segfaulted")
+
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft_writes_alignment), \
+         patch("repseq.phylo.pipeline.run_iqtree", side_effect=_boom):
+        with pytest.raises(PhyloError, match="IQ-TREE segfaulted"):
             run_phylogeny(reps, {}, tmp_path, "test")
 
 
