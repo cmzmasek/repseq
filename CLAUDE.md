@@ -12,6 +12,76 @@ every implementation detail, since most of the code was written by Claude.
 
 Entry point: `repseq` (defined in `repseq/cli.py`).
 
+## Purpose & scope (designer's mental model)
+
+The points below are the load-bearing scope statement from the project
+designer. Treat them as durable requirements: when changes would conflict
+with one of them, raise it explicitly rather than silently breaking
+intent.
+
+1. **Audience: bench scientists, not developers.** End users are
+   inexperienced in computer science, math, and statistics. Ease of use is
+   paramount: `--help` screens, README/CLAUDE.md-level documentation, log
+   messages during long-running steps (so the user knows the pipeline is
+   alive), and **clear, actionable error messages** (plain English, named
+   next step — never a raw stack trace) are first-class deliverables, not
+   polish.
+
+2. **Main outputs.** Every run is expected to produce, where applicable:
+   - **2A — Representative genome nucleotide sequences (FASTA):** the
+     selected representatives as NT sequences. For segmented viruses,
+     emit *both* the per-segment files and the per-isolate concatenated
+     file.
+   - **2B — Proteins of the representatives (FASTA):** the amino-acid
+     translations of every CDS of every representative.
+   - **2C — Detailed TSV** that ties AA sequences to NT sequences: one
+     row per protein, with isolate, segment, accession, length, and full
+     taxonomy / metadata columns (see `{prefix}_isolate_proteins.tsv`).
+   - **2D — Clustering summary files:** per-group cluster counts and
+     thresholds (`{prefix}_group_counts.tsv`), plus the textual run
+     report.
+   - **2E — Phylogenetic tree of the representatives (phyloXML), with
+     MSA kept:** built from the same concatenated protein sequences used
+     for clustering when `alphabet=protein`, otherwise from genome /
+     clustered segment NT sequences. The MSA must be retained alongside
+     the tree.
+   - **2F — Per-protein phylogenetic trees (phyloXML), with MSAs kept**
+     — *not implemented yet.* One tree per protein found across the
+     clustered representatives. The designer will request this in a
+     future session.
+   - **2G — Graphical clustering visualisation (UMAP scatter):**
+     implemented under `[viz]` extras but currently struggles with
+     `umap-learn` / `matplotlib` dependency installation; treat
+     dependency robustness as an open issue.
+
+3. **Clustering alphabet is selectable.** Clustering may operate on
+   either nucleotide sequences (concatenated for segmented viruses) or
+   amino-acid sequences (concatenated for segmented viruses) — see
+   `clustering.alphabet` and the v0.6.0 status block.
+
+4. **Segmented viruses are first-class.** The pipeline must process
+   them seamlessly: completeness filtering, per-segment metadata,
+   concatenation, and per-segment output are core behaviour, not
+   add-ons.
+
+5. **Phylogenetic inference stack:** MAFFT (MSA), **Trimal (not
+   implemented yet — alignment trimming will be added)**, IQ-TREE
+   (protein default), FastTree (NT default / fallback). Trimal would
+   sit between MAFFT and the tree-builder.
+
+6. **Robustness and caching are core.** All external lookups go through
+   the SQLite-backed taxonomy cache; optional steps (cd-hit, `--phylo`,
+   `--plot`) fail soft with a clear stderr message rather than aborting
+   the run; `repseq doctor` exists so a bench scientist can self-diagnose
+   install state.
+
+7. **Database fetches drive metadata enrichment.** The pipeline reaches
+   out to NCBI Entrez and UniProt to obtain taxonomy, isolate ID,
+   strain, segment, host, collection date, and country — see the
+   `taxonomy/` and segmented-metadata code paths. Network usage is
+   batched, cached, and rate-limited; `--no-resolve` exists for fully
+   offline runs.
+
 ## Top-level layout
 
 ```
@@ -146,11 +216,31 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
     otherwise the alphabet comes from the rep `seq_type`. Every rep
     gets a deterministic short id `S0001…SNNNN` for the MAFFT pipeline
     (long names, whitespace, and pipes break many phylo tools); the
-    final phyloXML restores each terminal clade's name to `seq.id` via
-    `Bio.Phylo`, while the intermediate Newick keeps the short ids.
-    IQ-TREE's `--prefix` lands all its scratch files in a temp dir
-    that's wiped at end of run; only the canonical `.treefile` is
-    copied to `{prefix}_tree.nwk` and the `.iqtree` model-selection
+    intermediate Newick keeps the short ids. The orchestrator then
+    **roots** the tree (`repseq/phylo/rooting.py`: taxonomy-guided →
+    MAD → midpoint chain by default; pinnable via `phylo.rooting.method`)
+    and labels every internal node with the LCA of its terminals
+    (`repseq/phylo/lca.py`: ≥50% lineage coverage gate, `min_rank=genus`
+    leaf-vote filter, `keep_deepest_labels` cleanup so each
+    monophyletic group's label lands on the crown,
+    `suppress_same_species_pairs` to avoid duplicating species names on
+    a 2-leaf internal). The final phyloXML is emitted by
+    `repseq/phylo/phyloxml_writer.py` — every leaf gets a formatted
+    `<name>` (driven by `phylo.labeling.format` or `segmented_format`),
+    a `<taxonomy>` block with NCBI taxon id, a `<sequence>` block with
+    the GenBank accession + title, and repseq-namespaced `<property>`
+    elements for host, collection_date, country, strain, isolate_id,
+    year, species, genus, subfamily, and family (empty values omitted);
+    every annotated internal clade gets a `<name>` and a `<taxonomy>`
+    with `<scientific_name>` + `<rank>` (validated against PhyloXML's
+    enum, falling back to `"other"`). The `<phylogeny>` element carries
+    a `<name>` and a `<description>` recording MAFFT/IQ-TREE/FastTree
+    versions, the selected model, bootstrap settings, and which rooting
+    method actually fired. The tree is ladderized (`reverse=True`) and
+    confidence values are normalised to 0-100 integers
+    (`type="sh_like"` for FastTree, `"ufboot"` for IQ-TREE). IQ-TREE's `--prefix` lands all its scratch files in a
+    temp dir that's wiped at end of run; only the canonical `.treefile`
+    is copied to `{prefix}_tree.nwk` and the `.iqtree` model-selection
     report is copied to `{prefix}_iqtree_summary.txt`. IQ-TREE refuses
     UFBoot with `<4` sequences, so the wrapper auto-drops bootstrap
     (keeps the tree) when the MSA has 3 reps. Outputs:
@@ -279,6 +369,154 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
   check in `validate_config`. Document in `config/default_config.yaml`.
 
 ## Status
+
+`v0.7.0` overhauls phylogenetic-tree annotation in two passes, both
+released together.
+
+**Pass B — rooting + internal-node LCA annotation** —
+builds on Pass A's rich phyloXML by post-processing the tree before
+serialisation. Two new modules:
+
+* `repseq/phylo/rooting.py` — picks a root via the chain
+  **taxonomy-guided → MAD → midpoint** (first success wins), or by
+  user-pinned method (`phylo.rooting.method`: `auto` default,
+  `taxonomy`, `mad`, `midpoint`, or `none`). Taxonomy-guided scoring
+  is mean LCA specificity across internal clades, weighted by clade
+  size, gated by ≥50% lineage coverage. MAD is a pure-Python port
+  (no external dep) that minimises Σρ² across all leaf pairs over
+  per-branch split points; analytical solution per branch.
+* `repseq/phylo/lca.py` — labels every internal clade with the
+  lowest common ancestor of its terminals (read from
+  `TaxonomyInfo.lineage`). Coverage gate `phylo.lca.coverage_threshold`
+  (default 0.5) skips bare clades; `phylo.lca.min_rank` (default
+  `"genus"` — viral data rarely reaches species universally)
+  excludes thinly-annotated leaves from the LCA vote without
+  removing them from the tree. `keep_deepest_labels` walks
+  largest-first and clears every nested duplicate so each
+  monophyletic group's label lands on the crown, not the
+  intermediate internals. `suppress_same_species_pairs` clears the
+  LCA name from any internal whose only children are two leaves of
+  the same species (the species name is already on the leaves).
+
+ICTV rank inference (`_infer_rank_from_name`) handles the common
+suffix → rank mapping (`-viridae` → family, `-virales` → order,
+`-viricetes` → class, single-word `…virus` → genus, etc.) for when
+the lineage map doesn't carry an explicit rank. PhyloXML's `<rank>`
+enum is validated via `phyloxml_rank` — unknown ranks (`"no rank"`,
+`"clade"`, NCBI's odd custom ranks) fall back to `"other"` so the
+file always validates.
+
+Writer (`phyloxml_writer.py`) now accepts a pre-parsed `tree=` (so
+the pipeline can root + LCA-annotate before serialisation). Internal
+clades emit `<name>` and `<taxonomy>` (`<scientific_name>` + `<rank>`)
+when `_lca_name` is set; otherwise stay bare. The
+`<phylogeny><description>` records which rooting method actually
+fired (`rooting=taxonomy` / `mad` / `midpoint`), so an `auto`-chain
+result is auditable from the file alone.
+
+New tests:
+- `tests/test_rooting.py` (10): LCA-prefix correctness, method=none
+  passthrough, midpoint fallback when no lineage, taxonomy method
+  fall-through when nothing to root by, taxonomy success on a tree
+  with clean family groups, MAD success, invalid method falls back to
+  auto, mean-LCA-specificity rewards consistent grouping, zero-score
+  with no lineage data.
+- `tests/test_lca.py` (15): ICTV-suffix inference (4: family, order,
+  phylum, class, subfamily — and the multi-word "X virus" → no rank
+  case), min_rank gate (species, too-coarse, "none" disables),
+  LCA-prefix on (rank, name) tuples; annotate_internal_nodes
+  family-rollup, coverage-gate skip, min_rank-filter excludes-but-keeps
+  leaves; keep_deepest clears nested duplicates and preserves
+  distinct labels; same-species pair suppression on 2-leaf internal,
+  no-op when species differ, no-op when >2 children; phyloxml_rank
+  accepts standard ranks and falls back to "other" for unknown.
+- `tests/test_phyloxml_writer.py` (+4): internal `<name>` +
+  `<taxonomy>(<scientific_name>,<rank>)` when LCA set; rank fallback
+  to "other"; no `<name>`/`<taxonomy>` on bare internals; rooting
+  method recorded in description.
+- `tests/test_config.py` (+9): rooting defaults, all-five-methods
+  accepted, unknown rejected, LCA defaults, enabled bool check,
+  min_rank accept-list, unknown min_rank rejected,
+  coverage_threshold range check.
+
+596 offline tests total (Pass A + Pass B combined).
+
+**Pass A — phyloXML annotation overhaul** — replaces the
+one-line `Bio.Phylo.write(...)` phyloXML emission with a hand-rolled
+writer (`repseq/phylo/phyloxml_writer.py`) that produces a
+**richly-annotated** tree. Each leaf now carries:
+
+* A formatted `<name>` driven by `phylo.labeling.format` (defaults
+  `"{species}|{id}|{host}"`) or `phylo.labeling.segmented_format`
+  (defaults `"{species}|{strain}|{host}"`) when segmented mode is on.
+  Empty placeholders drop the preceding separator so labels never
+  read `||` or end with `|`; `{strain}` falls back to `{isolate_id}`
+  when the GenBank `/strain` qualifier is missing — one template
+  works for both segmented and non-segmented runs.
+* A `<taxonomy>` block with `<id provider="ncbi">` (from
+  `TaxonomyInfo.taxid`) and `<scientific_name>` (species).
+* A `<sequence type="dna|protein">` block with
+  `<accession source="ncbi">` and `<name>` = original GenBank
+  header / description.
+* Repseq-namespaced `<property>` elements (under `xmlns:repseq=
+  https://github.com/cmzmasek/repseq`) for `host`, `collection_date`,
+  `country`, `strain`, `isolate_id`, `year` (parsed from
+  `collection_date`), `species`, `genus`, `subfamily`, `family`.
+  Empty values are **omitted**, not emitted as empty stubs.
+
+Tree-level: `<phylogeny>` gains `<name>` (e.g.
+`peribunyaviridae_genus5 [protein|MAFFT|IQ-TREE LG+G4]`) and
+`<description>` (run timestamp + MAFFT/IQ-TREE/FastTree versions
+captured via new `tool_version()` helpers + selected model + bootstrap
+count + extra args). Tree is **ladderized** (`reverse=True`, larger
+clades top) before write. Confidence values are normalised to **0-100
+integers**: FastTree's SH-like `[0,1]` is rescaled, IQ-TREE's UFBoot
+`[0,100]` passes through; the `<confidence type="...">` attribute
+records the metric (`sh_like` / `ufboot` / `sh_alrt` / `bootstrap`),
+overridable via `phylo.phyloxml.confidence_type`. Optional
+`phylo.phyloxml.embed_alignment: true` inlines the per-leaf aligned
+residues as `<mol_seq is_aligned="true">` (off by default —
+`{prefix}_msa.fasta` is always written separately).
+
+Per-isolate metadata inheritance in `concatenate_isolate` now uses
+**first non-empty** across segments instead of always segment 0, so a
+single blank field on the first segment no longer wipes the value
+from the concat record (e.g. host present on segment M but blank on
+segment L).
+
+New files: `repseq/phylo/labels.py` (placeholder substitution +
+separator-drop), `repseq/phylo/phyloxml_writer.py` (stdlib
+`xml.etree.ElementTree`, namespace-aware, schema-ordered children).
+The orchestrator (`repseq/phylo/pipeline.py`) now collects MAFFT /
+tree-tool versions and the resolved model + bootstrap count and
+passes them to the writer.
+
+New tests:
+- `tests/test_labels.py` (21): placeholder substitution, taxonomy
+  rank resolution, year parsing, empty-token handling, separator-drop
+  on empty, strain→isolate_id fallback, literal-text preservation,
+  config helpers (`pick_format_string` segmented/non-segmented,
+  `labeling_options` defaults + overrides).
+- `tests/test_phyloxml_writer.py` (20): confidence normalisation
+  (SH-like rescale, UFBoot passthrough, clamp, None → skip),
+  confidence-type mapping (defaults, override, auto, unknown-tool),
+  end-to-end write (XML well-formed, taxonomy block, sequence block,
+  property namespace + datatype + applies_to, omitted-empty
+  properties, year-from-date, phylogeny name + description, internal
+  confidence rescale, type attribute per tool, schema element order,
+  embed_alignment on/off, configured label format, segmented label
+  uses strain, ladderize).
+- `tests/test_segmented.py` (+2): first-non-empty inheritance picks
+  up later-segment metadata; segment-0-wins when all set.
+- `tests/test_config.py` (+8): labeling defaults, format type,
+  null-segmented-format accepted, replace_whitespace bool check;
+  phyloxml defaults, embed_alignment bool, all confidence_type
+  values accepted, unknown confidence_type rejected.
+
+Removed tests: two `_newick_to_phyloxml` direct tests in
+`tests/test_phylo.py` — the helper is gone (the orchestrator now
+calls `write_phyloxml` directly), and the dedicated writer test file
+covers the same ground in more detail.
 
 `v0.6.1` adds **IQ-TREE as the protein tree-builder**. New
 `phylo.tool` knob (`auto` | `iqtree` | `fasttree`); `auto` (default)

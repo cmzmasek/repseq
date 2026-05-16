@@ -30,6 +30,34 @@ def _check_fasttree() -> str:
     )
 
 
+def tool_version() -> str:
+    """Return FastTree's version string, or ``"unknown"`` on any failure.
+
+    FastTree prints a banner including the version when invoked with no
+    input (the first line looks like
+    ``FastTree Version 2.1.11 Double precision (No SSE3)``); it then
+    exits non-zero waiting for stdin. We capture stderr and ignore the
+    exit code.
+    """
+    try:
+        path = _check_fasttree()
+    except FastTreeError:
+        return "unknown"
+    try:
+        result = subprocess.run(
+            [path], input="", capture_output=True, text=True, timeout=5,
+        )
+        out = (result.stderr or result.stdout or "").strip()
+        if not out:
+            return "unknown"
+        for line in out.splitlines():
+            if "version" in line.lower():
+                return line.strip()
+        return out.splitlines()[0].strip()
+    except (subprocess.TimeoutExpired, OSError):
+        return "unknown"
+
+
 def run_fasttree(
     msa_fasta: Path,
     output_newick: Path,

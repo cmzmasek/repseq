@@ -253,6 +253,32 @@ def test_concatenate_isolate_has_no_single_accession(make_seq):
     assert "acc1" in out.header and "acc2" in out.header
 
 
+def test_concatenate_isolate_inherits_first_non_empty_metadata(make_seq):
+    """When per-isolate metadata is blank on segment 0 but present on a
+    later segment, the concat should pick up the later value rather than
+    leave the field blank. The typical case is a single submission where
+    all segments share metadata; this guards the long tail where only
+    one segment was annotated."""
+    a = make_seq("acc1", "AAA", accession="acc1",
+                 host=None, country=None, organism=None)
+    b = make_seq("acc2", "CCC", accession="acc2",
+                 host="Apodemus agrarius", country="South Korea",
+                 organism="Hantaan virus")
+    out = concatenate_isolate([a, b], "ISO1")
+    assert out.host == "Apodemus agrarius"
+    assert out.country == "South Korea"
+    assert out.organism == "Hantaan virus"
+
+
+def test_concatenate_isolate_prefers_segment_0_when_all_set(make_seq):
+    """When every segment has metadata, segment 0 still wins — first
+    non-empty preserves the historical 'take the first segment' default."""
+    a = make_seq("acc1", "AAA", accession="acc1", host="rodent A")
+    b = make_seq("acc2", "CCC", accession="acc2", host="rodent B")
+    out = concatenate_isolate([a, b], "ISO1")
+    assert out.host == "rodent A"
+
+
 # ---------------------------------------------------------------------------
 # segment_length_filter
 # ---------------------------------------------------------------------------

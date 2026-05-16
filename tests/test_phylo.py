@@ -19,7 +19,6 @@ from repseq.phylo.mafft import MafftError
 from repseq.phylo.pipeline import (
     PhyloError,
     _build_id_map,
-    _newick_to_phyloxml,
     _write_id_map,
     _write_short_id_fasta,
     run_phylogeny,
@@ -67,42 +66,6 @@ def test_write_id_map_writes_round_trip_tsv(tmp_path):
     rows = out.read_text().splitlines()
     assert rows[0] == "short_id\toriginal_id"
     assert set(rows[1:]) == {"S0001\talpha", "S0002\tCONCAT|iso-1"}
-
-
-# ---------------------------------------------------------------------------
-# Newick → phyloXML conversion
-# ---------------------------------------------------------------------------
-
-def test_newick_to_phyloxml_restores_terminal_names(tmp_path):
-    # Three-leaf rooted tree with FastTree-style support on internal nodes.
-    newick = tmp_path / "tree.nwk"
-    newick.write_text("(S0001:0.1,(S0002:0.2,S0003:0.3)0.97:0.05);\n")
-    id_map = {"S0001": "alpha", "S0002": "CONCAT|iso-1", "S0003": "β-name"}
-    xml_path = tmp_path / "tree.xml"
-
-    _newick_to_phyloxml(newick, xml_path, id_map)
-
-    # phyloXML names should be the originals, not the short ids.
-    text = xml_path.read_text()
-    assert "S0001" not in text
-    assert "alpha" in text
-    assert "CONCAT|iso-1" in text  # phyloXML XML-encoding is fine for | and -
-    assert "β-name" in text
-
-
-def test_newick_to_phyloxml_leaves_internal_support_intact(tmp_path):
-    newick = tmp_path / "tree.nwk"
-    newick.write_text("(S0001:0.1,(S0002:0.2,S0003:0.3)0.97:0.05);\n")
-    id_map = {"S0001": "a", "S0002": "b", "S0003": "c"}
-    xml_path = tmp_path / "tree.xml"
-
-    _newick_to_phyloxml(newick, xml_path, id_map)
-
-    # phyloXML stores support as <confidence> on the internal clade. The
-    # rename loop only touches terminals, so the internal-node confidence
-    # value 0.97 must still appear.
-    text = xml_path.read_text()
-    assert "0.97" in text
 
 
 # ---------------------------------------------------------------------------

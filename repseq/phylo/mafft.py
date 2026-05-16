@@ -27,6 +27,30 @@ def _check_mafft() -> str:
     return path
 
 
+def tool_version() -> str:
+    """Return MAFFT's version string, or ``"unknown"`` if it cannot be
+    determined.
+
+    Used by the phyloXML writer to annotate the tree's
+    ``<phylogeny><description>`` with the alignment-tool provenance.
+    MAFFT prints its version to stderr (e.g. ``v7.520 (2023/Mar/16)``)
+    and exits non-zero on ``--version``, so we capture stderr and
+    ignore the exit code.
+    """
+    try:
+        path = _check_mafft()
+    except MafftError:
+        return "unknown"
+    try:
+        result = subprocess.run(
+            [path, "--version"], capture_output=True, text=True, timeout=5,
+        )
+        out = (result.stderr or result.stdout or "").strip()
+        return out.splitlines()[0].strip() if out else "unknown"
+    except (subprocess.TimeoutExpired, OSError):
+        return "unknown"
+
+
 def run_mafft(
     input_fasta: Path,
     output_fasta: Path,

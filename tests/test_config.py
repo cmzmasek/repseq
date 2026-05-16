@@ -169,6 +169,131 @@ def test_validate_config_rejects_non_string_iqtree_binary():
     assert any("phylo.iqtree.binary" in e for e in errors)
 
 
+# ---------------------------------------------------------------------------
+# phylo.labeling and phylo.phyloxml (Pass A — rich phyloXML annotation)
+# ---------------------------------------------------------------------------
+
+def test_validate_config_default_phylo_labeling():
+    cfg = load_config(None)
+    assert cfg["phylo"]["labeling"]["format"] == "{species}|{id}|{host}"
+    assert cfg["phylo"]["labeling"]["segmented_format"] == "{species}|{strain}|{host}"
+    assert cfg["phylo"]["labeling"]["replace_whitespace"] is True
+    assert cfg["phylo"]["labeling"]["keep_separator_on_empty"] is False
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_non_string_label_format():
+    cfg = load_config(None)
+    cfg["phylo"]["labeling"]["format"] = 42
+    errors = validate_config(cfg)
+    assert any("phylo.labeling.format" in e for e in errors)
+
+
+def test_validate_config_accepts_null_segmented_format():
+    """Null segmented_format means: fall back to the regular format."""
+    cfg = load_config(None)
+    cfg["phylo"]["labeling"]["segmented_format"] = None
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_non_bool_replace_whitespace():
+    cfg = load_config(None)
+    cfg["phylo"]["labeling"]["replace_whitespace"] = "yes"
+    errors = validate_config(cfg)
+    assert any("phylo.labeling.replace_whitespace" in e for e in errors)
+
+
+def test_validate_config_default_phyloxml():
+    cfg = load_config(None)
+    assert cfg["phylo"]["phyloxml"]["embed_alignment"] is False
+    assert cfg["phylo"]["phyloxml"]["confidence_type"] == "auto"
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_non_bool_embed_alignment():
+    cfg = load_config(None)
+    cfg["phylo"]["phyloxml"]["embed_alignment"] = "yes"
+    errors = validate_config(cfg)
+    assert any("phylo.phyloxml.embed_alignment" in e for e in errors)
+
+
+def test_validate_config_accepts_all_confidence_types():
+    cfg = load_config(None)
+    for ct in ("auto", "sh_like", "sh_alrt", "ufboot", "bootstrap"):
+        cfg["phylo"]["phyloxml"]["confidence_type"] = ct
+        assert validate_config(cfg) == [], f"rejected {ct}"
+
+
+def test_validate_config_rejects_unknown_confidence_type():
+    cfg = load_config(None)
+    cfg["phylo"]["phyloxml"]["confidence_type"] = "raxml-bootstrap"
+    errors = validate_config(cfg)
+    assert any("confidence_type" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# phylo.rooting and phylo.lca (Pass B — rooting + internal LCA)
+# ---------------------------------------------------------------------------
+
+def test_validate_config_default_rooting():
+    cfg = load_config(None)
+    assert cfg["phylo"]["rooting"]["method"] == "auto"
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_accepts_all_rooting_methods():
+    cfg = load_config(None)
+    for method in ("auto", "taxonomy", "mad", "midpoint", "none"):
+        cfg["phylo"]["rooting"]["method"] = method
+        assert validate_config(cfg) == [], f"rejected {method}"
+
+
+def test_validate_config_rejects_unknown_rooting_method():
+    cfg = load_config(None)
+    cfg["phylo"]["rooting"]["method"] = "raxml-root"
+    errors = validate_config(cfg)
+    assert any("phylo.rooting.method" in e for e in errors)
+
+
+def test_validate_config_default_lca():
+    cfg = load_config(None)
+    assert cfg["phylo"]["lca"]["enabled"] is True
+    assert cfg["phylo"]["lca"]["min_rank"] == "genus"
+    assert cfg["phylo"]["lca"]["coverage_threshold"] == 0.5
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_non_bool_lca_enabled():
+    cfg = load_config(None)
+    cfg["phylo"]["lca"]["enabled"] = "yes"
+    errors = validate_config(cfg)
+    assert any("phylo.lca.enabled" in e for e in errors)
+
+
+def test_validate_config_accepts_lca_min_rank_options():
+    cfg = load_config(None)
+    for r in ("none", "family", "genus", "species", "order"):
+        cfg["phylo"]["lca"]["min_rank"] = r
+        assert validate_config(cfg) == [], f"rejected {r}"
+
+
+def test_validate_config_rejects_unknown_min_rank():
+    cfg = load_config(None)
+    cfg["phylo"]["lca"]["min_rank"] = "isolate"
+    errors = validate_config(cfg)
+    assert any("phylo.lca.min_rank" in e for e in errors)
+
+
+def test_validate_config_rejects_out_of_range_coverage_threshold():
+    cfg = load_config(None)
+    cfg["phylo"]["lca"]["coverage_threshold"] = 1.5
+    errors = validate_config(cfg)
+    assert any("coverage_threshold" in e for e in errors)
+    cfg["phylo"]["lca"]["coverage_threshold"] = -0.1
+    errors = validate_config(cfg)
+    assert any("coverage_threshold" in e for e in errors)
+
+
 def test_validate_config_default_alphabet_is_protein():
     cfg = load_config(None)
     assert cfg["clustering"]["alphabet"] == "protein"

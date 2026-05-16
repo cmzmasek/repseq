@@ -239,6 +239,23 @@ def filter_complete_isolates(
 # Sequence concatenation
 # ---------------------------------------------------------------------------
 
+def _first_non_empty(segments: list[Sequence], attr: str) -> Optional[Any]:
+    """Return the first non-empty value of ``attr`` across ``segments``.
+
+    Segments may disagree on per-isolate metadata (host, strain, date,
+    country) when one segment was sequenced by a different submitter
+    than the others; taking the first non-empty value is the least
+    surprising default for the common case of identical metadata, and
+    avoids dropping a usable value because segment 0 happens to be
+    blank.
+    """
+    for seg in segments:
+        v = getattr(seg, attr, None)
+        if v not in (None, ""):
+            return v
+    return None
+
+
 def concatenate_isolate(
     segments: list[Sequence],
     isolate_id: str,
@@ -246,10 +263,14 @@ def concatenate_isolate(
 ) -> Sequence:
     """Concatenate segment sequences for one isolate into a single Sequence.
 
-    ``protein_sequence`` is the in-segment-order concatenation of the
-    isolate's marker proteins (see ``build_concatenated_sequences``);
-    populated when protein-alphabet clustering is active, ``None``
-    otherwise.
+    Per-isolate metadata (organism, description, strain, host,
+    collection_date, country, taxonomy) is taken as the first non-empty
+    value across segments — segment 0 is the usual source when metadata
+    is consistent, but a blank field on segment 0 falls through to the
+    next segment that has one. ``protein_sequence`` is the
+    in-segment-order concatenation of the isolate's marker proteins
+    (see ``build_concatenated_sequences``); populated when
+    protein-alphabet clustering is active, ``None`` otherwise.
     """
     combined_seq = "".join(s.sequence for s in segments)
     representative = segments[0]
@@ -259,7 +280,11 @@ def concatenate_isolate(
         + "|".join(s.accession or s.id for s in segments)
     )
 
-    from ..models import SequenceType
+    taxonomy = next(
+        (s.taxonomy for s in segments if s.taxonomy is not None),
+        None,
+    )
+
     return Sequence(
         id=f"CONCAT|{isolate_id}",
         header=concat_header,
@@ -271,16 +296,16 @@ def concatenate_isolate(
         # misleading; per-segment accessions remain in the header and in
         # the per-segment output files.
         accession=None,
-        organism=representative.organism,
-        description=representative.description,
-        strain=representative.strain,
-        host=representative.host,
-        collection_date=representative.collection_date,
-        country=representative.country,
+        organism=_first_non_empty(segments, "organism"),
+        description=_first_non_empty(segments, "description"),
+        strain=_first_non_empty(segments, "strain"),
+        host=_first_non_empty(segments, "host"),
+        collection_date=_first_non_empty(segments, "collection_date"),
+        country=_first_non_empty(segments, "country"),
         isolate_id=isolate_id,
         is_refseq=all(s.is_refseq for s in segments),
         is_reviewed=all(s.is_reviewed for s in segments),
-        taxonomy=representative.taxonomy,
+        taxonomy=taxonomy,
         protein_sequence=protein_sequence,
     )
 

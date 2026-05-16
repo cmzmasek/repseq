@@ -233,6 +233,77 @@ phylo:
     # Raw flags appended verbatim, e.g. ["-alrt", "1000"] for SH-aLRT
     # alongside UFBoot, or ["--allnni"] for thorough NNI search.
     extra_args: []
+  labeling:
+    # Per-leaf display labels on the phyloXML tree.
+    #
+    # Supported placeholders:
+    #   {species}, {genus}, {subgenus}, {subfamily}, {family},
+    #   {order}, {class}, {phylum}     — taxonomy ranks
+    #   {id}, {accession}              — sequence identifiers
+    #   {host}, {strain}, {isolate_id} — isolate metadata
+    #   {country}, {date}, {year}      — geography / time
+    #   {organism}                     — verbatim organism field
+    #
+    # Empty placeholders are dropped along with the immediately
+    # preceding separator character (so the label never contains "||"
+    # or trailing "|"). For segmented runs, if you ask for {strain}
+    # but the GenBank record has no /strain qualifier, the writer
+    # substitutes {isolate_id} — a single template works for both.
+    format: "{species}|{id}|{host}"
+    segmented_format: "{species}|{strain}|{host}"
+    # Replace whitespace inside each placeholder's value with "_" so
+    # the label survives Newick / phyloXML viewers that treat
+    # whitespace as a token boundary. Separators in the template
+    # itself are left alone.
+    replace_whitespace: true
+    # When false (default), an empty placeholder also eats the single
+    # separator character before it. Set true to keep all separators
+    # verbatim (useful for fixed-width labels in scripted post-processing).
+    keep_separator_on_empty: false
+  rooting:
+    # FastTree and IQ-TREE produce unrooted trees; this step picks a
+    # root before the phyloXML is written.
+    #
+    #   auto       — try taxonomy-guided → MAD → midpoint, first
+    #                success wins. The most-likely-correct default.
+    #   taxonomy   — root at the branch that best agrees with the
+    #                resolved NCBI taxonomy (maximises mean LCA
+    #                specificity of internal clades).
+    #   mad        — Minimal Ancestor Deviation (Tria et al. 2017),
+    #                pure-Python. Robust when taxonomy is sparse.
+    #   midpoint   — Bio.Phylo's root_at_midpoint. Last-resort
+    #                fallback; always succeeds.
+    #   none       — leave the tree as parsed (use when the input
+    #                is already rooted, e.g. by an outgroup).
+    method: auto
+  lca:
+    # Internal-node LCA labels (lowest common ancestor of each clade's
+    # terminals, read from the resolved NCBI lineage). Emitted in
+    # phyloXML as <name> + <taxonomy><rank> on every internal clade.
+    enabled: true
+    # Leaves whose lineage doesn't reach this rank are excluded from
+    # the LCA *vote* — they stay on the tree but don't pull internal
+    # labels toward an over-coarse taxon. Default "genus" suits viral
+    # data, where many leaves lack species-level classification.
+    # "none" disables the gate entirely.
+    min_rank: genus
+    # An internal node is annotated only if at least this fraction of
+    # its terminals carry usable lineage data. Guards against a
+    # handful of well-annotated leaves dictating the label of a much
+    # larger bare clade.
+    coverage_threshold: 0.5
+  phyloxml:
+    # If true, every leaf's <sequence> block includes the aligned
+    # residues inline as <mol_seq is_aligned="true">. The full MSA is
+    # always written to {prefix}_msa.fasta; keep this off unless a
+    # downstream consumer expects the alignment inline (roughly doubles
+    # the XML file size).
+    embed_alignment: false
+    # <confidence> element's type= attribute. "auto" picks "sh_like" for
+    # FastTree and "ufboot" for IQ-TREE (which matches the default tree
+    # arguments). Override only if you've changed the tree arguments —
+    # e.g. classical bootstrap → "bootstrap", IQ-TREE -alrt only → "sh_alrt".
+    confidence_type: auto
 
 output:
   dir: ./repseq_output

@@ -55,6 +55,27 @@ def _check_iqtree(override: Optional[str] = None) -> str:
     )
 
 
+def tool_version(override: Optional[str] = None) -> str:
+    """Return IQ-TREE's version string, or ``"unknown"`` on any failure.
+
+    Used by the phyloXML writer to annotate the tree's
+    ``<phylogeny><description>``. IQ-TREE's ``--version`` prints e.g.
+    ``IQ-TREE multicore version 2.2.0.3 ...`` to stdout and exits 0.
+    """
+    try:
+        path = _check_iqtree(override)
+    except IQTreeError:
+        return "unknown"
+    try:
+        result = subprocess.run(
+            [path, "--version"], capture_output=True, text=True, timeout=5,
+        )
+        out = (result.stdout or result.stderr or "").strip()
+        return out.splitlines()[0].strip() if out else "unknown"
+    except (subprocess.TimeoutExpired, OSError):
+        return "unknown"
+
+
 def run_iqtree(
     msa_fasta: Path,
     output_newick: Path,

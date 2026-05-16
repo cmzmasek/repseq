@@ -149,6 +149,88 @@ DEFAULTS: dict[str, Any] = {
             # Raw flags appended verbatim, e.g. ["-alrt", "1000"] for SH-aLRT.
             "extra_args": [],
         },
+        # Per-leaf display labels on the phyloXML tree.
+        # Supported placeholders: {species}, {genus}, {subgenus},
+        # {subfamily}, {family}, {order}, {class}, {phylum}, {id},
+        # {accession}, {host}, {strain}, {isolate_id}, {country},
+        # {date}, {year}, {organism}.
+        "labeling": {
+            # Default for non-segmented runs.
+            "format": "{species}|{id}|{host}",
+            # Used when segmented.enabled is true. Falls back to {format}
+            # if null. When {strain} is requested but the GenBank record
+            # has no /strain qualifier, the writer substitutes
+            # {isolate_id} (which segmented mode always has) so the
+            # label never collapses to ``...||host``.
+            "segmented_format": "{species}|{strain}|{host}",
+            # Replace internal whitespace runs in each placeholder value
+            # with underscores. Keeps the label round-trippable through
+            # tree viewers that treat whitespace as a token boundary.
+            "replace_whitespace": True,
+            # When a placeholder resolves to empty (and isn't a {strain}
+            # that can fall back to {isolate_id}), drop the placeholder
+            # AND the single separator character immediately before it,
+            # so the rendered label never contains ``||`` or trailing
+            # ``|``. Set true to keep all separators verbatim.
+            "keep_separator_on_empty": False,
+        },
+        # Tree rooting. Tree-building tools (FastTree, IQ-TREE) produce
+        # unrooted trees; the post-processing step picks a root before
+        # the writer ladderizes + serialises.
+        #
+        # method:
+        #   auto       — try taxonomy-guided → MAD → midpoint, first
+        #                success wins. The most-likely-correct default.
+        #   taxonomy   — root at the branch that maximises mean LCA
+        #                specificity of internal clades against the
+        #                resolved NCBI lineages. Falls through to
+        #                midpoint if no leaves carry lineage data.
+        #   mad        — Minimal Ancestor Deviation (Tria et al. 2017).
+        #                Pure-Python implementation; robust when
+        #                taxonomy is sparse.
+        #   midpoint   — Bio.Phylo's root_at_midpoint. Last-resort
+        #                fallback; always succeeds.
+        #   none       — leave the tree as parsed (use when the input
+        #                is already rooted, e.g. by an outgroup).
+        "rooting": {
+            "method": "auto",
+        },
+        # Internal-node LCA labels. After rooting, every internal
+        # clade is labelled with the lowest common ancestor of its
+        # terminals (read from the resolved NCBI lineage) and the
+        # label's rank attached as a PhyloXML <rank>.
+        "lca": {
+            # Master switch.
+            "enabled": True,
+            # Leaves whose lineage doesn't reach this rank are
+            # excluded from the LCA *vote* — they stay on the tree
+            # but don't pull internal labels toward an over-coarse
+            # taxon. "none" disables the gate. Default "genus" suits
+            # viral data, where lots of leaves lack species-level
+            # classification.
+            "min_rank": "genus",
+            # An internal node is annotated only if at least this
+            # fraction of its terminals carry usable lineage data.
+            # Guards against a handful of well-annotated leaves
+            # dictating the label of a much larger bare clade.
+            "coverage_threshold": 0.5,
+        },
+        # PhyloXML writer knobs.
+        "phyloxml": {
+            # If true, embed the aligned residues for each leaf as
+            # <mol_seq is_aligned="true"> inside the <sequence> block.
+            # The full MSA is always written to {prefix}_msa.fasta;
+            # leave this false unless a downstream consumer expects the
+            # alignment inline (it roughly doubles the file size).
+            "embed_alignment": False,
+            # Override the <confidence type="..."> attribute. ``auto``
+            # picks ``sh_like`` for FastTree and ``ufboot`` for IQ-TREE,
+            # which matches what each tool actually produces by default.
+            # Set explicitly if you pass non-default tree args (e.g.
+            # IQ-TREE ``-b`` for classical bootstrap, in which case use
+            # ``bootstrap``; ``-alrt`` only, use ``sh_alrt``).
+            "confidence_type": "auto",
+        },
     },
     "taxonomy": {
         "ncbi_email": None,
@@ -509,6 +591,57 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         errors.append(
             "phylo.iqtree.ultrafast_bootstrap must be a non-negative integer "
             "(0 disables; IQ-TREE recommends >= 1000 for interpretable support)"
+        )
+
+    labeling_cfg = phylo_cfg.get("labeling", {}) or {}
+    for key in ("format", "segmented_format"):
+        if key in labeling_cfg and labeling_cfg[key] is not None and not isinstance(
+            labeling_cfg[key], str
+        ):
+            errors.append(f"phylo.labeling.{key} must be a string or null")
+    for key in ("replace_whitespace", "keep_separator_on_empty"):
+        if key in labeling_cfg and not isinstance(labeling_cfg[key], bool):
+            errors.append(f"phylo.labeling.{key} must be a boolean")
+
+    phyloxml_cfg = phylo_cfg.get("phyloxml", {}) or {}
+    if "embed_alignment" in phyloxml_cfg and not isinstance(
+        phyloxml_cfg["embed_alignment"], bool
+    ):
+        errors.append("phylo.phyloxml.embed_alignment must be a boolean")
+    ct = phyloxml_cfg.get("confidence_type", "auto")
+    if ct not in ("auto", "sh_like", "sh_alrt", "ufboot", "bootstrap"):
+        errors.append(
+            f"phylo.phyloxml.confidence_type '{ct}' is not supported "
+            "(use 'auto', 'sh_like', 'sh_alrt', 'ufboot', or 'bootstrap')"
+        )
+
+    rooting_cfg = phylo_cfg.get("rooting", {}) or {}
+    rmethod = rooting_cfg.get("method", "auto")
+    if rmethod not in ("auto", "taxonomy", "mad", "midpoint", "none"):
+        errors.append(
+            f"phylo.rooting.method '{rmethod}' is not supported "
+            "(use 'auto', 'taxonomy', 'mad', 'midpoint', or 'none')"
+        )
+
+    lca_cfg = phylo_cfg.get("lca", {}) or {}
+    if "enabled" in lca_cfg and not isinstance(lca_cfg["enabled"], bool):
+        errors.append("phylo.lca.enabled must be a boolean")
+    valid_min_ranks = {
+        "none", "superkingdom", "realm", "kingdom", "subkingdom",
+        "phylum", "subphylum", "class", "subclass",
+        "order", "suborder", "family", "subfamily",
+        "genus", "subgenus", "species",
+    }
+    mr = lca_cfg.get("min_rank", "genus")
+    if mr not in valid_min_ranks:
+        errors.append(
+            f"phylo.lca.min_rank '{mr}' is not supported "
+            f"(use one of {sorted(valid_min_ranks)})"
+        )
+    ctv = lca_cfg.get("coverage_threshold", 0.5)
+    if not isinstance(ctv, (int, float)) or isinstance(ctv, bool) or not (0 <= ctv <= 1):
+        errors.append(
+            "phylo.lca.coverage_threshold must be a number between 0 and 1"
         )
 
     # Representative priority

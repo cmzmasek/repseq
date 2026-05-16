@@ -1,26 +1,35 @@
-"""Phylogeny orchestrator: short-id rename → MAFFT → FastTree → phyloXML.
+"""Phylogeny orchestrator: short-id rename → MAFFT → IQ-TREE/FastTree → phyloXML.
 
 The pipeline:
 
 1. Skip with a warning if there are fewer than 3 representatives —
-   FastTree cannot build a tree on a pair or singleton.
+   neither IQ-TREE nor FastTree can build a tree on a pair or singleton.
 2. Decide protein vs nucleotide from the first representative's
    ``seq_type`` (the upstream pipeline guarantees a single alphabet).
-3. Assign deterministic short ids (``S0001``, ``S0002``, …) so that
+3. Pick the tree builder: IQ-TREE for protein, FastTree for NT, unless
+   overridden by ``phylo.tool``.
+4. Assign deterministic short ids (``S0001``, ``S0002``, …) so that
    downstream tools — many of which choke on long names, pipes, or
    whitespace — see only clean tokens. The mapping is written to
    ``{prefix}_tree_id_map.tsv`` so the MSA and Newick (which keep the
    short ids) remain readable.
-4. Run MAFFT → MSA FASTA (short ids retained).
-5. Run FastTree → Newick (short ids retained).
-6. Convert Newick → phyloXML via ``Bio.Phylo``, restoring every
-   terminal clade's ``name`` to the original ``seq.id``.
+5. Run MAFFT → MSA FASTA (short ids retained).
+6. Run IQ-TREE or FastTree → Newick (short ids retained).
+7. Render the Newick to phyloXML via the rich writer in
+   :mod:`repseq.phylo.phyloxml_writer` — each leaf gets a formatted
+   ``<name>``, a ``<taxonomy>`` block, a ``<sequence>`` block with the
+   GenBank accession, and ``repseq:``-namespaced ``<property>``
+   elements for host, collection_date, country, strain, isolate_id,
+   year, and four taxonomy ranks. The tree itself is ladderized and
+   the ``<phylogeny>`` element carries a ``<name>`` and ``<description>``
+   recording the tools, versions, model, and bootstrap settings used.
 
 Outputs (all under ``{prefix}_*``):
     {prefix}_msa.fasta           aligned MSA, short-id headers
-    {prefix}_tree.nwk            FastTree Newick, short-id leaves
-    {prefix}_tree.xml            phyloXML, original seq.id leaves
+    {prefix}_tree.nwk            tree-builder Newick, short-id leaves
+    {prefix}_tree.xml            phyloXML, rich per-leaf annotation
     {prefix}_tree_id_map.tsv     short_id<TAB>original_id
+    {prefix}_iqtree_summary.txt  IQ-TREE ModelFinder report (IQ-TREE only)
 
 The orchestrator never raises out of the click command — it catches its
 own subprocess and conversion errors and reports them to stderr, matching
@@ -36,9 +45,19 @@ from typing import Any, Optional
 from Bio import Phylo
 
 from ..models import Sequence, SequenceType
+from . import fasttree as fasttree_mod
+from . import iqtree as iqtree_mod
+from . import mafft as mafft_mod
 from .fasttree import FastTreeError, run_fasttree
 from .iqtree import IQTreeError, run_iqtree
+from .lca import (
+    annotate_internal_nodes,
+    keep_deepest_labels,
+    suppress_same_species_pairs,
+)
 from .mafft import MafftError, run_mafft
+from .phyloxml_writer import write_phyloxml
+from .rooting import root_tree
 
 logger = logging.getLogger(__name__)
 
@@ -139,23 +158,27 @@ def _write_id_map(id_map: dict[str, str], path: Path) -> None:
             fh.write(f"{short}\t{original}\n")
 
 
-def _newick_to_phyloxml(
-    newick_path: Path,
-    phyloxml_path: Path,
-    id_map: dict[str, str],
-) -> None:
-    """Convert Newick → phyloXML, restoring each terminal's original id.
+def _resolved_model(cfg: Optional[dict[str, Any]], tree_tool: str) -> Optional[str]:
+    """Return the substitution model recorded in cfg for ``tree_tool``.
 
-    FastTree's Newick uses internal-node labels for support values; Bio.Phylo
-    parses those as clade ``confidence`` rather than ``name``, so renaming
-    only the terminals leaves internal-node support intact.
+    Used only for the phyloXML description block — no runtime effect.
+    FastTree's model is inferred from the alphabet (NT → GTR, AA → JTT)
+    and we record it as such, since FastTree itself doesn't echo it.
     """
-    tree = Phylo.read(str(newick_path), "newick")
-    for terminal in tree.get_terminals():
-        if terminal.name in id_map:
-            terminal.name = id_map[terminal.name]
-    phyloxml_path.parent.mkdir(parents=True, exist_ok=True)
-    Phylo.write([tree], str(phyloxml_path), "phyloxml")
+    if cfg is None:
+        return None
+    phylo_cfg = cfg.get("phylo", {}) or {}
+    if tree_tool == "iqtree":
+        return (phylo_cfg.get("iqtree", {}) or {}).get("model") or "MFP"
+    return None
+
+
+def _resolved_ufboot(cfg: Optional[dict[str, Any]], tree_tool: str) -> Optional[int]:
+    if cfg is None or tree_tool != "iqtree":
+        return None
+    return (cfg.get("phylo", {}) or {}).get("iqtree", {}).get(
+        "ultrafast_bootstrap", 1000
+    )
 
 
 def run_phylogeny(
@@ -215,8 +238,85 @@ def run_phylogeny(
         except FastTreeError as exc:
             raise PhyloError(str(exc)) from exc
 
+    alphabet_label = "protein" if is_protein else "nucleotide"
+    if tree_tool == "fasttree":
+        model_label = "JTT" if is_protein else "GTR"
+    else:
+        model_label = _resolved_model(cfg, tree_tool)
+    extra_mafft = list(
+        ((cfg or {}).get("phylo", {}).get("mafft", {}) or {}).get("extra_args", [])
+        or []
+    )
+    extra_tree = list(
+        ((cfg or {}).get("phylo", {}).get(tree_tool, {}) or {}).get(
+            "extra_args", [],
+        )
+        or []
+    )
+
+    # Load the Newick once. Root and LCA-annotate before handing to
+    # the writer so both rooting choice and internal labels make it
+    # into the final phyloXML.
     try:
-        _newick_to_phyloxml(newick_path, phyloxml_path, id_map)
+        parsed_tree = Phylo.read(str(newick_path), "newick")
+    except Exception as exc:
+        raise PhyloError(f"could not parse Newick {newick_path}: {exc}") from exc
+
+    # _build_id_map walks representatives in order, so id_map's
+    # insertion order matches the representatives list 1:1.
+    reps_by_short_id = dict(zip(id_map.keys(), representatives))
+
+    rooting_cfg = (cfg or {}).get("phylo", {}).get("rooting", {}) or {}
+    rooting_method_req = rooting_cfg.get("method", "auto")
+    try:
+        parsed_tree, rooting_method_used = root_tree(
+            parsed_tree, reps_by_short_id, method=rooting_method_req,
+        )
+    except Exception as exc:
+        # Rooting is a soft step — fall back to whatever the parser gave us.
+        logger.warning("[phylo] rooting failed: %s; leaving tree as parsed", exc)
+        rooting_method_used = "none"
+
+    lca_cfg = (cfg or {}).get("phylo", {}).get("lca", {}) or {}
+    if lca_cfg.get("enabled", True):
+        try:
+            annotate_internal_nodes(
+                parsed_tree, reps_by_short_id,
+                min_rank=lca_cfg.get("min_rank", "genus"),
+                coverage_threshold=lca_cfg.get("coverage_threshold", 0.5),
+            )
+            keep_deepest_labels(parsed_tree)
+            suppress_same_species_pairs(parsed_tree, reps_by_short_id)
+        except Exception as exc:
+            logger.warning("[phylo] LCA annotation failed: %s", exc)
+
+    try:
+        write_phyloxml(
+            None,
+            phyloxml_path,
+            representatives,
+            id_map,
+            cfg=cfg or {},
+            prefix=prefix,
+            alphabet=alphabet_label,
+            msa_tool="MAFFT",
+            msa_version=mafft_mod.tool_version(),
+            tree_tool="IQ-TREE" if tree_tool == "iqtree" else "FastTree",
+            tree_version=(
+                iqtree_mod.tool_version(
+                    ((cfg or {}).get("phylo", {}).get("iqtree", {}) or {}).get("binary"),
+                )
+                if tree_tool == "iqtree"
+                else fasttree_mod.tool_version()
+            ),
+            model=model_label,
+            ufboot=_resolved_ufboot(cfg, tree_tool),
+            extra_msa_args=extra_mafft,
+            extra_tree_args=extra_tree,
+            msa_fasta=msa_fasta,
+            tree=parsed_tree,
+            rooting_method=rooting_method_used,
+        )
     except Exception as exc:
         raise PhyloError(f"Newick → phyloXML conversion failed: {exc}") from exc
 
