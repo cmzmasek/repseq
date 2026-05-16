@@ -16,8 +16,9 @@ from .models import SequenceSource
 from .models import RunResult
 from .output.report import write_all_reports
 from .output.writer import write_results
+from .clustering.marker import populate_protein_sequences
 from .qc.pipeline import remove_duplicates, run_qc
-from .qc.protein_qc import run_protein_qc
+from .qc.protein_qc import _stderr_batch_progress, attach_proteins, run_protein_qc
 from .segmented.completeness import (
     build_concatenated_sequences,
     filter_complete_isolates,
@@ -195,6 +196,84 @@ def _run_protein_qc(sequences, cfg, qc_report, ncbi):
     return kept
 
 
+def _resolve_alphabet(cfg, sequences) -> str:
+    """Resolve clustering.alphabet, expanding ``auto`` for the current input."""
+    alphabet = cfg.get("clustering", {}).get("alphabet", "protein")
+    if alphabet == "auto":
+        any_proteins = any(
+            (seq.proteins or []) and any(p.get("sequence") for p in seq.proteins)
+            for seq in sequences
+        )
+        return "protein" if any_proteins else "nucleotide"
+    return alphabet
+
+
+def _setup_protein_alphabet(sequences, cfg, qc_report, ncbi):
+    """When clustering.alphabet=protein, ensure CDS proteins are fetched and
+    set seq.protein_sequence on each non-segmented sequence.
+
+    Triggers a one-shot GenBank CDS fetch if QC didn't already do it. Drops
+    sequences without a viable marker (incremented under removed_proteins).
+    No-op when alphabet=nucleotide. For segmented input the protein concat
+    is built later by ``_handle_segmented``; this step still triggers the
+    fetch so the marker selection in that step has data to work with.
+    """
+    alphabet = cfg.get("clustering", {}).get("alphabet", "protein")
+    if alphabet == "nucleotide":
+        return sequences
+    # 'auto' or 'protein': both want proteins available if at all possible.
+    needs_proteins = any(seq.proteins is None for seq in sequences)
+    if needs_proteins:
+        if ncbi is None:
+            if alphabet == "auto":
+                # No proteins available, no way to fetch — silently fall back
+                # to nucleotide. The dispatcher reads cfg afresh, so we
+                # mutate the live config in place.
+                cfg.setdefault("clustering", {})["alphabet"] = "nucleotide"
+                click.echo(
+                    "  [alphabet=auto] no NCBI client (--no-resolve) and no "
+                    "cached proteins; falling back to nucleotide clustering."
+                )
+                return sequences
+            click.echo(
+                "[error] clustering.alphabet='protein' requires GenBank CDS "
+                "fetch, but --no-resolve was set. Either drop --no-resolve "
+                "or switch to clustering.alphabet: nucleotide.",
+                err=True,
+            )
+            sys.exit(1)
+        click.echo("Fetching CDS proteins for protein-alphabet clustering ...")
+        attach_proteins(sequences, ncbi)
+    # If 'auto' and nothing came back, fall back to nucleotide.
+    if alphabet == "auto":
+        any_proteins = any(
+            (seq.proteins or []) and any(p.get("sequence") for p in seq.proteins)
+            for seq in sequences
+        )
+        if not any_proteins:
+            cfg.setdefault("clustering", {})["alphabet"] = "nucleotide"
+            click.echo(
+                "  [alphabet=auto] no usable CDS translations found; falling "
+                "back to nucleotide clustering."
+            )
+            return sequences
+        cfg["clustering"]["alphabet"] = "protein"
+    # Non-segmented: pick the marker per-sequence now. Segmented isolates
+    # get a per-isolate concat in _handle_segmented (each segment contributes
+    # its own marker), so we leave them alone here.
+    if not cfg.get("segmented", {}).get("enabled"):
+        aliases = cfg.get("clustering", {}).get("cluster_protein", []) or []
+        before = len(sequences)
+        sequences = populate_protein_sequences(sequences, aliases, qc_report)
+        dropped = before - len(sequences)
+        if dropped:
+            click.echo(
+                f"  Dropped {dropped} sequence(s) with no marker protein "
+                f"for clustering."
+            )
+    return sequences
+
+
 def _populate_genbank_isolate_segment(sequences, cfg, ncbi):
     """Populate seq.isolate_id / seq.segment / seq.strain from the GenBank
     source feature, when segmented mode is on and the toggle is enabled.
@@ -224,7 +303,9 @@ def _populate_genbank_isolate_segment(sequences, cfg, ncbi):
     if not accessions:
         return
     click.echo("Fetching GenBank source metadata for segmented mode ...")
-    meta_by_acc = ncbi.fetch_source_metadata_batch(accessions)
+    meta_by_acc = ncbi.fetch_source_metadata_batch(
+        accessions, progress=_stderr_batch_progress,
+    )
     populated = 0
     for acc, meta in meta_by_acc.items():
         isolate = meta.get("isolate") or meta.get("strain")
@@ -259,7 +340,31 @@ def _handle_segmented(sequences, cfg, qc_report):
         kept = [seq for segs in complete_isolates.values() for seq in segs]
     click.echo(f"  Complete isolates : {len(complete_isolates)}")
     click.echo(f"  Individual seqs   : {len(kept)}")
-    concat_seqs = build_concatenated_sequences(complete_isolates)
+    alphabet = cfg.get("clustering", {}).get("alphabet", "protein")
+    require_protein = alphabet == "protein"
+    cluster_protein = virus_cfg.get("cluster_protein")
+    concat_seqs = build_concatenated_sequences(
+        complete_isolates,
+        segment_names=virus_cfg["segments"],
+        cluster_protein=cluster_protein,
+        require_protein=require_protein,
+        report=qc_report,
+    )
+    # Drop isolates that lost a marker on any segment from complete_isolates
+    # too, so the per-segment FASTA writer and isolate_proteins.tsv don't
+    # resurrect them.
+    if require_protein:
+        survivors = {s.isolate_id for s in concat_seqs}
+        before = len(complete_isolates)
+        complete_isolates = {
+            k: v for k, v in complete_isolates.items() if k in survivors
+        }
+        dropped = before - len(complete_isolates)
+        if dropped:
+            click.echo(
+                f"  Dropped {dropped} isolate(s) with no marker protein "
+                f"on one or more segments."
+            )
 
     # Exact-duplicate removal was skipped on the segment pool (a conserved
     # segment shared between distinct isolates must not knock either isolate
@@ -450,6 +555,7 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
@@ -485,6 +591,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
@@ -524,6 +631,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
@@ -557,6 +665,7 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
@@ -592,6 +701,7 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
@@ -625,6 +735,7 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
@@ -665,6 +776,7 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 
@@ -709,6 +821,7 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
 

@@ -6,6 +6,7 @@ import re
 from collections import defaultdict
 from typing import Any, Optional
 
+from ..clustering.marker import select_marker_protein
 from ..models import QCReport, Sequence
 
 
@@ -241,8 +242,15 @@ def filter_complete_isolates(
 def concatenate_isolate(
     segments: list[Sequence],
     isolate_id: str,
+    protein_sequence: Optional[str] = None,
 ) -> Sequence:
-    """Concatenate segment sequences for one isolate into a single Sequence."""
+    """Concatenate segment sequences for one isolate into a single Sequence.
+
+    ``protein_sequence`` is the in-segment-order concatenation of the
+    isolate's marker proteins (see ``build_concatenated_sequences``);
+    populated when protein-alphabet clustering is active, ``None``
+    otherwise.
+    """
     combined_seq = "".join(s.sequence for s in segments)
     representative = segments[0]
 
@@ -273,6 +281,7 @@ def concatenate_isolate(
         is_refseq=all(s.is_refseq for s in segments),
         is_reviewed=all(s.is_reviewed for s in segments),
         taxonomy=representative.taxonomy,
+        protein_sequence=protein_sequence,
     )
 
 
@@ -315,9 +324,56 @@ def segment_length_filter(
 
 def build_concatenated_sequences(
     complete_isolates: dict[str, list[Sequence]],
+    segment_names: Optional[list[str]] = None,
+    cluster_protein: Optional[dict[str, list[str]]] = None,
+    require_protein: bool = False,
+    report: Optional[QCReport] = None,
 ) -> list[Sequence]:
-    """Return one concatenated Sequence per complete isolate."""
-    return [
-        concatenate_isolate(segs, isolate_id)
-        for isolate_id, segs in complete_isolates.items()
-    ]
+    """Return one concatenated Sequence per complete isolate.
+
+    When ``require_protein`` is True (protein-alphabet clustering), the
+    marker protein for each segment is selected via
+    ``select_marker_protein`` and concatenated in ``segment_names`` order
+    onto the result's ``protein_sequence``. Isolates whose any segment
+    has no qualifying marker are dropped and counted under
+    ``report.removed_incomplete_isolates`` with reason
+    ``incomplete_isolate:missing_marker_protein:<segment>``.
+
+    ``cluster_protein`` maps segment_name → alias list; absent / empty
+    entries fall through to "longest CDS" selection.
+    """
+    out: list[Sequence] = []
+    cp = cluster_protein or {}
+    for isolate_id, segs in complete_isolates.items():
+        protein_concat: Optional[str] = None
+        if require_protein:
+            if segment_names is None:
+                segment_names = [seg.segment or "" for seg in segs]
+            seg_by_name = {s.segment: s for s in segs if s.segment}
+            parts: list[str] = []
+            missing_marker: Optional[str] = None
+            for seg_name in segment_names:
+                seg = seg_by_name.get(seg_name)
+                if seg is None:
+                    missing_marker = seg_name
+                    break
+                aliases = cp.get(seg_name) or []
+                marker = select_marker_protein(seg.proteins, aliases)
+                if marker is None:
+                    missing_marker = seg_name
+                    break
+                parts.append(marker["sequence"])
+            if missing_marker is not None:
+                if report is not None:
+                    reason = (
+                        f"incomplete_isolate:missing_marker_protein:{missing_marker}"
+                    )
+                    for seq in segs:
+                        seq.qc_passed = False
+                        seq.qc_fail_reason = reason
+                        report.removed_incomplete_isolates += 1
+                        report.add_removed(seq.id, reason)
+                continue
+            protein_concat = "".join(parts)
+        out.append(concatenate_isolate(segs, isolate_id, protein_sequence=protein_concat))
+    return out

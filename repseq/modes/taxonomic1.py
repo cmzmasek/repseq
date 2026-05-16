@@ -7,7 +7,10 @@ that yields <= n_per_group representatives, then return those.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Literal, Optional
+
+import click
 
 from ..clustering import min_threshold, run_clustering
 from ..clustering.diversity import select_diverse
@@ -80,11 +83,23 @@ def _binary_search_threshold(
     fallback_reps: list[Sequence] = []
     fallback_count: Optional[int] = None  # smallest count seen that exceeds n_target
 
-    for _ in range(max_iter):
+    tag = f"[{label}] " if label else ""
+    click.echo(
+        f"  {tag}clustering {len(sequences)} sequences "
+        f"(target = {n_target} reps) ..."
+    )
+
+    for i in range(max_iter):
         mid = (lo + hi) / 2
+        t0 = time.perf_counter()
         clusters = run_clustering(sequences, mid, cfg)
         clusters = apply_representative_selection(clusters, cfg)
         n_reps = len(clusters)
+        dt = time.perf_counter() - t0
+        click.echo(
+            f"    {tag}iter {i + 1}/{max_iter}: threshold={mid:.4f} "
+            f"→ {n_reps} cluster(s) [{dt:.1f}s]"
+        )
 
         if n_reps <= n_target:
             # Few enough — keep the count closest to the target (largest
@@ -114,6 +129,11 @@ def _binary_search_threshold(
 
     where = f" for '{label}'" if label else ""
     if best_count < n_target:
+        click.echo(
+            f"    {tag}settled on {best_count} rep(s) at threshold "
+            f"{best_threshold:.4f} (target {n_target} not reachable — "
+            f"cluster count is a step function of identity)"
+        )
         logger.warning(
             "Binary search%s: requested %d representatives but cluster count "
             "is a step function of identity; closest achievable is %d at "
@@ -121,6 +141,10 @@ def _binary_search_threshold(
             where, n_target, best_count, best_threshold,
         )
     else:
+        click.echo(
+            f"    {tag}settled on {best_count} rep(s) at threshold "
+            f"{best_threshold:.4f}"
+        )
         logger.info(
             "Binary search%s: %d representatives at threshold %.3f.",
             where, best_count, best_threshold,

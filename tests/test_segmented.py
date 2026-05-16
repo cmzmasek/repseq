@@ -315,3 +315,78 @@ def test_build_concatenated_sequences_one_per_isolate(make_seq):
     by_iso = {s.isolate_id: s for s in out}
     assert by_iso["ISO1"].sequence == "AAATTT"
     assert by_iso["ISO2"].sequence == "GGGCCC"
+    # No protein concat unless explicitly requested.
+    assert all(s.protein_sequence is None for s in out)
+
+
+# ---------------------------------------------------------------------------
+# Protein-alphabet concat (segmented mode)
+# ---------------------------------------------------------------------------
+
+def _cds(product: str, aa: str):
+    return {"protein_id": "P", "product": product, "length": len(aa), "sequence": aa}
+
+
+def test_build_concat_protein_uses_longest_cds_per_segment(make_seq):
+    s_seg = make_seq("a_S", "AAA", segment="S")
+    l_seg = make_seq("a_L", "TTT", segment="L")
+    s_seg.proteins = [_cds("nucleoprotein", "N" * 400)]
+    l_seg.proteins = [
+        _cds("ns1 short", "M" * 50),
+        _cds("polymerase", "M" * 2200),
+    ]
+    iso = {"iso1": [s_seg, l_seg]}
+    out = build_concatenated_sequences(
+        iso, segment_names=["S", "L"], require_protein=True,
+    )
+    assert len(out) == 1
+    # AA concat is N*400 (S segment marker) + M*2200 (L segment, longest CDS).
+    assert out[0].protein_sequence == "N" * 400 + "M" * 2200
+
+
+def test_build_concat_protein_alias_per_segment(make_seq):
+    s_seg = make_seq("a_S", "AAA", segment="S")
+    l_seg = make_seq("a_L", "TTT", segment="L")
+    s_seg.proteins = [
+        _cds("nucleoprotein", "N" * 400),
+        _cds("NSs", "X" * 100),
+    ]
+    l_seg.proteins = [_cds("RNA-dependent RNA polymerase", "M" * 2200)]
+    iso = {"iso1": [s_seg, l_seg]}
+    out = build_concatenated_sequences(
+        iso, segment_names=["S", "L"], require_protein=True,
+        cluster_protein={"S": ["NSs"], "L": ["polymerase"]},
+    )
+    # S marker is NSs (alias wins despite N being longer); L is polymerase.
+    assert out[0].protein_sequence == "X" * 100 + "M" * 2200
+
+
+def test_build_concat_protein_drops_isolate_when_marker_missing(make_seq):
+    s_seg = make_seq("a_S", "AAA", segment="S")
+    l_seg = make_seq("a_L", "TTT", segment="L")
+    s_seg.proteins = [_cds("nucleoprotein", "N" * 400)]
+    l_seg.proteins = []  # fetched, no CDS — no viable marker for L
+    iso = {"iso1": [s_seg, l_seg]}
+    report = QCReport()
+    out = build_concatenated_sequences(
+        iso, segment_names=["S", "L"], require_protein=True, report=report,
+    )
+    assert out == []
+    assert report.removed_incomplete_isolates == 2
+    assert all(
+        "missing_marker_protein:L" in d["reason"] for d in report.details
+    )
+
+
+def test_build_concat_protein_no_aliases_match_falls_back_to_longest(make_seq):
+    s_seg = make_seq("a_S", "AAA", segment="S")
+    l_seg = make_seq("a_L", "TTT", segment="L")
+    s_seg.proteins = [_cds("nucleoprotein", "N" * 400)]
+    l_seg.proteins = [_cds("L protein", "M" * 2200)]
+    iso = {"iso1": [s_seg, l_seg]}
+    out = build_concatenated_sequences(
+        iso, segment_names=["S", "L"], require_protein=True,
+        # Alias for S doesn't match nucleoprotein — should fall back to longest.
+        cluster_protein={"S": ["does_not_match"]},
+    )
+    assert out[0].protein_sequence == "N" * 400 + "M" * 2200

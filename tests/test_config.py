@@ -118,6 +118,89 @@ def test_validate_config_rejects_phylo_non_string_extra_args():
     assert any("phylo.mafft.extra_args" in e for e in errors)
 
 
+def test_validate_config_default_alphabet_is_protein():
+    cfg = load_config(None)
+    assert cfg["clustering"]["alphabet"] == "protein"
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_accepts_alphabet_nucleotide_and_auto():
+    cfg = load_config(None)
+    for alpha in ("nucleotide", "auto"):
+        cfg["clustering"]["alphabet"] = alpha
+        assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_unknown_alphabet():
+    cfg = load_config(None)
+    cfg["clustering"]["alphabet"] = "dna"
+    errors = validate_config(cfg)
+    assert any("clustering.alphabet" in e for e in errors)
+
+
+def test_validate_config_rejects_non_list_cluster_protein():
+    cfg = load_config(None)
+    cfg["clustering"]["cluster_protein"] = "polymerase"  # string, not list
+    errors = validate_config(cfg)
+    assert any("clustering.cluster_protein" in e for e in errors)
+
+
+def test_validate_config_segmented_cluster_protein_accepted():
+    cfg = load_config(None)
+    cfg["segmented"] = {
+        "enabled": True,
+        "virus": "v",
+        "viruses": {
+            "v": {
+                "expected_segments": 2,
+                "segments": ["L", "S"],
+                "isolate_regex": r"(?P<isolate>X)",
+                "cluster_protein": {
+                    "L": ["polymerase", "L protein"],
+                    "S": ["nucleoprotein"],
+                },
+            }
+        },
+    }
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_segmented_cluster_protein_rejects_unknown_segment():
+    cfg = load_config(None)
+    cfg["segmented"] = {
+        "enabled": True,
+        "virus": "v",
+        "viruses": {
+            "v": {
+                "expected_segments": 1,
+                "segments": ["L"],
+                "isolate_regex": r"(?P<isolate>X)",
+                "cluster_protein": {"NOPE": ["x"]},
+            }
+        },
+    }
+    errors = validate_config(cfg)
+    assert any("cluster_protein" in e and "NOPE" in e for e in errors)
+
+
+def test_validate_config_segmented_cluster_protein_rejects_empty_alias():
+    cfg = load_config(None)
+    cfg["segmented"] = {
+        "enabled": True,
+        "virus": "v",
+        "viruses": {
+            "v": {
+                "expected_segments": 1,
+                "segments": ["L"],
+                "isolate_regex": r"(?P<isolate>X)",
+                "cluster_protein": {"L": ["valid", ""]},
+            }
+        },
+    }
+    errors = validate_config(cfg)
+    assert any("cluster_protein.L" in e for e in errors)
+
+
 def test_validate_config_default_use_genbank_metadata_is_true():
     cfg = load_config(None)
     assert cfg["segmented"]["use_genbank_metadata"] is True

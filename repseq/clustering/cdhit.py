@@ -62,15 +62,25 @@ _PROTEIN_MIN = 0.40
 _NUCLEOTIDE_MIN = 0.80
 
 
-def _is_protein(sequences: list[Sequence]) -> bool:
-    """Choose the binary by majority sequence type.
+def _is_protein(sequences: list[Sequence], cfg: Optional[dict[str, Any]] = None) -> bool:
+    """Choose the binary by clustering alphabet, else by majority sequence type.
 
-    Mixed inputs are not expected in this pipeline — modes either get a
-    pool of proteins or of nucleotides. We bias to ``cd-hit-est`` only
-    when every sequence is explicitly nucleotide, so any ambiguity falls
-    back to the protein binary, which has the wider acceptable threshold
-    range.
+    ``cfg['clustering']['alphabet']`` is consulted first: ``protein`` forces
+    ``cd-hit`` regardless of ``seq.seq_type`` (the upstream pipeline may
+    populate ``seq.protein_sequence`` on a nucleotide-typed concat record).
+    ``nucleotide`` forces ``cd-hit-est`` for the same reason.
+
+    Without a config override we fall back to the alphabet of the records
+    themselves: bias to ``cd-hit-est`` only when every sequence is explicitly
+    nucleotide, so any ambiguity falls back to the protein binary (which
+    has the wider acceptable threshold range).
     """
+    if cfg is not None:
+        alphabet = cfg.get("clustering", {}).get("alphabet")
+        if alphabet == "protein":
+            return True
+        if alphabet == "nucleotide":
+            return False
     return not all(s.seq_type == SequenceType.NUCLEOTIDE for s in sequences)
 
 
@@ -87,9 +97,12 @@ def _pick_word_size(threshold: float, protein: bool) -> int:
     )
 
 
-def min_threshold(sequences: list[Sequence]) -> float:
+def min_threshold(
+    sequences: list[Sequence],
+    cfg: Optional[dict[str, Any]] = None,
+) -> float:
     """Return the lowest identity threshold cd-hit will accept for this input."""
-    return _PROTEIN_MIN if _is_protein(sequences) else _NUCLEOTIDE_MIN
+    return _PROTEIN_MIN if _is_protein(sequences, cfg) else _NUCLEOTIDE_MIN
 
 
 def _check_binary(name: str) -> str:
@@ -117,8 +130,9 @@ def run_clustering(
     """
     cluster_cfg = cfg.get("clustering", {})
     cdhit_cfg = cluster_cfg.get("cdhit", {}) or {}
+    alphabet = cluster_cfg.get("alphabet", "nucleotide")
 
-    protein = _is_protein(sequences)
+    protein = _is_protein(sequences, cfg)
     floor = _PROTEIN_MIN if protein else _NUCLEOTIDE_MIN
     if threshold < floor:
         raise CDHitError(
@@ -151,7 +165,7 @@ def run_clustering(
         input_fasta = td / "input.fasta"
         output_prefix = td / "result"
 
-        _write_id_fasta(sequences, input_fasta)
+        _write_id_fasta(sequences, input_fasta, alphabet=alphabet)
 
         cmd = [
             binary,

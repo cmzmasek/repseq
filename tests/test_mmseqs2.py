@@ -58,6 +58,25 @@ def test_write_id_fasta_header_token_is_seq_id(tmp_path):
     assert header_tokens == ["P12345", "CONCAT|ISO/2009"]
 
 
+def test_write_id_fasta_alphabet_protein_uses_protein_sequence(tmp_path):
+    seq = _seq("CONCAT|iso1", "ACGTACGT")
+    seq.protein_sequence = "MEEPMEEP"
+    fasta = tmp_path / "input.fasta"
+    _write_id_fasta([seq], fasta, alphabet="protein")
+    body = "".join(
+        line for line in fasta.read_text().splitlines()
+        if not line.startswith(">")
+    )
+    assert body == "MEEPMEEP"
+
+
+def test_write_id_fasta_alphabet_protein_raises_when_missing(tmp_path):
+    seq = _seq("a", "ACGT")  # no protein_sequence
+    fasta = tmp_path / "input.fasta"
+    with pytest.raises(ValueError, match="protein_sequence"):
+        _write_id_fasta([seq], fasta, alphabet="protein")
+
+
 def test_parse_cluster_tsv_matches_id_headers(tmp_path):
     # cluster.tsv produced from an _write_id_fasta input carries seq.id
     # values; the parser must resolve them back to the Sequence objects.

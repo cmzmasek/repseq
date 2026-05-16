@@ -264,8 +264,10 @@ def test_attach_proteins_skips_uniprot_sequences(make_seq):
 
     assert uniprot_seq.proteins is None  # untouched
     assert ncbi_seq.proteins == [{"protein_id": "X"}]
-    # NCBI fetcher only received the ncbi accession
-    ncbi.fetch_proteins_batch.assert_called_once_with(["NC_001.1"])
+    # NCBI fetcher only received the ncbi accession.
+    ncbi.fetch_proteins_batch.assert_called_once()
+    args, _ = ncbi.fetch_proteins_batch.call_args
+    assert args[0] == ["NC_001.1"]
 
 
 def test_attach_proteins_noop_when_no_accessions(make_seq):

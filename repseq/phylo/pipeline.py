@@ -50,8 +50,23 @@ class PhyloError(RuntimeError):
 _SHORT_ID_FMT = "S{:04d}"
 
 
+def _use_protein_sequence(reps: list[Sequence], cfg: Optional[dict[str, Any]]) -> bool:
+    """True when the phylo input should be each rep's protein_sequence.
+
+    Active when ``clustering.alphabet="protein"`` AND every rep actually
+    carries a protein_sequence (a no-resolve fallback or missing-marker
+    drop could leave some empty; we never want a half-protein, half-NT
+    alignment).
+    """
+    if cfg is None:
+        return False
+    if cfg.get("clustering", {}).get("alphabet") != "protein":
+        return False
+    return all(r.protein_sequence for r in reps)
+
+
 def _is_protein(reps: list[Sequence]) -> bool:
-    """Pick a single alphabet for the whole rep set.
+    """Pick a single alphabet for the whole rep set when reading seq.sequence.
 
     The upstream pipeline never mixes protein and nucleotide reps in a
     single run, so checking the first one is enough; unknown defaults
@@ -75,12 +90,14 @@ def _write_short_id_fasta(
     reps: list[Sequence],
     id_map: dict[str, str],
     path: Path,
+    use_protein: bool = False,
 ) -> None:
     """Write a FASTA whose header is the short id and nothing else.
 
     Mirrors ``clustering.mmseqs2._write_id_fasta`` — sole-token headers
     so the alignment/tree tools cannot lose track of identity at any
-    whitespace or pipe boundary.
+    whitespace or pipe boundary. With ``use_protein=True`` the body comes
+    from ``rep.protein_sequence`` (the marker / per-isolate AA concat).
     """
     reverse = {v: k for k, v in id_map.items()}
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,7 +105,7 @@ def _write_short_id_fasta(
         for rep in reps:
             short = reverse[rep.id]
             fh.write(f">{short}\n")
-            seq = rep.sequence
+            seq = (rep.protein_sequence if use_protein else rep.sequence) or ""
             for i in range(0, len(seq), 70):
                 fh.write(seq[i:i + 70] + "\n")
 
@@ -139,7 +156,8 @@ def run_phylogeny(
             f"need >= 3 representatives to build a tree, got {n}"
         )
 
-    is_protein = _is_protein(representatives)
+    use_protein = _use_protein_sequence(representatives, cfg)
+    is_protein = use_protein or _is_protein(representatives)
     id_map = _build_id_map(representatives)
 
     input_fasta = out_dir / f"{prefix}_phylo_input.fasta"
@@ -148,7 +166,7 @@ def run_phylogeny(
     phyloxml_path = out_dir / f"{prefix}_tree.xml"
     id_map_path = out_dir / f"{prefix}_tree_id_map.tsv"
 
-    _write_short_id_fasta(representatives, id_map, input_fasta)
+    _write_short_id_fasta(representatives, id_map, input_fasta, use_protein=use_protein)
     _write_id_map(id_map, id_map_path)
 
     try:

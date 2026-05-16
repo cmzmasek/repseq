@@ -25,7 +25,12 @@ def _check_mmseqs2() -> str:
     return path
 
 
-def _write_id_fasta(sequences: list[Sequence], path: Path, line_width: int = 70) -> None:
+def _write_id_fasta(
+    sequences: list[Sequence],
+    path: Path,
+    line_width: int = 70,
+    alphabet: str = "nucleotide",
+) -> None:
     """Write a FASTA whose header is exactly ``seq.id``.
 
     MMseqs2 uses the first whitespace-delimited token of each header as the
@@ -35,19 +40,30 @@ def _write_id_fasta(sequences: list[Sequence], path: Path, line_width: int = 70)
     segmented isolates (``CONCAT|iso|acc1|acc2``), so the parsed cluster
     members could not be matched back. Using ``seq.id`` as the sole header
     token keeps the round-trip exact.
+
+    With ``alphabet="protein"`` the body comes from ``seq.protein_sequence``
+    (the marker protein, or concat thereof in segmented mode) — the
+    upstream pipeline guarantees it's populated. Cluster objects returned
+    by the backend still carry the original NT-bearing ``Sequence``.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fh:
         for seq in sequences:
+            body = seq.protein_sequence if alphabet == "protein" else seq.sequence
+            if not body:
+                raise ValueError(
+                    f"Sequence {seq.id!r} has no "
+                    f"{'protein_sequence' if alphabet == 'protein' else 'sequence'} "
+                    f"to write to the clustering input."
+                )
             # Defensive: a seq.id with a stray newline or carriage
             # return would split one record into two in the FASTA we
             # hand to MMseqs2, and the post-break fragment would then
             # appear as a phantom "sequence" with junk content.
             safe_id = seq.id.replace("\n", " ").replace("\r", " ")
             fh.write(f">{safe_id}\n")
-            s = seq.sequence
-            for i in range(0, len(s), line_width):
-                fh.write(s[i : i + line_width] + "\n")
+            for i in range(0, len(body), line_width):
+                fh.write(body[i : i + line_width] + "\n")
 
 
 def run_clustering(
@@ -73,6 +89,7 @@ def run_clustering(
     coverage = cluster_cfg.get("coverage", 0.8)
     coverage_mode = cluster_cfg.get("coverage_mode", 0)
     extra_args: list[str] = cluster_cfg.get("extra_args", [])
+    alphabet = cluster_cfg.get("alphabet", "nucleotide")
     threads = cfg.get("threads", 4)
 
     work_dir = Path(tmp_dir or cfg.get("temp_dir", "/tmp/repseq"))
@@ -84,7 +101,7 @@ def run_clustering(
         result_prefix = str(td / "result")
         mmseqs_tmp = str(td / "tmp")
 
-        _write_id_fasta(sequences, input_fasta)
+        _write_id_fasta(sequences, input_fasta, alphabet=alphabet)
 
         cmd = [
             mmseqs,

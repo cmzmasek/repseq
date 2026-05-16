@@ -68,6 +68,19 @@ DEFAULTS: dict[str, Any] = {
     },
     "clustering": {
         "backend": "mmseqs2",              # "mmseqs2" | "cdhit"
+        # Alphabet fed to the clustering backend. "protein" (default) feeds
+        # the marker protein (longest CDS, or the first matching alias in
+        # `cluster_protein`) — for segmented input, an in-order concat of
+        # each segment's marker. "nucleotide" feeds the raw sequence (the
+        # pre-0.6 behaviour). "auto" picks protein when any sequence has
+        # CDS info available, else nucleotide. Triggers a one-shot
+        # GenBank CDS fetch when proteins aren't already cached.
+        "alphabet": "protein",
+        # Non-segmented marker-protein override. Alias list, matched
+        # case-insensitively as substrings against /product. First alias
+        # that matches a CDS wins; if no aliases match (or the list is
+        # empty), the longest CDS on the sequence is used.
+        "cluster_protein": [],
         "mmseqs2_mode": "easy-linclust",   # "easy-linclust" | "easy-cluster"
         "coverage": 0.8,
         "coverage_mode": 0,
@@ -279,6 +292,30 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                                     f"must be a list of non-empty strings"
                                 )
 
+                cp = vdef.get("cluster_protein")
+                if cp is not None:
+                    if not isinstance(cp, dict):
+                        errors.append(
+                            f"segmented.viruses.{virus_name}.cluster_protein "
+                            f"must be a mapping of segment-name → list of strings"
+                        )
+                    else:
+                        seg_names = set(vdef.get("segments", []))
+                        for seg_name, aliases in cp.items():
+                            if seg_name not in seg_names:
+                                errors.append(
+                                    f"segmented.viruses.{virus_name}."
+                                    f"cluster_protein: unknown segment '{seg_name}'"
+                                )
+                            if not isinstance(aliases, list) or not all(
+                                isinstance(s, str) and s.strip() for s in aliases
+                            ):
+                                errors.append(
+                                    f"segmented.viruses.{virus_name}."
+                                    f"cluster_protein.{seg_name} "
+                                    f"must be a list of non-empty strings"
+                                )
+
                 epps = vdef.get("expected_proteins_per_segment")
                 if epps is not None:
                     if not isinstance(epps, dict):
@@ -374,6 +411,22 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         errors.append(
             f"clustering.backend '{backend}' is not supported "
             f"(use 'mmseqs2' or 'cdhit')"
+        )
+
+    alphabet = cfg.get("clustering", {}).get("alphabet", "protein")
+    if alphabet not in ("protein", "nucleotide", "auto"):
+        errors.append(
+            f"clustering.alphabet '{alphabet}' is not supported "
+            f"(use 'protein', 'nucleotide', or 'auto')"
+        )
+
+    cluster_protein_global = cfg.get("clustering", {}).get("cluster_protein", [])
+    if not isinstance(cluster_protein_global, list) or not all(
+        isinstance(s, str) and s.strip() for s in cluster_protein_global
+    ):
+        errors.append(
+            "clustering.cluster_protein must be a list of non-empty strings "
+            "(case-insensitive substring aliases for /product)"
         )
 
     mmseqs2_mode = cfg.get("clustering", {}).get("mmseqs2_mode")

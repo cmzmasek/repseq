@@ -74,6 +74,14 @@ segmented:
   #       <segment_name>:                      #   drop any isolate where this segment
   #         min: <int>                         #   is shorter than min or longer than max
   #         max: <int>                         #   (either bound is optional)
+  #     cluster_protein:                       # optional; marker protein per segment
+  #       <segment_name>:                      #   for protein-alphabet clustering. Each
+  #         - <alias>                          #   value is an alias list matched case-
+  #         - <alias>                          #   insensitively (substring) against
+  #                                            #   /product. First match wins; if no
+  #                                            #   alias matches a segment's CDSes,
+  #                                            #   the isolate is dropped as incomplete.
+  #                                            #   Omitted: longest CDS per segment.
   # See config/examples/influenza_a.yaml for a worked example with
   # strain-aware list-valued counts.
   viruses: {}
@@ -95,6 +103,35 @@ clustering:
   # across backends — different alignment heuristics, different word-size
   # rules. Pick one and stick with it for a given reference set.
   backend: mmseqs2
+
+  # Alphabet fed to the clustering backend:
+  #   protein     — cluster on amino acid sequences. Default and recommended
+  #                 for viral workflows: synonymous substitutions inflate NT
+  #                 divergence by 30–40% with no biological signal, and
+  #                 protein homology is reliable down to ~25–30% identity
+  #                 vs ~50–60% for nucleotide. For segmented input, the
+  #                 marker protein from each segment is concatenated in
+  #                 canonical segments order. For non-segmented input, the
+  #                 marker protein on each sequence is used. The marker is
+  #                 the longest CDS by default, overridable via
+  #                 cluster_protein (this block, non-segmented) or
+  #                 segmented.viruses.<v>.cluster_protein (per segment).
+  #   nucleotide  — cluster on the raw input sequence (the pre-0.6 behaviour).
+  #                 Choose this for genome-level identity targets or when
+  #                 input is non-coding.
+  #   auto        — protein when any sequence has CDS info, else nucleotide.
+  # When alphabet=protein, repseq triggers a one-shot GenBank CDS fetch if
+  # proteins are not already cached (results cached under ncbi_proteins;
+  # shared with protein-annotation QC, so no duplicate round trips). Skipped
+  # under --no-resolve, in which case the run aborts if no proteins are
+  # available — switch to alphabet: nucleotide for offline runs.
+  alphabet: protein
+
+  # Non-segmented marker-protein override. Alias list matched case-
+  # insensitively (substring) against /product. First alias that matches
+  # wins; if no aliases match or the list is empty, the longest CDS is
+  # used. Examples: ["polymerase"], ["RNA-dependent RNA polymerase", "L"].
+  cluster_protein: []
 
   # ---- MMseqs2 backend options (used when backend == mmseqs2) ----
   # easy-linclust: linear-time, scales to very large datasets, but APPROXIMATE

@@ -191,6 +191,40 @@ def test_run_phylogeny_picks_nucleotide_model_for_nt_reps(tmp_path):
     assert seen_is_protein == [False]
 
 
+def test_run_phylogeny_uses_protein_sequence_when_alphabet_protein(tmp_path):
+    """alphabet=protein on NT-typed concat reps: MSA input is AA, model is protein."""
+    reps = [
+        _seq(f"CONCAT|iso{i}", "ACGTACGTACGT", seq_type=SequenceType.NUCLEOTIDE)
+        for i in range(3)
+    ]
+    for i, rep in enumerate(reps):
+        rep.protein_sequence = "M" + ("K" * (10 + i))
+    seen_is_protein: list[bool] = []
+    seen_input_bodies: list[str] = []
+
+    def _mafft(input_fasta, output_fasta, cfg):
+        # Capture what's being aligned.
+        body = "".join(
+            line for line in input_fasta.read_text().splitlines()
+            if not line.startswith(">")
+        )
+        seen_input_bodies.append(body)
+        _stub_mafft_writes_alignment(input_fasta, output_fasta, cfg)
+
+    def _fasttree(msa_fasta, output_newick, cfg, is_protein):
+        seen_is_protein.append(is_protein)
+        output_newick.write_text("(S0001:0.1,(S0002:0.1,S0003:0.1):0.1);\n")
+
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_mafft), \
+         patch("repseq.phylo.pipeline.run_fasttree", side_effect=_fasttree):
+        run_phylogeny(reps, {"clustering": {"alphabet": "protein"}}, tmp_path, "test")
+
+    assert seen_is_protein == [True]
+    # MSA input must come from protein_sequence, not seq.sequence (the NT one).
+    assert all("ACGT" not in body for body in seen_input_bodies)
+    assert all("M" in body and "K" in body for body in seen_input_bodies)
+
+
 def test_run_phylogeny_wraps_mafft_error_as_phyloerror(tmp_path):
     reps = [_seq(f"p{i}", "MK") for i in range(3)]
 

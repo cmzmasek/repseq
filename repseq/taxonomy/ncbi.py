@@ -217,6 +217,7 @@ class NCBITaxonomy:
         self,
         accessions: list[str],
         batch_size: int = _GENBANK_BATCH_SIZE,
+        progress: Optional[Any] = None,
     ) -> dict[str, list[dict]]:
         """Fetch CDS protein annotations for nucleotide accessions.
 
@@ -230,13 +231,14 @@ class NCBITaxonomy:
         segment) extracted from the same GenBank record — read via
         ``fetch_source_metadata_batch`` to avoid a second network round trip.
         """
-        records = self._fetch_genbank_batch(accessions, batch_size)
+        records = self._fetch_genbank_batch(accessions, batch_size, progress=progress)
         return {acc: rec.get("proteins", []) for acc, rec in records.items()}
 
     def fetch_source_metadata_batch(
         self,
         accessions: list[str],
         batch_size: int = _GENBANK_BATCH_SIZE,
+        progress: Optional[Any] = None,
     ) -> dict[str, dict[str, Optional[str]]]:
         """Fetch source-feature qualifiers (isolate, strain, segment).
 
@@ -251,7 +253,7 @@ class NCBITaxonomy:
         store source metadata; for those, all fields come back ``None`` (the
         caller falls back to header parsing).
         """
-        records = self._fetch_genbank_batch(accessions, batch_size)
+        records = self._fetch_genbank_batch(accessions, batch_size, progress=progress)
         empty: dict[str, Optional[str]] = {
             "isolate": None, "strain": None, "segment": None,
         }
@@ -261,6 +263,7 @@ class NCBITaxonomy:
         self,
         accessions: list[str],
         batch_size: int,
+        progress: Optional[Any] = None,
     ) -> dict[str, dict[str, Any]]:
         """Cached-batched GenBank fetch shared by protein and source-metadata APIs.
 
@@ -268,6 +271,12 @@ class NCBITaxonomy:
         ``source`` value may be ``None`` for accessions cached by earlier
         repseq versions that did not capture source qualifiers — callers
         should treat that as "fall back to other means".
+
+        When ``progress`` is callable it is invoked once per batch with the
+        signature ``progress(done_batches, total_batches, batch_size_actual,
+        cached_count)`` so the caller can emit a heartbeat for what is
+        otherwise a many-minute silent network round-trip. The first call
+        carries ``done_batches=0`` and reports the cache hit rate.
         """
         results: dict[str, dict[str, Any]] = {}
         to_fetch: list[str] = []
@@ -280,6 +289,11 @@ class NCBITaxonomy:
                 }
             else:
                 to_fetch.append(acc)
+
+        total_batches = (len(to_fetch) + batch_size - 1) // batch_size
+        cached_count = len(accessions) - len(to_fetch)
+        if callable(progress):
+            progress(0, total_batches, 0, cached_count)
 
         for i in range(0, len(to_fetch), batch_size):
             chunk = to_fetch[i : i + batch_size]
@@ -296,6 +310,9 @@ class NCBITaxonomy:
                 rec = fetched.get(acc, {"proteins": [], "source": None})
                 self._cache.set(_SOURCE_PROTEINS, acc, rec)
                 results[acc] = rec
+
+            if callable(progress):
+                progress(i // batch_size + 1, total_batches, len(chunk), cached_count)
 
         return results
 

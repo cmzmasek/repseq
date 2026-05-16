@@ -21,6 +21,12 @@ def write_results(
     For non-segmented runs: writes a single FASTA file.
     For segmented runs: writes one concatenated FASTA + one FASTA per segment.
 
+    When ``clustering.alphabet=protein`` and any representative carries a
+    populated ``protein_sequence``, an additional
+    ``{prefix}_representatives_protein.fasta`` is emitted alongside the
+    nucleotide outputs (AA concat in segmented mode, AA marker in
+    non-segmented mode). The NT outputs are unchanged.
+
     Returns:
         List of paths to written files.
     """
@@ -40,7 +46,39 @@ def write_results(
         write_fasta(result.representatives, out_path)
         written.append(out_path)
 
+    aa_path = _write_protein_representatives(result, out_dir, prefix)
+    if aa_path is not None:
+        written.append(aa_path)
+
     return written
+
+
+def _write_protein_representatives(
+    result: RunResult,
+    out_dir: Path,
+    prefix: str,
+) -> Optional[Path]:
+    """Write the protein-alphabet representatives (per-isolate AA concat in
+    segmented mode, marker protein in non-segmented mode).
+
+    Returns the written path, or None if no representative has a populated
+    ``protein_sequence`` (i.e. nucleotide-alphabet run, or auto-fallback
+    to nucleotide).
+    """
+    aa_records = [r for r in result.representatives if r.protein_sequence]
+    if not aa_records:
+        return None
+    aa_path = out_dir / f"{prefix}_representatives_protein.fasta"
+    aa_path.parent.mkdir(parents=True, exist_ok=True)
+    line_width = 70
+    with open(aa_path, "w") as fh:
+        for rep in aa_records:
+            safe_id = (rep.id or "").replace("\n", " ").replace("\r", " ")
+            fh.write(f">{safe_id}\n")
+            seq = rep.protein_sequence or ""
+            for i in range(0, len(seq), line_width):
+                fh.write(seq[i : i + line_width] + "\n")
+    return aa_path
 
 
 def _write_segmented(

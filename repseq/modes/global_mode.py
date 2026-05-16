@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Optional
+
+import click
 
 from ..clustering import run_clustering
 from ..clustering.diversity import select_diverse
@@ -36,9 +39,18 @@ class GlobalMode(BaseMode):
         return self._run_count(sequences)
 
     def _run_threshold(self, sequences: list[Sequence]) -> RunResult:
+        click.echo(
+            f"  clustering {len(sequences)} sequences at threshold "
+            f"{self.threshold:.4f} ..."
+        )
+        t0 = time.perf_counter()
         clusters = run_clustering(sequences, self.threshold, self.cfg)
         clusters = apply_representative_selection(clusters, self.cfg)
         representatives = [c.representative for c in clusters]
+        click.echo(
+            f"  → {len(representatives)} rep(s) across {len(clusters)} "
+            f"cluster(s) [{time.perf_counter() - t0:.1f}s]"
+        )
         return RunResult(
             mode="global:threshold",
             representatives=representatives,

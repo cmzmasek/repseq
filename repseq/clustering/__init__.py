@@ -42,7 +42,7 @@ def min_threshold(cfg: dict[str, Any], sequences: list[Sequence]) -> float:
     """
     backend = cfg.get("clustering", {}).get("backend", "mmseqs2")
     if backend == "cdhit":
-        return cdhit.min_threshold(sequences)
+        return cdhit.min_threshold(sequences, cfg)
     return 0.0
 
 

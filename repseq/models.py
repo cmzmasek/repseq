@@ -79,8 +79,16 @@ class Sequence:
     taxonomy: Optional[TaxonomyInfo] = None
 
     # Protein annotations (None = not fetched, [] = fetched but none found).
-    # Each dict has keys: protein_id, product, length.
+    # Each dict has keys: protein_id, product, length, sequence.
     proteins: Optional[list[dict]] = None
+
+    # Amino-acid string fed to the clustering backend when
+    # clustering.alphabet=protein. For non-segmented input this is the
+    # chosen marker protein (longest CDS, or first cluster_protein alias
+    # that matches). For segmented input the concat sequence holds the
+    # in-segment-order concatenation of each segment's marker protein.
+    # Always None when alphabet=nucleotide.
+    protein_sequence: Optional[str] = None
 
     # QC state
     qc_passed: bool = True

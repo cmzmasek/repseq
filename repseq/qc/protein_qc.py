@@ -8,6 +8,7 @@ they are counted toward isolate completeness.
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any, Optional
 
 from ..models import QCReport, Sequence, SequenceSource
@@ -15,6 +16,29 @@ from ..segmented.completeness import identify_segment
 from ..taxonomy.ncbi import NCBITaxonomy
 
 logger = logging.getLogger(__name__)
+
+
+def _stderr_batch_progress(done: int, total: int, _batch_size: int, cached: int) -> None:
+    """Emit a single-line stderr heartbeat each time a GenBank batch lands.
+
+    Prints the cache hit count on the first call (done=0), then ticks once
+    per fetched batch. Plain stderr (not tqdm) because batches are slow
+    and few, so a single status line per batch is the right granularity.
+    """
+    if done == 0:
+        if total == 0:
+            print(
+                f"  [proteins] all {cached} accession(s) cached — no fetch needed.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"  [proteins] {cached} cached, fetching {total} batch(es) of "
+                f"up to 200 accession(s) from NCBI ...",
+                file=sys.stderr,
+            )
+        return
+    print(f"  [proteins] batch {done}/{total} done.", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +64,9 @@ def attach_proteins(sequences: list[Sequence], ncbi: NCBITaxonomy) -> None:
     if not accessions:
         return
 
-    proteins_by_acc = ncbi.fetch_proteins_batch(accessions)
+    proteins_by_acc = ncbi.fetch_proteins_batch(
+        accessions, progress=_stderr_batch_progress,
+    )
     for acc, proteins in proteins_by_acc.items():
         for seq in seq_by_acc.get(acc, []):
             seq.proteins = proteins

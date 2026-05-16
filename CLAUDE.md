@@ -33,6 +33,7 @@ repseq/
 │   ├── __init__.py         ← `run_clustering` dispatcher + `min_threshold`
 │   ├── mmseqs2.py          ← shells out to `mmseqs`
 │   ├── cdhit.py            ← shells out to `cd-hit` / `cd-hit-est`
+│   ├── marker.py           ← `select_marker_protein` + `populate_protein_sequences`
 │   └── diversity.py        ← MaxMin selection (alignment-free, k-mer Jaccard)
 ├── representative/selector.py ← RefSeq > reviewed > longest priority
 ├── modes/                  ← one file per selection mode, all extend BaseMode
@@ -72,21 +73,43 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
    protein QC via `fetch_source_metadata_batch`, so a run that also does
    protein QC pays one efetch round trip, not two. UniProt sequences and
    sequences without an accession are skipped — they fall through to the
-   header-regex parse in step 6. The toggle exists so a user who would
+   header-regex parse in step 7. The toggle exists so a user who would
    rather not depend on NCBI lookups can revert to the pre-v0.6 behaviour.
-6. If `segmented.enabled`, `_handle_segmented` runs `filter_complete_isolates`
+6. `_setup_protein_alphabet` reads `clustering.alphabet` (default `protein`):
+   for `protein` it auto-triggers `attach_proteins` if any sequence's
+   `proteins` is `None` (one-shot GenBank CDS fetch, same `ncbi_proteins`
+   cache as protein-QC), then — for *non-segmented* runs — selects each
+   sequence's marker via `clustering.marker.select_marker_protein`
+   (longest CDS, or first `clustering.cluster_protein` alias that matches
+   `/product` as a case-insensitive substring) and stores its AA on
+   `seq.protein_sequence`. Sequences with no viable marker are dropped
+   under `removed_proteins`. For segmented runs this step only fetches
+   proteins — the per-isolate AA concat is built in step 7. `auto` falls
+   back to `nucleotide` if no proteins are fetchable; pure `protein` with
+   `--no-resolve` aborts at startup. No-op when `alphabet=nucleotide`.
+7. If `segmented.enabled`, `_handle_segmented` runs `filter_complete_isolates`
    then `build_concatenated_sequences`, replacing the sequence list with one
    concatenated sequence per complete isolate. `filter_complete_isolates`
    prefers `seq.isolate_id` / `seq.segment` (populated in step 5) and only
    falls back to `isolate_regex` and the segment alias/header scan when
-   those fields are unset. Exact-duplicate removal is then applied here,
+   those fields are unset. When `alphabet=protein`,
+   `build_concatenated_sequences` also picks each segment's marker protein
+   (per-segment `cluster_protein` aliases, else longest CDS) and stores the
+   in-segments-order concat on the concat's `protein_sequence`; isolates
+   whose marker is missing on any segment are dropped and counted under
+   `removed_incomplete_isolates`. Exact-duplicate removal is then applied
    on the *concatenated* sequences (not the segment pool — a conserved
    segment shared between two distinct isolates must not knock either out
    as incomplete); de-duplicated isolates are also pruned from
    `complete_isolates` so the per-segment output files stay consistent.
-7. The chosen mode runs (`modes/<mode>.py`), returning a `RunResult` with
-   `representatives` + `clusters`.
-8. `write_results` writes the FASTA(s); `write_all_reports` writes the
+8. The chosen mode runs (`modes/<mode>.py`), returning a `RunResult` with
+   `representatives` + `clusters`. Clustering backends honour
+   `clustering.alphabet`: with `protein`, `_write_id_fasta` writes
+   `seq.protein_sequence` (the marker / AA concat) as the FASTA body and
+   the cd-hit dispatcher forces `cd-hit` (not `cd-hit-est`) regardless of
+   `seq_type`. Cluster objects still carry the original NT-bearing
+   `Sequence`, so rep selection and downstream output are unchanged.
+9. `write_results` writes the FASTA(s); `write_all_reports` writes the
    plain-text/TSV reports — including `{prefix}_group_counts.tsv`
    (one row per stratification group: `grouping, group, n_before,
    n_after, clustered, cutoff` — populated from `RunResult.group_stats`,
@@ -98,25 +121,33 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
    the resolver lineage map and commonly blank for viruses) and
    `{prefix}_proteins.fasta` (amino-acid sequences for all proteins of
    the selected representatives). The protein FASTA is reconstructed
-   from the same cached GenBank records — no extra network calls.
-9. If `--plot` is passed, `viz.clustering_plot.write_clustering_plot`
-   embeds the clustered sequences with UMAP on k-mer Jaccard distance
-   and writes `{prefix}_clustering.png`. Cost-bounded by a default
-   2000-point subsample (representatives always kept); skipped when
-   the run produced no clusters. Requires the `[viz]` extras
-   (`matplotlib` + `umap-learn`) — `ImportError` is surfaced gracefully.
-10. If `--phylo` is passed, `phylo.run_phylogeny` builds an MSA (MAFFT
-   `--auto`) and an approximate-ML tree (FastTree) over the
-   representatives. Auto-picks the substitution model from the rep
-   alphabet (FastTree `-nt -gtr` for nucleotide; default JTT for
-   protein). Every rep gets a deterministic short id `S0001…SNNNN`
-   for the MAFFT/FastTree pipeline (long names, whitespace, and pipes
-   break many phylo tools); the final phyloXML restores each terminal
-   clade's name to `seq.id` via `Bio.Phylo`, while the intermediate
-   Newick keeps the short ids. Outputs: `{prefix}_msa.fasta`,
-   `{prefix}_tree.nwk`, `{prefix}_tree.xml`, `{prefix}_tree_id_map.tsv`.
-   Skipped with a stderr warning if `<3` reps or if MAFFT / FastTree
-   are missing or fail (mirrors `--plot` failure handling).
+   from the same cached GenBank records — no extra network calls. When
+   any representative carries a populated `protein_sequence` (i.e.
+   `alphabet=protein` actually fired), an additional
+   `{prefix}_representatives_protein.fasta` is written, holding the AA
+   strings that were fed into the clustering step (per-isolate marker
+   concat in segmented mode, per-rep marker in non-segmented mode).
+10. If `--plot` is passed, `viz.clustering_plot.write_clustering_plot`
+    embeds the clustered sequences with UMAP on k-mer Jaccard distance
+    and writes `{prefix}_clustering.png`. Cost-bounded by a default
+    2000-point subsample (representatives always kept); skipped when
+    the run produced no clusters. Requires the `[viz]` extras
+    (`matplotlib` + `umap-learn`) — `ImportError` is surfaced gracefully.
+11. If `--phylo` is passed, `phylo.run_phylogeny` builds an MSA (MAFFT
+    `--auto`) and an approximate-ML tree (FastTree) over the
+    representatives. When `clustering.alphabet=protein` and every rep
+    carries a `protein_sequence`, the MSA/tree are built on the AA
+    strings (FastTree's default JTT model); otherwise the alphabet
+    comes from the rep `seq_type` (FastTree `-nt -gtr` for nucleotide,
+    JTT for protein). Single `{prefix}_msa.fasta` either way. Every
+    rep gets a deterministic short id `S0001…SNNNN` for the
+    MAFFT/FastTree pipeline (long names, whitespace, and pipes break
+    many phylo tools); the final phyloXML restores each terminal
+    clade's name to `seq.id` via `Bio.Phylo`, while the intermediate
+    Newick keeps the short ids. Outputs: `{prefix}_msa.fasta`,
+    `{prefix}_tree.nwk`, `{prefix}_tree.xml`, `{prefix}_tree_id_map.tsv`.
+    Skipped with a stderr warning if `<3` reps or if MAFFT / FastTree
+    are missing or fail (mirrors `--plot` failure handling).
 
 ## Invariants worth knowing
 
@@ -149,6 +180,20 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
   `clustering.min_threshold(cfg, sequences)` returns the active floor;
   `_binary_search_threshold` clamps `lo` to it so the search never asks
   a backend for a value it would refuse.
+- **Clustering alphabet**: `cfg["clustering"]["alphabet"]` selects what's
+  fed to the backend — `"protein"` (default, since v0.6.0), `"nucleotide"`,
+  or `"auto"`. Backends read `seq.protein_sequence` instead of
+  `seq.sequence` when alphabet=`protein`; the cd-hit dispatcher likewise
+  forces `cd-hit` (with the 0.40 floor) over `cd-hit-est` regardless of
+  `seq_type` because the concat sequence is NT-typed even when its
+  `protein_sequence` is set. `seq.protein_sequence` is populated by
+  `_setup_protein_alphabet` (non-segmented) or `build_concatenated_sequences`
+  (segmented); both use `clustering.marker.select_marker_protein` (longest
+  CDS by default, or first matching `cluster_protein` alias against
+  `/product`, case-insensitive substring). Sequences/isolates without a
+  viable marker are dropped, not chimerised with NT. The clustering output
+  filenames are unchanged; an extra `{prefix}_representatives_protein.fasta`
+  carries the AA strings when alphabet=protein actually fired.
 
 ## Modes
 
@@ -216,11 +261,69 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
   `tests/test_resolver.py`).
 - New modes: subclass `BaseMode`, register a new click subcommand in
   `cli.py`, and follow the existing `_load_sequences → _resolve_metadata
-  → _run_qc → _handle_segmented → mode.run → _write_output` flow.
+  → _run_qc → _run_protein_qc → _setup_protein_alphabet →
+  _populate_genbank_isolate_segment → _handle_segmented → mode.run →
+  _write_output` flow.
 - Config additions: extend `DEFAULTS` and (if validation matters) add a
   check in `validate_config`. Document in `config/default_config.yaml`.
 
 ## Status
+
+`v0.6.0` switches **clustering to amino-acid sequences by default**.
+The new `clustering.alphabet` knob (`protein` default, `nucleotide`,
+or `auto`) picks what's fed to MMseqs2 / cd-hit. The motivation is the
+v0.5.x Orthobunyavirus run that drove `--min-seq-id` to 0.30 looking
+for a target cluster count: synonymous substitutions inflate NT
+divergence by 30–40% with no biological signal, the binary search
+drifted into mmseqs2's sensitivity dead zone, and the reported cutoff
+ceased to mean anything. Protein clustering avoids both problems —
+reliable homology to ~25–30% identity, biologically meaningful
+thresholds. The new `clustering.marker.select_marker_protein` picks
+the marker per sequence (longest CDS by default; first matching
+`cluster_protein` alias against `/product` as a case-insensitive
+substring otherwise — alias order encodes preference). For segmented
+viruses, each segment contributes its own marker; the per-isolate
+concat lives on `concat.protein_sequence` and is what the clustering
+backend sees. Isolates whose marker is missing on any segment are
+dropped under `removed_incomplete_isolates`; non-segmented sequences
+without a viable marker are dropped under `removed_proteins`. The
+backends thread the alphabet through `_write_id_fasta`; the cd-hit
+dispatcher's `_is_protein` consults `cfg["clustering"]["alphabet"]`
+first, so the protein binary (`cd-hit`, 0.40 floor) is used even on
+NT-typed CONCAT records carrying a `protein_sequence`. The new
+`_setup_protein_alphabet` step auto-triggers `attach_proteins` if QC
+didn't already (one-shot GenBank CDS fetch, same `ncbi_proteins` cache);
+`--no-resolve` + `alphabet=protein` aborts at startup, `alphabet=auto`
+silently falls back to `nucleotide`. Output gains
+`{prefix}_representatives_protein.fasta` (AA strings actually fed to
+clustering) alongside the existing NT outputs; `--phylo` builds the
+MSA / tree on the AA strings when alphabet=protein actually fired
+(single `_msa.fasta`, FastTree JTT). 37 new tests cover the marker
+selector (8 cases: empty inputs, longest-CDS default, alias-order
+preference, case-insensitive substring match, alias fallback,
+translation-missing skip, all-translations-missing → None, alias-tie
+length break), non-segmented `populate_protein_sequences` (3:
+populates field, alias override, drops-no-marker sequences), segmented
+`build_concatenated_sequences` protein path (4: longest-CDS-per-segment
+fallback, per-segment alias selection, missing-marker drop, no-alias-
+match fallback), `_setup_protein_alphabet` (6: nucleotide no-op,
+auto-fetch when proteins missing, `--no-resolve` abort, auto fallback
+to nucleotide, segmented skips per-sequence populate, `_resolve_alphabet`
+auto branches), backend alphabet threading (`_write_id_fasta`
+protein-body and missing-protein error; cd-hit `_is_protein` honours
+alphabet override; cd-hit `min_threshold` floor follows override),
+config validation (5: default alphabet=protein, nucleotide/auto
+accepted, unknown rejected, non-list `cluster_protein` rejected,
+per-segment `cluster_protein` accepted + unknown-segment + empty-alias
+rejected), the writer's AA output (2: emitted when reps carry it,
+skipped otherwise), and the phylo AA path (1: AA bodies + protein
+model when alphabet=protein on NT-typed reps). 474 offline tests total.
+
+Cache compatibility: v0.5.9+ `ncbi_proteins` cache entries already
+carry `proteins[i]["sequence"]` (the GenBank `/translation`), so
+existing runs benefit immediately with no refetch. Older entries
+without translations return `None` from the marker selector and the
+isolate is dropped — clear the `ncbi_proteins` cache to refresh.
 
 `v0.5.10` makes segmented mode prefer **GenBank source-feature
 qualifiers** (`/isolate`, `/strain`, `/segment`) over the
