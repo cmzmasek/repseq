@@ -369,6 +369,27 @@ def _handle_segmented(sequences, cfg, qc_report):
             complete_isolates, virus_cfg["segments"], segment_lengths, qc_report
         )
         kept = [seq for segs in complete_isolates.values() for seq in segs]
+        per_seg = qc_report.removed_length_by_segment
+        if per_seg:
+            total = sum(c["too_short"] + c["too_long"] for c in per_seg.values())
+            click.echo(f"  Segment-length filter: dropped {total} isolate(s)")
+            for seg_name in virus_cfg["segments"]:
+                counts = per_seg.get(seg_name)
+                if not counts:
+                    continue
+                bounds = segment_lengths.get(seg_name) or {}
+                mn = bounds.get("min")
+                mx = bounds.get("max")
+                if counts["too_short"]:
+                    bound = f"<{mn}" if mn is not None else ""
+                    click.echo(
+                        f"    {seg_name} too short {bound}: {counts['too_short']}"
+                    )
+                if counts["too_long"]:
+                    bound = f">{mx}" if mx is not None else ""
+                    click.echo(
+                        f"    {seg_name} too long  {bound}: {counts['too_long']}"
+                    )
     click.echo(f"  Complete isolates : {len(complete_isolates)}")
     click.echo(f"  Individual seqs   : {len(kept)}")
     alphabet = cfg.get("clustering", {}).get("alphabet", "protein")

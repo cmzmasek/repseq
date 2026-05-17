@@ -370,6 +370,106 @@ def test_segment_length_filter_partial_bounds_and_mixed_isolates(make_seq):
     assert report.removed_length == 2  # two seqs from the bad isolate
 
 
+def test_segment_length_filter_per_segment_counter_too_short(make_seq):
+    seg_names = ["HA", "NA"]
+    iso = {
+        "i1": [make_seq("a", "A" * 500,  segment="HA"),
+               make_seq("b", "A" * 1400, segment="NA")],
+        "i2": [make_seq("c", "A" * 400,  segment="HA"),
+               make_seq("d", "A" * 1400, segment="NA")],
+    }
+    bounds = {"HA": {"min": 1600}}
+    report = QCReport()
+    segment_length_filter(iso, seg_names, bounds, report)
+    # Counted in isolates, not segments: 2 isolates lost their HA.
+    assert report.removed_length_by_segment == {
+        "HA": {"too_short": 2, "too_long": 0}
+    }
+
+
+def test_segment_length_filter_per_segment_counter_too_long(make_seq):
+    seg_names = ["HA", "NA"]
+    iso = {
+        "i1": [make_seq("a", "A" * 2000, segment="HA"),
+               make_seq("b", "A" * 1400, segment="NA")],
+    }
+    bounds = {"HA": {"max": 1800}}
+    report = QCReport()
+    segment_length_filter(iso, seg_names, bounds, report)
+    assert report.removed_length_by_segment == {
+        "HA": {"too_short": 0, "too_long": 1}
+    }
+
+
+def test_segment_length_filter_per_segment_counter_mixed_segments(make_seq):
+    seg_names = ["HA", "NA"]
+    iso = {
+        "i1": [make_seq("a", "A" * 500,  segment="HA"),
+               make_seq("b", "A" * 1400, segment="NA")],
+        "i2": [make_seq("c", "A" * 1700, segment="HA"),
+               make_seq("d", "A" * 2000, segment="NA")],
+    }
+    bounds = {"HA": {"min": 1600}, "NA": {"max": 1500}}
+    report = QCReport()
+    segment_length_filter(iso, seg_names, bounds, report)
+    assert report.removed_length_by_segment == {
+        "HA": {"too_short": 1, "too_long": 0},
+        "NA": {"too_short": 0, "too_long": 1},
+    }
+
+
+def test_segment_length_filter_first_failing_segment_wins(make_seq):
+    # When an isolate has multiple bad segments, only the first one
+    # encountered (in segment_names order) is counted — the iteration
+    # short-circuits via ``break``, which keeps the qc_removed reason
+    # and the per-segment counter consistent.
+    seg_names = ["HA", "NA"]
+    iso = {
+        "i1": [make_seq("a", "A" * 500,  segment="HA"),
+               make_seq("b", "A" * 100,  segment="NA")],
+    }
+    bounds = {"HA": {"min": 1600}, "NA": {"min": 1000}}
+    report = QCReport()
+    segment_length_filter(iso, seg_names, bounds, report)
+    assert report.removed_length_by_segment == {
+        "HA": {"too_short": 1, "too_long": 0}
+    }
+
+
+def test_segment_length_filter_no_bounds_keeps_counter_empty(make_seq):
+    seg_names = ["HA", "NA"]
+    iso = {"i1": [make_seq("a", "A" * 1700, segment="HA"),
+                  make_seq("b", "A" * 1400, segment="NA")]}
+    bounds = {}
+    report = QCReport()
+    result = segment_length_filter(iso, seg_names, bounds, report)
+    assert "i1" in result
+    assert report.removed_length_by_segment == {}
+
+
+def test_qc_summary_per_segment_breakdown_replaces_skipped_line():
+    # When the segmented length filter actually fired, the summary must
+    # show the per-segment breakdown, not the misleading "skipped" line.
+    report = QCReport(length_filter_skipped=True)
+    report.removed_length_by_segment = {
+        "L": {"too_short": 257, "too_long": 0},
+        "M": {"too_short": 28, "too_long": 6},
+    }
+    out = report.summary()
+    assert "skipped (segmented mode)" not in out
+    assert "Removed (length)    : 291 isolate(s) (per-segment, isolate-level)" in out
+    assert "L too short  : 257" in out
+    assert "M too short  : 28" in out
+    assert "M too long   : 6" in out
+
+
+def test_qc_summary_keeps_skipped_when_no_segment_bounds_configured():
+    # No per-segment counter populated -> fall back to the "skipped" line.
+    report = QCReport(length_filter_skipped=True)
+    out = report.summary()
+    assert "Removed (length)    : skipped (segmented mode)" in out
+
+
 def test_build_concatenated_sequences_one_per_isolate(make_seq):
     iso_map = {
         "ISO1": [make_seq("a1", "AAA"), make_seq("a2", "TTT")],

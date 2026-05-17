@@ -329,6 +329,8 @@ def segment_length_filter(
     kept: dict[str, list[Sequence]] = {}
     for isolate_key, segs in complete_isolates.items():
         fail_reason: Optional[str] = None
+        fail_segment: Optional[str] = None
+        fail_direction: Optional[str] = None
         for seg_name, seq in zip(segment_names, segs):
             bounds = segment_lengths.get(seg_name)
             if not bounds:
@@ -337,11 +339,19 @@ def segment_length_filter(
             mx = bounds.get("max")
             if mn is not None and seq.length < mn:
                 fail_reason = f"segment_length:{seg_name}:{seq.length}<{mn}"
+                fail_segment = seg_name
+                fail_direction = "too_short"
                 break
             if mx is not None and seq.length > mx:
                 fail_reason = f"segment_length:{seg_name}:{seq.length}>{mx}"
+                fail_segment = seg_name
+                fail_direction = "too_long"
                 break
         if fail_reason:
+            seg_counts = report.removed_length_by_segment.setdefault(
+                fail_segment, {"too_short": 0, "too_long": 0}
+            )
+            seg_counts[fail_direction] += 1
             for seq in segs:
                 seq.qc_passed = False
                 seq.qc_fail_reason = fail_reason

@@ -182,6 +182,13 @@ class QCReport:
     # mix of segments of very different lengths; per-segment bounds are
     # applied later via segmented.viruses.<v>.segment_lengths instead).
     length_filter_skipped: bool = False
+    # Per-segment isolate drops from the segmented length filter. Shape:
+    # {"L": {"too_short": 257, "too_long": 0}, "M": {...}, ...}. Counted
+    # in *isolates*, not segments — the filter is isolate-level (one bad
+    # segment drops the whole isolate), so "257 isolates lost their L"
+    # is the actionable number. This is the only ``removed_*`` field in
+    # isolate units; all the others count segments.
+    removed_length_by_segment: dict = field(default_factory=dict)
     # Exact-duplicate removal is likewise skipped on the segment pool in
     # segmented mode: a segment can be byte-identical between two otherwise
     # distinct isolates, and dropping it would leave one isolate incomplete.
@@ -194,11 +201,30 @@ class QCReport:
         self.details.append({"id": seq_id, "reason": reason})
 
     def summary(self) -> str:
-        length_line = (
-            "  Removed (length)    : skipped (segmented mode)"
-            if self.length_filter_skipped
-            else f"  Removed (length)    : {self.removed_length}"
-        )
+        length_lines: list[str]
+        if self.removed_length_by_segment:
+            total = sum(
+                c["too_short"] + c["too_long"]
+                for c in self.removed_length_by_segment.values()
+            )
+            length_lines = [
+                f"  Removed (length)    : {total} isolate(s) "
+                "(per-segment, isolate-level)"
+            ]
+            for seg_name in sorted(self.removed_length_by_segment.keys()):
+                counts = self.removed_length_by_segment[seg_name]
+                if counts["too_short"]:
+                    length_lines.append(
+                        f"    {seg_name} too short  : {counts['too_short']}"
+                    )
+                if counts["too_long"]:
+                    length_lines.append(
+                        f"    {seg_name} too long   : {counts['too_long']}"
+                    )
+        elif self.length_filter_skipped:
+            length_lines = ["  Removed (length)    : skipped (segmented mode)"]
+        else:
+            length_lines = [f"  Removed (length)    : {self.removed_length}"]
         dup_line = (
             f"  Removed (duplicates): {self.removed_duplicates} "
             "(applied to concatenated isolates)"
@@ -210,7 +236,7 @@ class QCReport:
             f"  Input sequences     : {self.total_input}",
             f"  Passed QC           : {self.passed}",
             dup_line,
-            length_line,
+            *length_lines,
             f"  Removed (ambiguous) : {self.removed_ambiguous}",
             f"  Removed (annotation): {self.removed_annotation}",
             f"  Removed (proteins)  : {self.removed_proteins}",
