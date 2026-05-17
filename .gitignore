@@ -31,6 +31,10 @@ htmlcov/
 # Claude Code local config (not project config)
 .claude/
 
+# Local-only Claude-agent guidance (no longer published to GitHub)
+CLAUDE.md
+CLAUDE.md~
+
 # macOS
 .DS_Store
 
