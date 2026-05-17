@@ -58,6 +58,48 @@ def test_write_short_id_fasta_uses_short_id_as_sole_header(tmp_path):
     assert header_tokens == ["S0001", "S0002"]
 
 
+def test_write_short_id_fasta_appends_label_as_description(tmp_path):
+    """When `labels` is provided, the FASTA header becomes
+    `>SXXXX <label>` — the short id stays the safe first token (so
+    MAFFT/IQ-TREE/FastTree key on it as before), and the label rides
+    along as the description."""
+    reps = [_seq("alpha", "MKL"), _seq("beta", "MKL")]
+    id_map = _build_id_map(reps)
+    out = tmp_path / "input.fasta"
+    _write_short_id_fasta(
+        reps, id_map, out,
+        labels={"S0001": "Foo virus | isolate ISO1", "S0002": ""},
+    )
+
+    headers = [
+        line.rstrip("\n")
+        for line in out.read_text().splitlines()
+        if line.startswith(">")
+    ]
+    assert headers == [
+        ">S0001 Foo virus | isolate ISO1",
+        # Empty label → no trailing space.
+        ">S0002",
+    ]
+
+
+def test_write_short_id_fasta_sanitises_newlines_in_label(tmp_path):
+    """A label containing a newline would split the FASTA header
+    across lines, breaking the file. The writer must collapse
+    `\\n`/`\\r`/`\\t` to spaces."""
+    reps = [_seq("alpha", "MKL")]
+    id_map = _build_id_map(reps)
+    out = tmp_path / "input.fasta"
+    _write_short_id_fasta(
+        reps, id_map, out,
+        labels={"S0001": "Foo\nbar\rbaz\tqux"},
+    )
+    text = out.read_text()
+    # Only one header line.
+    assert text.count(">") == 1
+    assert ">S0001 Foo bar baz qux" in text
+
+
 def test_write_id_map_writes_round_trip_tsv(tmp_path):
     id_map = {"S0001": "alpha", "S0002": "CONCAT|iso-1"}
     out = tmp_path / "id_map.tsv"

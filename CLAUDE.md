@@ -234,9 +234,24 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
      reasons; only the column labels were harmonised.
    - `{prefix}_tree_id_map.tsv` (only when `--phylo` ran):
      `short_id, accession`.
-   - `{prefix}_proteins.fasta` (amino-acid sequences for all proteins
-     of the selected representatives). Reconstructed from the same
-     cached GenBank records — no extra network calls.
+   - `{prefix}_representative_isolate_proteins.fasta` (segmented mode)
+     or `{prefix}_representative_sequence_proteins.fasta`
+     (non-segmented mode): amino-acid sequences for all proteins of
+     the selected representatives. Reconstructed from the same cached
+     GenBank records — no extra network calls. Filename pattern is
+     parallel to the rep TSV split and the
+     `_representative_isolate_proteins.tsv` companion. Headers carry
+     NCBI bracket tags in this order: `[organism=...]
+     [ncbi_taxon_id=...]` + the 9-rank `_TAX_RANKS` ladder
+     (`[species=...] [subgenus=...] [genus=...] [subfamily=...]
+     [family=...] [suborder=...] [order=...] [subclass=...]
+     [class=...]`) + `[isolate=...] [segment=...] [host=...]
+     [country=...] [collection_date=...] [length=...]
+     [parent={parent_accession}]`. Empty fields skipped — sub-ranks
+     that are blank for viruses naturally drop out. `_fasta_safe`
+     scrubs `[`/`]`/`\r`/`\n` from values so a metadata field with
+     bracket characters (e.g. organism = `"Foo virus [strain X]"`)
+     can't break the tag syntax.
    - `{prefix}_representatives_protein.fasta` (only when any
      representative carries a populated `protein_sequence`, i.e.
      `alphabet=protein` actually fired): the AA strings that were fed
@@ -290,7 +305,14 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
     (keeps the tree) when the MSA has 3 reps. Outputs:
     `{prefix}_msa.fasta`, `{prefix}_tree.nwk`, `{prefix}_tree.xml`,
     `{prefix}_tree_id_map.tsv`, and (IQ-TREE only)
-    `{prefix}_iqtree_summary.txt`. Skipped with a stderr warning if
+    `{prefix}_iqtree_summary.txt`. MSA headers are
+    `>SXXXX <formatted-label>` — the short id stays the safe first
+    whitespace-separated token so phylo binaries can't lose track of
+    identity, and the label (built via `pick_format_string` +
+    `format_leaf_label` + `labeling_options` from `phylo.labeling`) is
+    appended as the FASTA description so AliView / Jalview / MEGA show
+    recognisable names. Newlines / carriage returns / tabs in the
+    label are collapsed to spaces to keep the header on one line. Skipped with a stderr warning if
     `<3` reps or if any of the binaries are missing or fail (mirrors
     `--plot` failure handling).
 
@@ -413,6 +435,24 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
   check in `validate_config`. Document in `config/default_config.yaml`.
 
 ## Status
+
+`v0.8.1` extends the v0.8.0 output-schema work to the FASTA outputs.
+The proteins FASTA splits by mode (segmented:
+`_representative_isolate_proteins.fasta`; non-segmented:
+`_representative_sequence_proteins.fasta`) — parallel to the rep TSV
+split and visually distinct from the existing
+`_representatives_protein.fasta` clustering-input file. Headers gain
+NCBI bracket tags for organism, the full 9-rank `_TAX_RANKS`
+taxonomic lineage, `ncbi_taxon_id`, host, country, collection_date,
+and protein length — all skip-empty so sparse-metadata records stay
+short. A new `_fasta_safe` helper scrubs `[`/`]`/`\r`/`\n` from
+metadata values so bracket-containing organism names (e.g.
+`"Foo virus [strain X]"`) can't break the tag syntax. MSA headers
+go from bare `>S0001` to `>S0001 <formatted-label>`: the short id
+stays the safe first whitespace token (phylo binaries unchanged),
+the description carries the same `phylo.labeling.format` label that
+drives the tree leaves, so AliView / Jalview / MEGA show
+recognisable names.
 
 `v0.8.0` is a TSV output-schema overhaul. Column names are now
 harmonised across the six TSVs the program writes — the canonical

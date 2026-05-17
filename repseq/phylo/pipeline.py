@@ -50,6 +50,7 @@ from . import iqtree as iqtree_mod
 from . import mafft as mafft_mod
 from .fasttree import FastTreeError, run_fasttree
 from .iqtree import IQTreeError, run_iqtree
+from .labels import format_leaf_label, labeling_options, pick_format_string
 from .lca import (
     annotate_internal_nodes,
     keep_deepest_labels,
@@ -131,20 +132,35 @@ def _write_short_id_fasta(
     id_map: dict[str, str],
     path: Path,
     use_protein: bool = False,
+    labels: Optional[dict[str, str]] = None,
 ) -> None:
-    """Write a FASTA whose header is the short id and nothing else.
+    """Write a FASTA whose primary header token is the short id.
 
-    Mirrors ``clustering.mmseqs2._write_id_fasta`` — sole-token headers
-    so the alignment/tree tools cannot lose track of identity at any
-    whitespace or pipe boundary. With ``use_protein=True`` the body comes
-    from ``rep.protein_sequence`` (the marker / per-isolate AA concat).
+    The short id is the first (and possibly only) whitespace-separated
+    token so phylo binaries (MAFFT, FastTree, IQ-TREE) — which all key
+    on the first token — can never confuse identity at a special-char
+    or whitespace boundary. When ``labels`` carries a non-empty entry
+    for a short id, that label is appended as the FASTA *description*
+    (after a single space); MAFFT preserves the description verbatim
+    into the output MSA, where it's visible in alignment viewers like
+    AliView / Jalview / MEGA but ignored by tree-builders. With
+    ``use_protein=True`` the body comes from ``rep.protein_sequence``
+    (the marker / per-isolate AA concat).
     """
     reverse = {v: k for k, v in id_map.items()}
     path.parent.mkdir(parents=True, exist_ok=True)
+    labels = labels or {}
     with open(path, "w") as fh:
         for rep in reps:
             short = reverse[rep.id]
-            fh.write(f">{short}\n")
+            # Newlines/carriage returns in the label would split the
+            # header across lines, breaking the FASTA. Tabs are fine in
+            # a FASTA description but normalise to a space for legibility.
+            raw_label = labels.get(short, "") or ""
+            label = raw_label.replace("\n", " ").replace("\r", " ") \
+                             .replace("\t", " ").strip()
+            header = f">{short} {label}" if label else f">{short}"
+            fh.write(header + "\n")
             seq = (rep.protein_sequence if use_protein else rep.sequence) or ""
             for i in range(0, len(seq), 70):
                 fh.write(seq[i:i + 70] + "\n")
@@ -212,7 +228,23 @@ def run_phylogeny(
     id_map_path = out_dir / f"{prefix}_tree_id_map.tsv"
     iqtree_summary_path = out_dir / f"{prefix}_iqtree_summary.txt"
 
-    _write_short_id_fasta(representatives, id_map, input_fasta, use_protein=use_protein)
+    # Build a per-rep description label using the same labeling format
+    # that drives the tree leaves. This lands as the FASTA description
+    # (after the short-id primary token), so AliView/Jalview/MEGA show
+    # recognisable names while phylo binaries keep using the safe
+    # short id.
+    segmented = any(r.id.startswith("CONCAT|") for r in representatives)
+    fmt = pick_format_string(cfg, segmented=segmented)
+    opts = labeling_options(cfg)
+    short_ids = list(id_map.keys())  # insertion-ordered, matches reps
+    labels = {
+        short: format_leaf_label(rep, fmt, **opts)
+        for short, rep in zip(short_ids, representatives)
+    }
+    _write_short_id_fasta(
+        representatives, id_map, input_fasta,
+        use_protein=use_protein, labels=labels,
+    )
     _write_id_map(id_map, id_map_path)
 
     try:

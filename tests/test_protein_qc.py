@@ -651,6 +651,127 @@ def test_write_proteins_fasta_wraps_at_70_chars(tmp_path: Path, make_seq):
     assert all(len(ln) <= 70 for ln in body_lines)
 
 
+def test_write_proteins_fasta_emits_enriched_header(tmp_path: Path, make_seq):
+    """Header tag set: organism, isolate, segment, host, country,
+    collection_date, length, parent. Tag order matches the writer's
+    spec. Empty fields are skipped (host=None here)."""
+    s = make_seq(
+        "s1", "ACGT", segment="HA", accession="NC_001.1", isolate_id="ISO1",
+        organism="Foo virus", country="Hong Kong", collection_date="1997",
+    )
+    s.proteins = [{
+        "protein_id": "YP_001", "product": "hemagglutinin",
+        "length": 566, "sequence": "MK" * 50,
+    }]
+    result = RunResult(mode="x", representatives=[
+        make_seq("c", "X", accession="ISO1", isolate_id="ISO1"),
+    ], clusters=[])
+    # Override id so the writer treats it as the CONCAT for ISO1.
+    result.representatives[0].id = "CONCAT|ISO1"
+
+    out = tmp_path / "proteins.fasta"
+    write_proteins_fasta(result, {"ISO1": [s]}, out)
+    header = out.read_text().splitlines()[0]
+
+    # New tags present.
+    assert "[organism=Foo virus]" in header
+    assert "[country=Hong Kong]" in header
+    assert "[collection_date=1997]" in header
+    assert "[length=566]" in header
+    # Existing tags still present.
+    assert "[isolate=ISO1]" in header
+    assert "[segment=HA]" in header
+    assert "[parent=NC_001.1]" in header
+    # Empty field skipped (host was never set).
+    assert "[host=" not in header
+    # Order: organism before isolate; length before parent.
+    assert header.index("[organism=") < header.index("[isolate=")
+    assert header.index("[length=") < header.index("[parent=")
+
+
+def test_write_proteins_fasta_emits_lineage_tags(tmp_path: Path, make_seq):
+    """Taxonomy ranks populated on parent_seq.taxonomy must appear as
+    `[species=...] [genus=...] [family=...]` etc. in the header, using
+    the same 9-rank `_TAX_RANKS` ladder as the TSVs. Sub-ranks not
+    present in the lineage are skipped via the empty-skip rule.
+    `ncbi_taxon_id` is also emitted when taxid is set."""
+    tax = TaxonomyInfo(
+        taxid=11320,
+        species="Influenza A virus",
+        genus="Alphainfluenzavirus",
+        family="Orthomyxoviridae",
+        order="Articulavirales",
+        class_="Insthoviricetes",
+        lineage={
+            "species": "Influenza A virus",
+            "genus": "Alphainfluenzavirus",
+            "family": "Orthomyxoviridae",
+            "order": "Articulavirales",
+            "class": "Insthoviricetes",
+        },
+    )
+    s = make_seq(
+        "s1", "ACGT", segment="HA", accession="NC_001.1",
+        isolate_id="ISO1", organism="Influenza A virus",
+        taxonomy=tax,
+    )
+    s.proteins = [{
+        "protein_id": "YP_001", "product": "hemagglutinin",
+        "length": 566, "sequence": "MK" * 50,
+    }]
+    rep = make_seq("c", "X", accession="ISO1", isolate_id="ISO1")
+    rep.id = "CONCAT|ISO1"
+    result = RunResult(mode="x", representatives=[rep], clusters=[])
+
+    out = tmp_path / "proteins.fasta"
+    write_proteins_fasta(result, {"ISO1": [s]}, out)
+    header = out.read_text().splitlines()[0]
+
+    # Lineage tags present.
+    assert "[ncbi_taxon_id=11320]" in header
+    assert "[species=Influenza A virus]" in header
+    assert "[genus=Alphainfluenzavirus]" in header
+    assert "[family=Orthomyxoviridae]" in header
+    assert "[order=Articulavirales]" in header
+    assert "[class=Insthoviricetes]" in header
+    # Sub-ranks absent (skipped because empty).
+    assert "[subgenus=" not in header
+    assert "[subfamily=" not in header
+    assert "[suborder=" not in header
+    assert "[subclass=" not in header
+    # Lineage block sits between organism and isolate.
+    assert header.index("[organism=") < header.index("[species=")
+    assert header.index("[class=") < header.index("[isolate=")
+
+
+def test_write_proteins_fasta_strips_brackets_from_metadata(
+    tmp_path: Path, make_seq,
+):
+    """Metadata containing `[` or `]` would corrupt the bracket-tag
+    syntax — _fasta_safe must scrub them."""
+    s = make_seq(
+        "s1", "ACGT", segment="L", accession="A.1", isolate_id="ISO_X",
+        organism="Foo virus [strain X]",  # the brackets are the trap
+    )
+    s.proteins = [{
+        "protein_id": "P1", "product": "polymerase",
+        "length": 10, "sequence": "MEEPMEEPMA",
+    }]
+    rep = make_seq("c", "X", accession="ISO_X", isolate_id="ISO_X")
+    rep.id = "CONCAT|ISO_X"
+    result = RunResult(mode="x", representatives=[rep], clusters=[])
+    out = tmp_path / "p.fasta"
+    write_proteins_fasta(result, {"ISO_X": [s]}, out)
+
+    header = out.read_text().splitlines()[0]
+    # The bracket-containing organism value must NOT introduce extra
+    # `[` / `]` inside the tag value (other than the wrapping ones).
+    assert header.count("[") == header.count("]")
+    # The trap brackets got scrubbed.
+    assert "[strain X]" not in header
+    assert "Foo virus  strain X" in header  # squashed to spaces
+
+
 def test_write_isolate_proteins_tsv_skips_when_no_proteins(tmp_path: Path, make_seq):
     s = make_seq("s1", "ACGT", segment="HA")
     s.proteins = None

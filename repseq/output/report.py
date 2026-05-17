@@ -231,6 +231,19 @@ def write_representative_isolates_tsv(
 # Per-isolate protein TSV (segmented mode)
 # ---------------------------------------------------------------------------
 
+_FASTA_HEADER_UNSAFE_RE = re.compile(r"[\[\]\r\n]+")
+
+
+def _fasta_safe(value: Any) -> str:
+    """Strip characters that would break FASTA-header parsing.
+
+    Square brackets are the bracket-tag delimiter; line breaks split a
+    header into two records. Both get collapsed to a single space so the
+    tag value stays inline.
+    """
+    return _FASTA_HEADER_UNSAFE_RE.sub(" ", str(value)).strip()
+
+
 def _write_protein_fasta_record(
     fh,
     prot: dict,
@@ -238,21 +251,59 @@ def _write_protein_fasta_record(
     isolate_id: Optional[str],
     line_width: int = 70,
 ) -> None:
-    """Emit one FASTA record for a single protein."""
+    """Emit one FASTA record for a single protein.
+
+    Header format::
+
+        >{protein_id} {product} [organism=...] [ncbi_taxon_id=...]
+        [species=...] [genus=...] [family=...] [order=...] [class=...]
+        [isolate=...] [segment=...] [host=...] [country=...]
+        [collection_date=...] [length=...] [parent={parent_accession}]
+
+    Tags are NCBI-style ``[key=value]`` and only emitted when the value is
+    populated; empty fields are skipped to keep headers short on
+    sparse-metadata sequences. Tag order goes from identity (organism +
+    taxonomic lineage) to biological context (isolate, segment) to
+    collection metadata (host, country, date) to technical (length) to
+    provenance (parent). Taxonomy uses the same 9-rank ``_TAX_RANKS``
+    ladder as the TSV writers — sub-ranks (``subgenus``, ``subfamily``,
+    ``suborder``, ``subclass``) are commonly blank for viruses and are
+    therefore omitted via the skip-empty rule.
+    """
     pid = prot.get("protein_id") or "unknown"
     product = prot.get("product") or ""
     parent_acc = parent_seq.accession or parent_seq.id
+    tax = parent_seq.taxonomy
 
-    tags: list[str] = []
-    if isolate_id:
-        tags.append(f"[isolate={isolate_id}]")
-    if parent_seq.segment:
-        tags.append(f"[segment={parent_seq.segment}]")
-    tags.append(f"[parent={parent_acc}]")
+    # Tag order is deliberate; see docstring. Taxonomy ranks are read
+    # via TaxonomyInfo.get_rank() so they include the sub-ranks that
+    # only exist in the lineage map.
+    tag_specs: list[tuple[str, Any]] = [
+        ("organism", parent_seq.organism),
+        ("ncbi_taxon_id", tax.taxid if tax else None),
+    ]
+    if tax:
+        tag_specs.extend(
+            (rank, tax.get_rank(rank)) for rank in _TAX_RANKS
+        )
+    tag_specs.extend([
+        ("isolate", isolate_id),
+        ("segment", parent_seq.segment),
+        ("host", parent_seq.host),
+        ("country", parent_seq.country),
+        ("collection_date", parent_seq.collection_date),
+        ("length", prot.get("length")),
+        ("parent", parent_acc),
+    ])
+    tags = [
+        f"[{key}={_fasta_safe(val)}]"
+        for key, val in tag_specs
+        if val not in (None, "")
+    ]
 
     header_parts = [f">{pid}"]
     if product:
-        header_parts.append(product)
+        header_parts.append(_fasta_safe(product))
     header_parts.extend(tags)
     fh.write(" ".join(header_parts) + "\n")
 
@@ -517,6 +568,15 @@ def write_all_reports(
                 out_dir / f"{prefix}_representative_isolate_proteins.tsv",
                 representative_isolate_ids=rep_isolate_ids,
             )
+    # Mode-aware filename parallel to the rep TSV split:
+    #   segmented      -> _representative_isolate_proteins.fasta
+    #   non-segmented  -> _representative_sequence_proteins.fasta
+    # Each name mirrors its TSV companion exactly.
+    proteins_basename = (
+        "representative_isolate_proteins" if complete_isolates
+        else "representative_sequence_proteins"
+    )
     write_proteins_fasta(
-        result, complete_isolates, out_dir / f"{prefix}_proteins.fasta"
+        result, complete_isolates,
+        out_dir / f"{prefix}_{proteins_basename}.fasta",
     )
