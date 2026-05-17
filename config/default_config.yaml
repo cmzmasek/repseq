@@ -59,6 +59,16 @@ segmented:
   # set, or when a record lacks the qualifier. Set to false to bypass the
   # GenBank lookup entirely (header-regex only — the v0.5.x behaviour).
   use_genbank_metadata: true
+  # Per-isolate taxonomy-consistency check. Drops any isolate whose
+  # segments disagree on the named taxonomy rank — useful for
+  # filtering out reassortants and isolate-ID collisions where two
+  # different viruses share the same /isolate label. On by default.
+  # Set enabled: false to keep all isolates regardless of rank
+  # agreement. Missing values are ignored — only *populated*
+  # disagreeing labels trigger a drop.
+  taxonomy_consistency:
+    enabled: true
+    rank: species
   # Schema for each virus entry:
   #   <name>:
   #     expected_segments: <int>

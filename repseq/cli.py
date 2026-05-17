@@ -24,6 +24,7 @@ from .segmented.completeness import (
     filter_complete_isolates,
     segment_length_filter,
 )
+from .segmented.taxonomy_consistency import filter_taxonomy_consistent_isolates
 from .taxonomy.cache import TaxonomyCache
 from .taxonomy.ncbi import NCBITaxonomy
 from .taxonomy.resolver import MetadataResolver
@@ -175,7 +176,10 @@ def _resolve_metadata(sequences, cfg, no_resolve):
 def _run_qc(sequences, cfg):
     click.echo("Running QC ...")
     passed, qc_report = run_qc(sequences, cfg)
-    click.echo(qc_report.summary())
+    # NOTE: the QC summary is printed once at the end (after the
+    # extended QC and segmented-completeness steps mutate the same
+    # counters), not here. Printing it now would show 0 for every
+    # field a later step is responsible for filling.
     return passed, qc_report
 
 
@@ -326,6 +330,33 @@ def _populate_genbank_isolate_segment(sequences, cfg, ncbi):
     )
 
 
+def _filter_taxonomy_consistent(sequences, cfg, qc_report):
+    """Drop isolates whose segments disagree on the configured taxonomy
+    rank (default species). No-op when segmented mode is off, when the
+    check is disabled, or when no segment carries a populated rank
+    value. Mutates qc_report; returns the surviving sequence list.
+    """
+    seg_cfg = cfg.get("segmented", {}) or {}
+    if not seg_cfg.get("enabled"):
+        return sequences
+    tc_cfg = seg_cfg.get("taxonomy_consistency", {}) or {}
+    if not tc_cfg.get("enabled", True):
+        return sequences
+    rank = tc_cfg.get("rank", "species")
+    before = len(sequences)
+    kept, removed = filter_taxonomy_consistent_isolates(sequences, rank=rank)
+    if not removed:
+        return kept
+    for accession, reason in removed:
+        qc_report.add_removed(accession, reason)
+        qc_report.removed_taxonomy_mismatch += 1
+    click.echo(
+        f"  Taxonomy QC: dropped {before - len(kept)} segment(s) "
+        f"for {rank}-level mismatch within isolate."
+    )
+    return kept
+
+
 def _handle_segmented(sequences, cfg, qc_report):
     virus_cfg = get_virus_config(cfg)
     if not virus_cfg:
@@ -465,6 +496,10 @@ def _final_summary(result, qc_report, cfg) -> None:
             bits.append(f"{qc_report.removed_annotation} on annotation keywords")
         if qc_report.removed_proteins:
             bits.append(f"{qc_report.removed_proteins} on protein count")
+        if qc_report.removed_taxonomy_mismatch:
+            bits.append(
+                f"{qc_report.removed_taxonomy_mismatch} on taxonomy mismatch"
+            )
         detail = f" ({', '.join(bits)})" if bits else ""
         reasons.append(
             f"QC removed all {qc_report.total_input} input sequences{detail} — "
@@ -557,7 +592,9 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    click.echo(qc_report.summary())
 
     from .modes.global_mode import GlobalMode
     mode = GlobalMode(cfg, threshold=threshold, n_select=n_select)
@@ -593,7 +630,9 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    click.echo(qc_report.summary())
 
     from .modes.taxonomic1 import TaxonomicMode1
     mode = TaxonomicMode1(cfg, rank=rank, n_per_group=n_per_group, overflow=overflow)
@@ -633,7 +672,9 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    click.echo(qc_report.summary())
 
     from .modes.taxonomic2 import TaxonomicMode2
     mode = TaxonomicMode2(cfg, rank_levels=rank_levels_parsed, overflow=overflow)
@@ -667,7 +708,9 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    click.echo(qc_report.summary())
 
     from .modes.host_mode import HostMode
     mode = HostMode(cfg, n_per_host=n_per_host, overflow=overflow)
@@ -703,7 +746,9 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    click.echo(qc_report.summary())
 
     from .modes.time_mode import TimeMode
     mode = TimeMode(cfg, n_per_window=n_per_window, window=window, overflow=overflow)
@@ -737,7 +782,9 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    click.echo(qc_report.summary())
 
     from .modes.geographic_mode import GeographicMode
     mode = GeographicMode(cfg, n_per_country=n_per_country, overflow=overflow)
@@ -778,7 +825,9 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    click.echo(qc_report.summary())
 
     from .modes.custom_mode import CustomMode
     mode = CustomMode(
@@ -823,7 +872,9 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    click.echo(qc_report.summary())
 
     from .modes.hybrid_mode import HybridMode
     mode = HybridMode(

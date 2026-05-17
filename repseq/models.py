@@ -173,6 +173,11 @@ class QCReport:
     removed_annotation: int = 0
     removed_proteins: int = 0
     removed_incomplete_isolates: int = 0
+    # Segments dropped because their isolate's segments disagreed on
+    # the configured taxonomy rank (segmented.taxonomy_consistency).
+    # Counted in *segments removed*, not isolates, so the units stay
+    # consistent with the other ``removed_*`` counters.
+    removed_taxonomy_mismatch: int = 0
     # Whole-pool length filter is skipped in segmented mode (the input is a
     # mix of segments of very different lengths; per-segment bounds are
     # applied later via segmented.viruses.<v>.segment_lengths instead).
@@ -210,6 +215,7 @@ class QCReport:
             f"  Removed (annotation): {self.removed_annotation}",
             f"  Removed (proteins)  : {self.removed_proteins}",
             f"  Removed (incomplete): {self.removed_incomplete_isolates}",
+            f"  Removed (tax-mismatch): {self.removed_taxonomy_mismatch}",
         ]
         return "\n".join(lines)
 

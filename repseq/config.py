@@ -65,6 +65,19 @@ DEFAULTS: dict[str, Any] = {
         # record lacks the qualifier. Set to false to bypass the GenBank
         # lookup entirely (header-regex only).
         "use_genbank_metadata": True,
+        # Drop any segmented isolate whose segments disagree on the
+        # taxonomic rank named in ``rank``. Reassortment between
+        # different parent species is real biology for many segmented
+        # viruses (peribunyaviruses, orthomyxoviruses, …), so the user
+        # who turns this on is asking for monophyletic-at-this-rank
+        # isolates only. Off-by-default would let those isolates
+        # through unflagged, so the default is on. Missing values are
+        # ignored — an isolate is only dropped when *populated* labels
+        # disagree.
+        "taxonomy_consistency": {
+            "enabled": True,
+            "rank": "species",
+        },
     },
     "clustering": {
         "backend": "mmseqs2",              # "mmseqs2" | "cdhit"
@@ -348,6 +361,26 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         seg["use_genbank_metadata"], bool
     ):
         errors.append("segmented.use_genbank_metadata must be a boolean")
+
+    tc = seg.get("taxonomy_consistency", {}) or {}
+    if "enabled" in tc and not isinstance(tc["enabled"], bool):
+        errors.append("segmented.taxonomy_consistency.enabled must be a boolean")
+    # The rank must be one a resolved TaxonomyInfo can actually answer.
+    # Standard fields on TaxonomyInfo plus arbitrary entries from
+    # ``lineage`` are both accepted by ``get_rank``, so we only
+    # validate against the named-attribute set — anything else still
+    # works, just relies on the lineage map being populated.
+    valid_consistency_ranks = {
+        "species", "subgenus", "genus", "subfamily", "family",
+        "suborder", "order", "subclass", "class", "phylum",
+        "kingdom", "superkingdom",
+    }
+    rank = tc.get("rank", "species")
+    if not isinstance(rank, str) or rank.lower() not in valid_consistency_ranks:
+        errors.append(
+            f"segmented.taxonomy_consistency.rank '{rank}' is not supported "
+            f"(use one of {sorted(valid_consistency_ranks)})"
+        )
     if seg.get("enabled"):
         virus_name = seg.get("virus")
         if not virus_name:
