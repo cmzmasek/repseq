@@ -293,12 +293,6 @@ phylo:
     # larger bare clade.
     coverage_threshold: 0.5
   phyloxml:
-    # If true, every leaf's <sequence> block includes the aligned
-    # residues inline as <mol_seq is_aligned="true">. The full MSA is
-    # always written to {prefix}_msa.fasta; keep this off unless a
-    # downstream consumer expects the alignment inline (roughly doubles
-    # the XML file size).
-    embed_alignment: false
     # <confidence> element's type= attribute. "auto" picks "sh_like" for
     # FastTree and "ufboot" for IQ-TREE (which matches the default tree
     # arguments). Override only if you've changed the tree arguments —

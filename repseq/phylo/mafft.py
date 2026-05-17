@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +73,14 @@ def run_mafft(
     cmd.extend(extra_args)
     cmd.append(str(input_fasta))
 
+    # Bench-scientist progress: the MSA step can run for minutes on a
+    # large input, and a silent terminal makes the user wonder if the
+    # pipeline froze. Echo the args (without the binary path or the
+    # input file) before the run, plus elapsed time on success.
+    display_args = " ".join(cmd[1:-1])
+    print(f"[phylo] starting MAFFT ({display_args})", file=sys.stderr)
+    t0 = time.time()
+
     output_fasta.parent.mkdir(parents=True, exist_ok=True)
     with open(output_fasta, "w") as fh:
         try:
@@ -83,3 +93,8 @@ def run_mafft(
             )
         except subprocess.CalledProcessError as e:
             raise MafftError(f"mafft failed:\n{e.stderr}") from e
+
+    print(
+        f"[phylo] MAFFT finished ({time.time() - t0:.1f}s)",
+        file=sys.stderr,
+    )

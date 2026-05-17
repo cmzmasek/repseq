@@ -307,6 +307,11 @@ def concatenate_isolate(
         is_reviewed=all(s.is_reviewed for s in segments),
         taxonomy=taxonomy,
         protein_sequence=protein_sequence,
+        # Hand the per-segment Sequence objects to downstream output
+        # (phyloXML multi-<sequence> emission). Each carries its own
+        # accession + .proteins list, so the writer can list every
+        # underlying nuc accession and protein without re-fetching.
+        concat_segments=list(segments),
     )
 
 
@@ -371,11 +376,13 @@ def build_concatenated_sequences(
     cp = cluster_protein or {}
     for isolate_id, segs in complete_isolates.items():
         protein_concat: Optional[str] = None
+        marker_ids: Optional[list[str]] = None
         if require_protein:
             if segment_names is None:
                 segment_names = [seg.segment or "" for seg in segs]
             seg_by_name = {s.segment: s for s in segs if s.segment}
             parts: list[str] = []
+            ids: list[str] = []
             missing_marker: Optional[str] = None
             for seg_name in segment_names:
                 seg = seg_by_name.get(seg_name)
@@ -388,6 +395,8 @@ def build_concatenated_sequences(
                     missing_marker = seg_name
                     break
                 parts.append(marker["sequence"])
+                if marker.get("protein_id"):
+                    ids.append(marker["protein_id"])
             if missing_marker is not None:
                 if report is not None:
                     reason = (
@@ -400,5 +409,8 @@ def build_concatenated_sequences(
                         report.add_removed(seq.id, reason)
                 continue
             protein_concat = "".join(parts)
-        out.append(concatenate_isolate(segs, isolate_id, protein_sequence=protein_concat))
+            marker_ids = ids or None
+        concat = concatenate_isolate(segs, isolate_id, protein_sequence=protein_concat)
+        concat.marker_protein_ids = marker_ids
+        out.append(concat)
     return out

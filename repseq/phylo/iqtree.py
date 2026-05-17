@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -155,6 +157,25 @@ def run_iqtree(
             cmd.extend(["-B", str(int(ufboot))])
         cmd.extend(extra_args)
 
+        # Bench-scientist progress message: echo only the args worth
+        # showing — strip the binary path and the path-bearing args
+        # (-s INPUT, --prefix PFX) which carry no user-meaningful info.
+        display_parts: list[str] = []
+        skip_next = False
+        for tok in cmd[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if tok in ("-s", "--prefix"):
+                skip_next = True
+                continue
+            display_parts.append(tok)
+        print(
+            f"[phylo] starting IQ-TREE ({' '.join(display_parts)})",
+            file=sys.stderr,
+        )
+        t0 = time.time()
+
         try:
             subprocess.run(
                 cmd,
@@ -165,6 +186,11 @@ def run_iqtree(
         except subprocess.CalledProcessError as e:
             err = (e.stderr or "") + (e.stdout or "")
             raise IQTreeError(f"IQ-TREE failed:\n{err}") from e
+
+        print(
+            f"[phylo] IQ-TREE finished ({time.time() - t0:.1f}s)",
+            file=sys.stderr,
+        )
 
         treefile = td / "run.treefile"
         if not treefile.exists():

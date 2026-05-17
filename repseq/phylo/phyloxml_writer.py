@@ -49,7 +49,7 @@ from typing import Any, Optional
 from Bio import Phylo
 
 from .. import __version__ as REPSEQ_VERSION
-from ..models import Sequence, SequenceType
+from ..models import Sequence
 from .labels import (
     _parse_year,
     format_leaf_label,
@@ -184,16 +184,104 @@ def _format_branch_length(value: Optional[float]) -> Optional[str]:
 # Clade serialisation
 # ---------------------------------------------------------------------------
 
+def _collect_underlying_records(
+    seq: Sequence,
+) -> tuple[list[tuple[str, Optional[str]]], list[tuple[str, Optional[str], str]]]:
+    """Return ``(nuc_records, protein_records)`` for one leaf sequence.
+
+    * ``nuc_records``: ``[(accession, name)]`` per nucleotide segment,
+      in segment order. For segmented CONCAT leaves the segments come
+      from ``seq.concat_segments``; for non-segmented leaves the leaf
+      itself is the single nuc record.
+    * ``protein_records``: ``[(protein_id, product, source_segment_acc)]``
+      flat across all segments, in (segment-order, CDS-order). The
+      third tuple element lets the caller resolve which segment a
+      protein lives on (currently unused but kept for future
+      per-protein annotation).
+
+    A leaf with no CDS info (``seq.proteins is None``) yields an empty
+    protein_records list and the property emitter degrades gracefully.
+    """
+    segments = seq.concat_segments or [seq]
+    nuc_records: list[tuple[str, Optional[str]]] = []
+    protein_records: list[tuple[str, Optional[str], str]] = []
+    for seg in segments:
+        if seg.accession:
+            nuc_records.append((seg.accession, _clean_name(seg.description or seg.header)))
+        for p in (seg.proteins or []):
+            pid = p.get("protein_id")
+            if not pid:
+                continue
+            protein_records.append((pid, _clean_name(p.get("product")), seg.accession or ""))
+    return nuc_records, protein_records
+
+
+def _clean_name(value: Optional[str]) -> Optional[str]:
+    """Trim a free-text name for emission inside ``<sequence><name>``.
+
+    NCBI Virus FASTA headers store a pipe-separated metadata block
+    right after the accession (``NC_078889.1 |species|host|...|segment``),
+    so the parsed ``description`` field often starts with the
+    separator. Stripping that here keeps the displayed name from
+    starting with a stray ``|``. We also strip trailing pipes and
+    collapse adjacent separators that result from empty metadata
+    fields (``"...||..."`` → ``"... | ..."``).
+    """
+    if value is None:
+        return None
+    s = str(value).strip().strip("|").strip()
+    # Collapse multi-pipe runs that came from empty NCBI-Virus fields.
+    while "||" in s:
+        s = s.replace("||", "|")
+    return s or None
+
+
+def _emit_sequence_element(
+    clade: ET.Element,
+    seq_type: str,
+    accession: Optional[str],
+    name: Optional[str],
+) -> None:
+    """Append one ``<sequence type="...">`` block to ``clade``.
+
+    Skipped entirely when there's no accession AND no name, so we
+    never write a bare ``<sequence/>`` that some viewers complain
+    about.
+    """
+    if not accession and not name:
+        return
+    sequence_el = ET.SubElement(clade, "sequence", {"type": seq_type})
+    if accession:
+        acc_el = ET.SubElement(sequence_el, "accession", {"source": "ncbi"})
+        acc_el.text = str(accession)
+    _set_text(sequence_el, "name", name)
+
+
 def _serialise_leaf(
     parent: ET.Element,
     leaf,
     seq: Sequence,
     label: str,
     conf_type: str,
-    embed_alignment: bool,
-    aligned_residues: Optional[str],
 ) -> None:
-    """Emit one terminal ``<clade>`` with rich annotation."""
+    """Emit one terminal ``<clade>`` with rich annotation.
+
+    The clade gets:
+
+    * One ``<sequence>`` per underlying nucleotide segment AND one per
+      protein CDS. Marker proteins (the ones used to build the tree)
+      come first, then non-marker proteins, then the nucleotide
+      segments. This ordering matters because many phyloXML renderers
+      display only the first ``<sequence>`` element — putting the
+      marker first means the visible label is the protein that
+      actually drove the tree.
+    * Three ``repseq:`` properties carrying comma-separated lists
+      that reproduce the same data in a form renderers parse
+      uniformly: ``repseq:nuc_acc``, ``repseq:protein_acc``, and
+      ``repseq:protein_names``.
+    * The isolate-level ``repseq:`` properties (host, country, date,
+      strain, …) as before.
+    """
     clade = ET.SubElement(parent, "clade")
 
     # PhyloXML schema order:
@@ -218,23 +306,49 @@ def _serialise_leaf(
             id_el.text = str(taxid)
         _set_text(tax_el, "scientific_name", species)
 
-    # <sequence>
-    seq_type_attr = "protein" if seq.seq_type == SequenceType.PROTEIN else "dna"
-    sequence_el = ET.SubElement(clade, "sequence", {"type": seq_type_attr})
-    if seq.accession:
-        acc_el = ET.SubElement(sequence_el, "accession", {"source": "ncbi"})
-        acc_el.text = str(seq.accession)
-    _set_text(sequence_el, "name", seq.description or seq.header)
-    if embed_alignment and aligned_residues:
-        mol_el = ET.SubElement(sequence_el, "mol_seq", {"is_aligned": "true"})
-        mol_el.text = aligned_residues
-    if len(list(sequence_el)) == 0:
-        # No accession, no name, no embedded MSA — drop the empty
-        # wrapper element (some viewers complain about a bare
-        # <sequence type="..."/>).
-        clade.remove(sequence_el)
+    # <sequence> elements: markers first, then other proteins, then nucs.
+    nuc_records, protein_records = _collect_underlying_records(seq)
+    marker_ids = list(seq.marker_protein_ids or [])
+    marker_set = set(marker_ids)
+    # Stable sort keeps marker ids in the configured marker order
+    # (matters for segmented runs — L's marker before M's before S's).
+    markers = [
+        rec for pid in marker_ids
+        for rec in protein_records if rec[0] == pid
+    ]
+    others = [rec for rec in protein_records if rec[0] not in marker_set]
+    for pid, product, _src in markers:
+        _emit_sequence_element(clade, "protein", pid, product)
+    for pid, product, _src in others:
+        _emit_sequence_element(clade, "protein", pid, product)
+    for acc, name in nuc_records:
+        _emit_sequence_element(clade, "dna", acc, name)
 
-    # <property> elements
+    # repseq: summary properties — same data as the <sequence>
+    # elements, comma-joined, for renderers that only show the first
+    # <sequence>. nuc_acc lists segments in segment order; protein_acc
+    # / protein_names follow the same ordering as the <sequence>
+    # blocks above (markers first, then others).
+    ordered_protein_ids = [pid for pid, _p, _s in markers + others]
+    ordered_protein_names = [
+        product for _pid, product, _s in markers + others if product
+    ]
+    ordered_nuc_accs = [acc for acc, _n in nuc_records]
+    for ref, values in (
+        ("repseq:nuc_acc", ordered_nuc_accs),
+        ("repseq:protein_acc", ordered_protein_ids),
+        ("repseq:protein_names", ordered_protein_names),
+    ):
+        if not values:
+            continue
+        prop = ET.SubElement(
+            clade,
+            "property",
+            {"ref": ref, "datatype": "xsd:string", "applies_to": "clade"},
+        )
+        prop.text = ", ".join(values)
+
+    # Isolate-level <property> elements (host, country, date, …).
     for ref, key in _LEAF_PROPERTIES:
         value = _leaf_property_value(seq, key)
         if not value:
@@ -257,8 +371,6 @@ def _serialise_internal(
     conf_type: str,
     seq_by_id: dict[str, Sequence],
     label_by_id: dict[str, str],
-    aligned_by_id: dict[str, str],
-    embed_alignment: bool,
 ) -> None:
     """Emit one internal ``<clade>`` and recurse into children."""
     clade = ET.SubElement(parent, "clade")
@@ -304,8 +416,6 @@ def _serialise_internal(
                 seq,
                 label=label_by_id.get(original, original),
                 conf_type=conf_type,
-                embed_alignment=embed_alignment,
-                aligned_residues=aligned_by_id.get(original),
             )
         else:
             _serialise_internal(
@@ -314,43 +424,7 @@ def _serialise_internal(
                 conf_type=conf_type,
                 seq_by_id=seq_by_id,
                 label_by_id=label_by_id,
-                aligned_by_id=aligned_by_id,
-                embed_alignment=embed_alignment,
             )
-
-
-# ---------------------------------------------------------------------------
-# MSA loading (for optional <mol_seq> embedding)
-# ---------------------------------------------------------------------------
-
-def _load_msa_by_id(msa_fasta: Optional[Path], id_map: dict[str, str]) -> dict[str, str]:
-    """Read the MAFFT MSA and return original_id → aligned_residues.
-
-    Only invoked when ``embed_alignment=True``. The MSA file uses the
-    short ids (S0001, …); ``id_map`` is short_id → original_id. Empty
-    dict on any I/O error.
-    """
-    if msa_fasta is None or not msa_fasta.exists():
-        return {}
-    out: dict[str, str] = {}
-    current_short: Optional[str] = None
-    buf: list[str] = []
-    try:
-        with open(msa_fasta) as fh:
-            for line in fh:
-                line = line.rstrip("\n")
-                if line.startswith(">"):
-                    if current_short is not None and current_short in id_map:
-                        out[id_map[current_short]] = "".join(buf)
-                    current_short = line[1:].split()[0]
-                    buf = []
-                else:
-                    buf.append(line)
-            if current_short is not None and current_short in id_map:
-                out[id_map[current_short]] = "".join(buf)
-    except OSError:
-        return {}
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +448,69 @@ def _build_phylogeny_name(
     return f"{prefix} [{alphabet}|{msa_tool}|{' '.join(parts)}]"
 
 
+def _markers_summary(reps: list[Sequence]) -> Optional[str]:
+    """Summarise the marker proteins that fed the tree, for the
+    ``<phylogeny><description>`` element.
+
+    Two shapes, depending on input:
+
+    * **Segmented**: ``"L:polymerase, M:glycoprotein, S:nucleoprotein"``.
+      Segment order is taken from the first rep's ``concat_segments``
+      (the same order across every isolate, set by
+      ``build_concatenated_sequences`` from the virus config). When
+      different isolates picked different products on the same
+      segment, those products are pipe-joined and alphabetised within
+      the segment: ``"L:polymerase|RdRp"``.
+    * **Non-segmented**: ``"polymerase, NS5"`` — the unique product
+      names selected as marker across all reps, alphabetised.
+
+    Returns ``None`` when no rep has ``marker_protein_ids`` set
+    (nucleotide-alphabet runs, or protein runs where every rep
+    fell through to no-marker). The caller then omits the
+    ``markers=...`` field from the description.
+    """
+    has_concat = any(r.concat_segments for r in reps)
+
+    if has_concat:
+        per_segment: dict[str, set[str]] = {}
+        segment_order: list[str] = []
+        seen_segments: set[str] = set()
+        for rep in reps:
+            if not rep.concat_segments or not rep.marker_protein_ids:
+                continue
+            marker_set = set(rep.marker_protein_ids)
+            for seg in rep.concat_segments:
+                if not seg.segment:
+                    continue
+                if seg.segment not in seen_segments:
+                    segment_order.append(seg.segment)
+                    seen_segments.add(seg.segment)
+                for protein in (seg.proteins or []):
+                    if protein.get("protein_id") in marker_set:
+                        product = protein.get("product")
+                        if product:
+                            per_segment.setdefault(seg.segment, set()).add(product)
+        bits: list[str] = []
+        for seg_name in segment_order:
+            products = per_segment.get(seg_name)
+            if not products:
+                continue
+            bits.append(f"{seg_name}:{'|'.join(sorted(products))}")
+        return ", ".join(bits) if bits else None
+
+    products: set[str] = set()
+    for rep in reps:
+        if not rep.marker_protein_ids or not rep.proteins:
+            continue
+        marker_set = set(rep.marker_protein_ids)
+        for protein in rep.proteins:
+            if protein.get("protein_id") in marker_set:
+                p = protein.get("product")
+                if p:
+                    products.add(p)
+    return ", ".join(sorted(products)) if products else None
+
+
 def _build_phylogeny_description(
     alphabet: str,
     msa_tool: str,
@@ -385,6 +522,7 @@ def _build_phylogeny_description(
     extra_msa_args: list[str],
     extra_tree_args: list[str],
     rooting_method: Optional[str] = None,
+    markers: Optional[str] = None,
 ) -> str:
     """Compose the ``<phylogeny><description>`` element."""
     when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -404,6 +542,8 @@ def _build_phylogeny_description(
         bits.append(f"tree_args={' '.join(extra_tree_args)}")
     if rooting_method:
         bits.append(f"rooting={rooting_method}")
+    if markers:
+        bits.append(f"markers={markers}")
     return " | ".join(bits)
 
 
@@ -428,7 +568,6 @@ def write_phyloxml(
     ufboot: Optional[int],
     extra_msa_args: Optional[list[str]] = None,
     extra_tree_args: Optional[list[str]] = None,
-    msa_fasta: Optional[Path] = None,
     tree=None,
     rooting_method: Optional[str] = None,
 ) -> None:
@@ -479,13 +618,8 @@ def write_phyloxml(
     seq_by_id = {seq.id: seq for seq in representatives}
 
     phyloxml_cfg = (cfg or {}).get("phylo", {}).get("phyloxml", {}) or {}
-    embed_alignment = bool(phyloxml_cfg.get("embed_alignment", False))
     conf_type = _confidence_type_for(
         tree_tool, phyloxml_cfg.get("confidence_type"),
-    )
-
-    aligned_by_id = (
-        _load_msa_by_id(msa_fasta, id_map) if embed_alignment else {}
     )
 
     root_attrs = {
@@ -522,6 +656,7 @@ def write_phyloxml(
             extra_msa_args=extra_msa_args,
             extra_tree_args=extra_tree_args,
             rooting_method=rooting_method,
+            markers=_markers_summary(representatives),
         ),
     )
 
@@ -533,8 +668,6 @@ def write_phyloxml(
         conf_type=conf_type,
         seq_by_id=seq_by_id,
         label_by_id=label_by_id,
-        aligned_by_id=aligned_by_id,
-        embed_alignment=embed_alignment,
     )
 
     # Pretty-print: stdlib doesn't ship a pretty printer that handles

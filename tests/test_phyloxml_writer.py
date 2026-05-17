@@ -1,5 +1,6 @@
 """PhyloXML writer: rich per-leaf annotation, schema element order,
-confidence normalisation, phylogeny header, ladderize, embed_alignment.
+confidence normalisation, phylogeny header, ladderize, multi-sequence
+emission (markers first), summary property lists.
 
 The writer is XML, so most tests just parse the output with
 ``ElementTree`` and inspect the structure. The MAFFT/IQ-TREE/FastTree
@@ -159,7 +160,9 @@ def test_leaf_carries_taxonomy_block(tmp_path):
         assert sci_name.text == "Hantaan orthohantavirus"
 
 
-def test_leaf_carries_sequence_block_with_accession_and_name(tmp_path):
+def test_leaf_carries_one_dna_sequence_when_no_proteins(tmp_path):
+    """Bare non-segmented input (no .proteins): one <sequence type="dna">
+    per leaf, accession + name as before."""
     reps = [_make_seq("ACC1"), _make_seq("ACC2"), _make_seq("ACC3")]
     out = _run_write(tmp_path, reps)
     root = ET.parse(out).getroot()
@@ -171,10 +174,188 @@ def test_leaf_carries_sequence_block_with_accession_and_name(tmp_path):
         assert acc is not None
         assert acc.get("source") == "ncbi"
         assert acc.text in ("ACC1", "ACC2", "ACC3")
-        # <name> = original header
         name = s.find(_ns("name"))
         assert name is not None
         assert "fake header" in name.text
+
+
+def test_leaf_with_proteins_emits_multiple_sequences_markers_first(tmp_path):
+    """Non-segmented input with .proteins populated: writer emits
+    one <sequence type="protein"> per CDS (marker first), then one
+    <sequence type="dna"> for the nuc accession."""
+    reps = [_make_seq("ACC1"), _make_seq("ACC2"), _make_seq("ACC3")]
+    reps[0].proteins = [
+        {"protein_id": "P_aux", "product": "auxiliary protein",
+         "length": 50, "sequence": "M" * 50},
+        {"protein_id": "P_main", "product": "polymerase",
+         "length": 100, "sequence": "M" * 100},
+    ]
+    reps[0].marker_protein_ids = ["P_main"]
+    out = _run_write(tmp_path, reps)
+    root = ET.parse(out).getroot()
+    # Find the clade that carries ACC1 (via the dna <sequence>).
+    target = None
+    for clade in root.iter(_ns("clade")):
+        for s in clade.findall(_ns("sequence")):
+            acc = s.find(_ns("accession"))
+            if acc is not None and acc.text == "ACC1":
+                target = clade
+                break
+        if target is not None:
+            break
+    assert target is not None
+    seqs = target.findall(_ns("sequence"))
+    # 2 proteins + 1 nuc = 3 sequences on ACC1's leaf.
+    assert len(seqs) == 3
+    # Order: marker protein first (P_main), then other protein (P_aux),
+    # then the nuc accession.
+    types = [s.get("type") for s in seqs]
+    accs = [s.find(_ns("accession")).text for s in seqs]
+    assert types == ["protein", "protein", "dna"]
+    assert accs == ["P_main", "P_aux", "ACC1"]
+    # And the <name> elements track the product / header strings.
+    names = [s.find(_ns("name")).text for s in seqs]
+    assert names[0] == "polymerase"
+    assert names[1] == "auxiliary protein"
+    assert "fake header" in names[2]
+
+
+def test_leaf_emits_three_summary_property_lists(tmp_path):
+    """repseq:nuc_acc / protein_acc / protein_names list the same
+    data as the <sequence> elements, comma-joined — for renderers
+    that only display the first <sequence>."""
+    reps = [_make_seq("ACC1"), _make_seq("ACC2"), _make_seq("ACC3")]
+    reps[0].proteins = [
+        {"protein_id": "P_aux", "product": "auxiliary protein",
+         "length": 50, "sequence": "M" * 50},
+        {"protein_id": "P_main", "product": "polymerase",
+         "length": 100, "sequence": "M" * 100},
+    ]
+    reps[0].marker_protein_ids = ["P_main"]
+    out = _run_write(tmp_path, reps)
+    root = ET.parse(out).getroot()
+    target = None
+    for clade in root.iter(_ns("clade")):
+        accs = [a.text for a in clade.findall(f"{_ns('sequence')}/{_ns('accession')}")]
+        if "ACC1" in accs:
+            target = clade
+            break
+    assert target is not None
+    props = {
+        p.get("ref"): p.text
+        for p in target.findall(_ns("property"))
+    }
+    assert props["repseq:nuc_acc"] == "ACC1"
+    # Marker-first ordering replicated in the summary lists.
+    assert props["repseq:protein_acc"] == "P_main, P_aux"
+    assert props["repseq:protein_names"] == "polymerase, auxiliary protein"
+
+
+def test_segmented_concat_emits_one_sequence_per_segment_and_protein(tmp_path):
+    """A CONCAT leaf with three underlying segments (L/M/S) and four
+    proteins (one each on L and M, two on S) emits 4 + 3 = 7
+    <sequence> elements — markers first."""
+    from repseq.models import Sequence, SequenceType
+    seg_L = Sequence(
+        id="seg_L", header="seg_L", sequence="A" * 100,
+        seq_type=SequenceType.NUCLEOTIDE, accession="L_ACC",
+        segment="L", proteins=[
+            {"protein_id": "L_pol", "product": "L polymerase",
+             "length": 50, "sequence": "M" * 50},
+        ],
+    )
+    seg_M = Sequence(
+        id="seg_M", header="seg_M", sequence="C" * 100,
+        seq_type=SequenceType.NUCLEOTIDE, accession="M_ACC",
+        segment="M", proteins=[
+            {"protein_id": "M_gly", "product": "glycoprotein",
+             "length": 40, "sequence": "M" * 40},
+        ],
+    )
+    seg_S = Sequence(
+        id="seg_S", header="seg_S", sequence="G" * 100,
+        seq_type=SequenceType.NUCLEOTIDE, accession="S_ACC",
+        segment="S", proteins=[
+            {"protein_id": "S_N", "product": "nucleoprotein",
+             "length": 30, "sequence": "M" * 30},
+            {"protein_id": "S_NSs", "product": "NSs",
+             "length": 20, "sequence": "M" * 20},
+        ],
+    )
+    concat = _make_seq("CONCAT|iso1")
+    concat.id = "CONCAT|iso1"
+    concat.concat_segments = [seg_L, seg_M, seg_S]
+    concat.marker_protein_ids = ["L_pol", "M_gly", "S_N"]  # one per segment
+    reps = [concat, _make_seq("B"), _make_seq("C")]
+    out = _run_write(tmp_path, reps)
+    root = ET.parse(out).getroot()
+    # Find the CONCAT clade.
+    target = None
+    for clade in root.iter(_ns("clade")):
+        accs = [a.text for a in clade.findall(f"{_ns('sequence')}/{_ns('accession')}")]
+        if "L_ACC" in accs:
+            target = clade
+            break
+    assert target is not None
+    seqs = target.findall(_ns("sequence"))
+    assert len(seqs) == 7  # 4 proteins + 3 nucs
+    types = [s.get("type") for s in seqs]
+    accs = [s.find(_ns("accession")).text for s in seqs]
+    # Markers first (L_pol, M_gly, S_N), then non-marker protein (S_NSs),
+    # then nucs in segment order.
+    assert types == ["protein"] * 4 + ["dna"] * 3
+    assert accs[:4] == ["L_pol", "M_gly", "S_N", "S_NSs"]
+    assert accs[4:] == ["L_ACC", "M_ACC", "S_ACC"]
+    # Summary properties.
+    props = {p.get("ref"): p.text for p in target.findall(_ns("property"))}
+    assert props["repseq:nuc_acc"] == "L_ACC, M_ACC, S_ACC"
+    assert props["repseq:protein_acc"] == "L_pol, M_gly, S_N, S_NSs"
+    assert props["repseq:protein_names"] == (
+        "L polymerase, glycoprotein, nucleoprotein, NSs"
+    )
+
+
+def test_sequence_name_strips_ncbi_virus_leading_pipe(tmp_path):
+    """NCBI Virus headers carry pipe-separated metadata after the
+    accession (``NC_078889.1 |species|host|...|segment``); the parsed
+    ``description`` then starts with ``|``. The writer must strip that
+    so leaf <name> doesn't show as |Turlock orthobunyavirus segment L..."""
+    reps = [
+        _make_seq(
+            "ACC1",
+            description="|Turlock orthobunyavirus segment L|Turlock virus|Orthobunyavirus turlockense||L",
+        ),
+        _make_seq("ACC2"),
+        _make_seq("ACC3"),
+    ]
+    out = _run_write(tmp_path, reps)
+    root = ET.parse(out).getroot()
+    # Find ACC1's <sequence type="dna"><name> — it should NOT start with '|'.
+    for clade in root.iter(_ns("clade")):
+        for s in clade.findall(_ns("sequence")):
+            acc = s.find(_ns("accession"))
+            if acc is None or acc.text != "ACC1":
+                continue
+            name = s.find(_ns("name")).text
+            assert not name.startswith("|"), f"leading pipe leaked: {name!r}"
+            assert not name.endswith("|"), f"trailing pipe leaked: {name!r}"
+            # The empty NCBI-Virus field (``||``) should have been
+            # collapsed, not left as a double-pipe.
+            assert "||" not in name
+
+
+def test_summary_properties_omitted_when_no_proteins(tmp_path):
+    """A bare non-segmented input shouldn't emit empty
+    repseq:protein_acc or repseq:protein_names properties."""
+    reps = [_make_seq("ACC1"), _make_seq("ACC2"), _make_seq("ACC3")]
+    out = _run_write(tmp_path, reps)
+    root = ET.parse(out).getroot()
+    refs = {p.get("ref") for p in root.findall(f".//{_ns('property')}")}
+    # nuc_acc is present (every leaf has an accession), but the
+    # protein lists must not be emitted as empty.
+    assert "repseq:nuc_acc" in refs
+    assert "repseq:protein_acc" not in refs
+    assert "repseq:protein_names" not in refs
 
 
 def test_leaf_property_elements_use_repseq_namespace(tmp_path):
@@ -279,6 +460,103 @@ def test_phylogeny_description_records_no_bootstrap(tmp_path):
     assert "bootstrap=none" in desc
 
 
+def _make_segmented_rep(iso_id: str, marker_product_by_seg: dict[str, str]):
+    """Build a CONCAT rep with one segment per entry in
+    ``marker_product_by_seg`` and exactly one protein per segment
+    matching the requested product."""
+    from repseq.models import Sequence, SequenceType
+    segs = []
+    marker_ids: list[str] = []
+    for seg_name, product in marker_product_by_seg.items():
+        pid = f"P_{iso_id}_{seg_name}"
+        seg = Sequence(
+            id=f"{iso_id}_{seg_name}", header=f"{iso_id}_{seg_name}",
+            sequence="A" * 100, seq_type=SequenceType.NUCLEOTIDE,
+            accession=f"{iso_id}_{seg_name}_acc", segment=seg_name,
+            proteins=[
+                {"protein_id": pid, "product": product,
+                 "length": 50, "sequence": "M" * 50},
+            ],
+        )
+        segs.append(seg)
+        marker_ids.append(pid)
+    concat = _make_seq(f"CONCAT|{iso_id}")
+    concat.id = f"CONCAT|{iso_id}"
+    concat.concat_segments = segs
+    concat.marker_protein_ids = marker_ids
+    return concat
+
+
+def test_description_lists_segmented_markers_per_segment(tmp_path):
+    """All three reps picked the same per-segment marker → one
+    product per segment, no pipe-join."""
+    reps = [
+        _make_segmented_rep("iso1", {"L": "polymerase", "M": "glycoprotein",
+                                      "S": "nucleoprotein"}),
+        _make_segmented_rep("iso2", {"L": "polymerase", "M": "glycoprotein",
+                                      "S": "nucleoprotein"}),
+        _make_segmented_rep("iso3", {"L": "polymerase", "M": "glycoprotein",
+                                      "S": "nucleoprotein"}),
+    ]
+    out = _run_write(tmp_path, reps, alphabet="protein")
+    root = ET.parse(out).getroot()
+    desc = root.find(f"{_ns('phylogeny')}/{_ns('description')}").text
+    assert "markers=L:polymerase, M:glycoprotein, S:nucleoprotein" in desc
+
+
+def test_description_pipe_joins_mixed_segmented_markers(tmp_path):
+    """When different reps picked different products on the same
+    segment, they're pipe-joined within that segment (alphabetised)."""
+    reps = [
+        _make_segmented_rep("iso1", {"L": "polymerase", "M": "glycoprotein",
+                                      "S": "nucleoprotein"}),
+        # iso2 has "RdRp" on segment L instead of "polymerase"
+        _make_segmented_rep("iso2", {"L": "RdRp", "M": "glycoprotein",
+                                      "S": "nucleoprotein"}),
+        _make_segmented_rep("iso3", {"L": "polymerase", "M": "glycoprotein",
+                                      "S": "nucleoprotein"}),
+    ]
+    out = _run_write(tmp_path, reps, alphabet="protein")
+    root = ET.parse(out).getroot()
+    desc = root.find(f"{_ns('phylogeny')}/{_ns('description')}").text
+    # Alphabetical inside the segment: 'RdRp' before 'polymerase'? No —
+    # default sort is ASCII so uppercase letters come first.
+    assert "markers=L:RdRp|polymerase, M:glycoprotein, S:nucleoprotein" in desc
+
+
+def test_description_lists_non_segmented_marker_products(tmp_path):
+    """Non-segmented: flat unique-product list across all reps."""
+    reps = [_make_seq("A"), _make_seq("B"), _make_seq("C")]
+    reps[0].proteins = [
+        {"protein_id": "P_pol_a", "product": "polymerase",
+         "length": 100, "sequence": "M" * 100},
+    ]
+    reps[0].marker_protein_ids = ["P_pol_a"]
+    reps[1].proteins = [
+        {"protein_id": "P_pol_b", "product": "polymerase",
+         "length": 100, "sequence": "M" * 100},
+    ]
+    reps[1].marker_protein_ids = ["P_pol_b"]
+    reps[2].proteins = [
+        {"protein_id": "P_ns5_c", "product": "NS5",
+         "length": 80, "sequence": "M" * 80},
+    ]
+    reps[2].marker_protein_ids = ["P_ns5_c"]
+    out = _run_write(tmp_path, reps, alphabet="protein")
+    root = ET.parse(out).getroot()
+    desc = root.find(f"{_ns('phylogeny')}/{_ns('description')}").text
+    assert "markers=NS5, polymerase" in desc
+
+
+def test_description_omits_markers_for_nt_runs(tmp_path):
+    """No rep has marker_protein_ids set → no markers field."""
+    reps = [_make_seq("A"), _make_seq("B"), _make_seq("C")]
+    out = _run_write(tmp_path, reps, alphabet="nucleotide")
+    root = ET.parse(out).getroot()
+    desc = root.find(f"{_ns('phylogeny')}/{_ns('description')}").text
+    assert "markers=" not in desc
+
+
 def test_internal_confidence_normalized_to_integer(tmp_path):
     """The Newick has '0.95' on an internal node; FastTree default →
     sh_like → rescale to 95."""
@@ -339,37 +617,6 @@ def test_schema_element_order_on_leaf(tmp_path):
     # Every seen tag should appear in expected_order, in order.
     indices = [expected_order.index(t) for t in seen]
     assert indices == sorted(indices), f"order broken: {seen}"
-
-
-def test_embed_alignment_inserts_mol_seq(tmp_path):
-    msa = tmp_path / "msa.fasta"
-    msa.write_text(">S0001\nAAAA\n>S0002\nCCCC\n>S0003\nGGGG\n")
-    cfg = {"phylo": {"phyloxml": {"embed_alignment": True}}}
-    reps = [_make_seq("A"), _make_seq("B"), _make_seq("C")]
-    newick = tmp_path / "tree.nwk"
-    _write_newick(newick, "((S0001:0.1,S0002:0.1)0.95:0.2,S0003:0.3);")
-    id_map = {f"S{i + 1:04d}": rep.id for i, rep in enumerate(reps)}
-    out = tmp_path / "tree.xml"
-    write_phyloxml(
-        newick, out, reps, id_map,
-        cfg=cfg, prefix="test", alphabet="nucleotide",
-        msa_tool="MAFFT", msa_version="v7.520",
-        tree_tool="FastTree", tree_version="2.1.11",
-        model="GTR", ufboot=None, msa_fasta=msa,
-    )
-    root = ET.parse(out).getroot()
-    mol_seqs = root.findall(f".//{_ns('mol_seq')}")
-    assert len(mol_seqs) == 3
-    for m in mol_seqs:
-        assert m.get("is_aligned") == "true"
-        assert m.text in ("AAAA", "CCCC", "GGGG")
-
-
-def test_embed_alignment_off_no_mol_seq(tmp_path):
-    reps = [_make_seq("A"), _make_seq("B"), _make_seq("C")]
-    out = _run_write(tmp_path, reps)
-    root = ET.parse(out).getroot()
-    assert root.findall(f".//{_ns('mol_seq')}") == []
 
 
 def test_label_uses_configured_format(tmp_path):

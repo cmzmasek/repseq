@@ -279,6 +279,45 @@ def test_concatenate_isolate_prefers_segment_0_when_all_set(make_seq):
     assert out.host == "rodent A"
 
 
+def test_concatenate_isolate_stores_segments_for_downstream(make_seq):
+    """The CONCAT record carries references to its source segments so
+    the phyloXML writer can list every nuc accession + protein without
+    re-fetching."""
+    a = make_seq("acc1", "AAA", accession="acc1")
+    b = make_seq("acc2", "CCC", accession="acc2")
+    out = concatenate_isolate([a, b], "ISO1")
+    assert out.concat_segments == [a, b]
+    assert out.concat_segments[0] is a  # identity, not copy
+    assert out.concat_segments[1] is b
+
+
+def test_build_concat_protein_records_marker_protein_ids(make_seq):
+    """For protein-alphabet runs, the concat record's
+    marker_protein_ids lists the chosen marker's protein_id per
+    segment in segment order."""
+    L = make_seq("L_acc", "A" * 100, accession="L_acc", segment="L")
+    L.proteins = [
+        {"protein_id": "L_pol", "product": "polymerase",
+         "length": 100, "sequence": "M" * 100},
+    ]
+    S = make_seq("S_acc", "G" * 100, accession="S_acc", segment="S")
+    S.proteins = [
+        {"protein_id": "S_N", "product": "nucleoprotein",
+         "length": 40, "sequence": "M" * 40},
+        {"protein_id": "S_NSs", "product": "NSs",
+         "length": 20, "sequence": "M" * 20},
+    ]
+    complete = {"iso1": [L, S]}
+    report = QCReport()
+    out = build_concatenated_sequences(
+        complete, segment_names=["L", "S"], require_protein=True, report=report,
+    )
+    assert len(out) == 1
+    concat = out[0]
+    # Markers: L's longest CDS, S's longest CDS.
+    assert concat.marker_protein_ids == ["L_pol", "S_N"]
+
+
 # ---------------------------------------------------------------------------
 # segment_length_filter
 # ---------------------------------------------------------------------------

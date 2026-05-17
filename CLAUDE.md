@@ -370,6 +370,108 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
 
 ## Status
 
+`v0.7.1` extends v0.7.0's tree annotation with four follow-up
+patches driven by the first real peribunyaviridae run.
+
+**Pass C — multi-`<sequence>` leaves.** Fixes the
+biggest gap left by v0.7.0: each segmented-mode leaf is an isolate,
+not a single sequence, so the bare one-`<sequence>`-per-leaf shape was
+hiding the per-segment nuc accessions and every protein except the
+marker.
+
+Each leaf now emits:
+
+* **One `<sequence>` per underlying nucleotide segment** AND **one per
+  protein CDS** (markers used to build the tree come first, then
+  non-marker proteins, then nucs). The marker-first ordering matters
+  because many phyloXML viewers display only the first `<sequence>`
+  element — putting the marker first means the visible label is the
+  protein that actually drove the tree. `<sequence type="protein">`
+  for CDS records, `<sequence type="dna">` for segments (this also
+  fixes the v0.7.0 bug where CONCAT records emitted `type="dna"` on
+  an AA tree).
+* **Three new `repseq:`-namespaced summary properties**:
+  - `repseq:nuc_acc` — comma-joined nucleotide accessions (segment
+    order).
+  - `repseq:protein_acc` — comma-joined `protein_id` values, marker
+    first.
+  - `repseq:protein_names` — comma-joined `product` strings, marker
+    first.
+
+These reproduce the multi-`<sequence>` data in a form renderers
+parse uniformly even when they ignore subsequent `<sequence>`
+elements.
+
+The same shape applies uniformly to **segmented** and
+**non-segmented** input: a non-segmented leaf with several CDSes
+gets `N+1` `<sequence>` elements (one nuc + N proteins). Leaves
+with no CDS info fall back gracefully to the single nuc
+`<sequence>` (`repseq:nuc_acc` only).
+
+Data-model additions on `Sequence`:
+* `concat_segments: Optional[list[Sequence]]` — populated by
+  `concatenate_isolate` with references to the per-segment
+  `Sequence` objects (each already carries `.proteins`). `None` for
+  non-segmented input.
+* `marker_protein_ids: Optional[list[str]]` — for non-segmented
+  input the single marker's `protein_id` (set by
+  `populate_protein_sequences`); for segmented CONCAT records the
+  per-segment marker `protein_id` list in segment order (set by
+  `build_concatenated_sequences`).
+
+Removed: `phylo.phyloxml.embed_alignment` knob and all `<mol_seq>`
+emission. The MSA is always written separately to
+`{prefix}_msa.fasta`; embedding it inline was both redundant and a
+problem with multiple `<sequence>` elements per leaf.
+
+Tests updated/added:
+- `tests/test_phyloxml_writer.py`: dropped the two `embed_alignment`
+  tests; renamed the single-`<sequence>` test to "one dna sequence
+  when no proteins"; new tests for multi-`<sequence>` with markers
+  first, three summary property lists, segmented 7-element shape,
+  and summary-property omission when no proteins.
+- `tests/test_marker.py` (+1 assertion): `populate_protein_sequences`
+  sets `marker_protein_ids`.
+- `tests/test_segmented.py` (+2): `concatenate_isolate` stores
+  `concat_segments`; `build_concatenated_sequences` records the
+  per-segment marker ids.
+- `tests/test_config.py` (−2): dropped `embed_alignment` validation
+  cases.
+
+**Three Pass-C follow-up patches** layered on top:
+
+* **NCBI-Virus `<name>` pipe strip** — NCBI Virus FASTA headers
+  carry a pipe-separated metadata block (``NC_078889.1
+  |species|host|...|segment``), so the parsed ``seq.description``
+  starts with ``|`` and ends up in ``<sequence><name>`` as
+  ``|Turlock orthobunyavirus segment L...``. A new ``_clean_name``
+  helper in the writer strips leading/trailing pipes and collapses
+  adjacent ``||`` runs from empty NCBI-Virus fields. A proper
+  pipe-aware NCBI Virus header parser is queued as a future pass
+  (see the user's memory; the parser would lift metadata into
+  structured ``Sequence`` fields and eliminate the need for this
+  cosmetic strip).
+* **`markers=…` in `<phylogeny><description>`** — records which
+  marker proteins (by *product name*, not protein_id which differs
+  per isolate) actually fed the tree. Segmented:
+  ``markers=L:polymerase, M:glycoprotein, S:nucleoprotein``;
+  pipe-joined inside a segment when reps picked different products
+  (``L:RdRp|polymerase``). Non-segmented: flat comma-list of unique
+  product names. Omitted for nucleotide-alphabet runs.
+* **Bench-scientist progress messages** — the MAFFT, FastTree, and
+  IQ-TREE wrappers now emit ``[phylo] starting X (args)`` before
+  the subprocess and ``[phylo] X finished (Ys)`` after success
+  (stderr, matching the existing ``[iqtree]`` / ``[phylo skipped]``
+  style). Path-bearing args (binary path, ``-s INPUT``,
+  ``--prefix PFX``, input filename) are stripped from the display
+  string; user-meaningful args (model, threads, UFBoot count,
+  extras) are kept. Long-running steps no longer look like a
+  frozen pipeline.
+
+608 offline tests total (599 from v0.7.0 Pass C + 4 markers tests
++ 5 progress-message tests = 608; the writer's pipe-strip test
+counts inside the +4 already).
+
 `v0.7.0` overhauls phylogenetic-tree annotation in two passes, both
 released together.
 

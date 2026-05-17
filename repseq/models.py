@@ -90,6 +90,22 @@ class Sequence:
     # Always None when alphabet=nucleotide.
     protein_sequence: Optional[str] = None
 
+    # ``protein_id`` of each marker CDS used for clustering / phylogeny.
+    # Non-segmented: a single-element list (the one marker chosen on
+    # this sequence). Segmented CONCAT: one per segment, in segment
+    # order — so a phyloXML writer can mark those proteins as
+    # "this is what fed the tree" and list them first.
+    marker_protein_ids: Optional[list[str]] = None
+
+    # For segmented CONCAT records: the per-segment Sequence objects
+    # that were concatenated, in segment order. Each carries its own
+    # accession + .proteins list, so downstream output (phyloXML
+    # multi-<sequence> emission, isolate_proteins.tsv) can list every
+    # underlying nuc accession and protein without re-fetching. ``None``
+    # for non-segmented input — in that case the leaf IS its own
+    # single "segment", and the writer reads from ``seq`` directly.
+    concat_segments: Optional[list["Sequence"]] = None
+
     # QC state
     qc_passed: bool = True
     qc_fail_reason: Optional[str] = None

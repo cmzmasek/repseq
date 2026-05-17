@@ -95,13 +95,17 @@ def test_select_marker_breaks_alias_ties_by_length():
 
 def test_populate_sets_protein_sequence_per_input(make_seq):
     a = make_seq("a", "ACGT")
-    a.proteins = [_cds("polymerase", "MMMMM")]
+    a.proteins = [_cds("polymerase", "MMMMM", protein_id="P_pol_a")]
     b = make_seq("b", "ACGT")
-    b.proteins = [_cds("nucleoprotein", "NNNNN")]
+    b.proteins = [_cds("nucleoprotein", "NNNNN", protein_id="P_n_b")]
     kept = populate_protein_sequences([a, b])
     assert kept == [a, b]
     assert a.protein_sequence == "MMMMM"
     assert b.protein_sequence == "NNNNN"
+    # marker_protein_ids is populated so the phyloXML writer can
+    # identify which CDS fed the tree (and list it first).
+    assert a.marker_protein_ids == ["P_pol_a"]
+    assert b.marker_protein_ids == ["P_n_b"]
 
 
 def test_populate_honours_alias_list(make_seq):

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +83,12 @@ def run_fasttree(
     cmd.extend(extra_args)
     cmd.append(str(msa_fasta))
 
+    # Bench-scientist progress message: echo args (without binary path
+    # or input file) before the run, plus elapsed time on success.
+    display_args = " ".join(cmd[1:-1])
+    print(f"[phylo] starting FastTree ({display_args})", file=sys.stderr)
+    t0 = time.time()
+
     output_newick.parent.mkdir(parents=True, exist_ok=True)
     with open(output_newick, "w") as fh:
         try:
@@ -93,3 +101,8 @@ def run_fasttree(
             )
         except subprocess.CalledProcessError as e:
             raise FastTreeError(f"FastTree failed:\n{e.stderr}") from e
+
+    print(
+        f"[phylo] FastTree finished ({time.time() - t0:.1f}s)",
+        file=sys.stderr,
+    )

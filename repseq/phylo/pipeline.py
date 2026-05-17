@@ -313,7 +313,6 @@ def run_phylogeny(
             ufboot=_resolved_ufboot(cfg, tree_tool),
             extra_msa_args=extra_mafft,
             extra_tree_args=extra_tree,
-            msa_fasta=msa_fasta,
             tree=parsed_tree,
             rooting_method=rooting_method_used,
         )

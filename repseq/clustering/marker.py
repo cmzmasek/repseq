@@ -80,5 +80,7 @@ def populate_protein_sequences(
                 report.add_removed(seq.id, reason)
             continue
         seq.protein_sequence = marker["sequence"]
+        if marker.get("protein_id"):
+            seq.marker_protein_ids = [marker["protein_id"]]
         kept.append(seq)
     return kept

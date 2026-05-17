@@ -205,16 +205,8 @@ def test_validate_config_rejects_non_bool_replace_whitespace():
 
 def test_validate_config_default_phyloxml():
     cfg = load_config(None)
-    assert cfg["phylo"]["phyloxml"]["embed_alignment"] is False
     assert cfg["phylo"]["phyloxml"]["confidence_type"] == "auto"
     assert validate_config(cfg) == []
-
-
-def test_validate_config_rejects_non_bool_embed_alignment():
-    cfg = load_config(None)
-    cfg["phylo"]["phyloxml"]["embed_alignment"] = "yes"
-    errors = validate_config(cfg)
-    assert any("phylo.phyloxml.embed_alignment" in e for e in errors)
 
 
 def test_validate_config_accepts_all_confidence_types():

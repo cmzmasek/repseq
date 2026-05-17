@@ -83,6 +83,32 @@ def test_count_msa_records(tmp_path):
     assert _count_msa_records(msa) == 5
 
 
+def test_run_iqtree_prints_start_and_finish_to_stderr(tmp_path, capsys):
+    """Bench-scientist progress: '[phylo] starting IQ-TREE (...)' before
+    the subprocess call, '[phylo] IQ-TREE finished (Xs)' after success.
+    Path-bearing args (-s INPUT, --prefix PFX) are stripped from the
+    display string."""
+    msa = tmp_path / "msa.fasta"
+    _write_msa(msa, n=4)
+    out = tmp_path / "out.nwk"
+    cfg = {"temp_dir": str(tmp_path), "seed": 7, "threads": 2}
+
+    fake_run, _ = _fake_run_writes_outputs()
+    with patch("repseq.phylo.iqtree.subprocess.run", side_effect=fake_run), \
+         patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
+        run_iqtree(msa, out, cfg, is_protein=True)
+
+    err = capsys.readouterr().err
+    assert "[phylo] starting IQ-TREE (" in err
+    assert "[phylo] IQ-TREE finished (" in err
+    assert "/fake/iqtree2" not in err
+    assert "-s " not in err
+    assert "--prefix" not in err
+    assert "-m MFP" in err
+    assert "-T 2" in err
+    assert "-B 1000" in err
+
+
 def test_run_iqtree_writes_treefile_and_summary(tmp_path):
     msa = tmp_path / "msa.fasta"
     _write_msa(msa, n=4)

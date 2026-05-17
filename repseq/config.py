@@ -217,12 +217,6 @@ DEFAULTS: dict[str, Any] = {
         },
         # PhyloXML writer knobs.
         "phyloxml": {
-            # If true, embed the aligned residues for each leaf as
-            # <mol_seq is_aligned="true"> inside the <sequence> block.
-            # The full MSA is always written to {prefix}_msa.fasta;
-            # leave this false unless a downstream consumer expects the
-            # alignment inline (it roughly doubles the file size).
-            "embed_alignment": False,
             # Override the <confidence type="..."> attribute. ``auto``
             # picks ``sh_like`` for FastTree and ``ufboot`` for IQ-TREE,
             # which matches what each tool actually produces by default.
@@ -604,10 +598,6 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             errors.append(f"phylo.labeling.{key} must be a boolean")
 
     phyloxml_cfg = phylo_cfg.get("phyloxml", {}) or {}
-    if "embed_alignment" in phyloxml_cfg and not isinstance(
-        phyloxml_cfg["embed_alignment"], bool
-    ):
-        errors.append("phylo.phyloxml.embed_alignment must be a boolean")
     ct = phyloxml_cfg.get("confidence_type", "auto")
     if ct not in ("auto", "sh_like", "sh_alrt", "ufboot", "bootstrap"):
         errors.append(
