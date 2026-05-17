@@ -44,7 +44,7 @@ from repseq.output.report import (
     write_cluster_tsv,
     write_group_counts_tsv,
     write_qc_tsv,
-    write_representative_tsv,
+    write_representative_sequences_tsv,
 )
 from repseq.segmented.completeness import (
     _normalise_isolate_id,
@@ -254,7 +254,7 @@ def test_representative_tsv_row_shape_survives(name, ch, tmp_path):
     seq.host = f"host{ch}"
     seq.country = f"country{ch}"
     p = tmp_path / "reps.tsv"
-    write_representative_tsv([seq], p)
+    write_representative_sequences_tsv([seq], p)
 
     n_rows, tab_counts = _tsv_row_shape(p.read_text())
     # 1 header + 1 data row, every row must have the same tab count.

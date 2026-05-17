@@ -64,7 +64,7 @@ def test_write_id_map_writes_round_trip_tsv(tmp_path):
     _write_id_map(id_map, out)
 
     rows = out.read_text().splitlines()
-    assert rows[0] == "short_id\toriginal_id"
+    assert rows[0] == "short_id\taccession"
     assert set(rows[1:]) == {"S0001\talpha", "S0002\tCONCAT|iso-1"}
 
 

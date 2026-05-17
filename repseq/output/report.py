@@ -35,6 +35,16 @@ def _tsv_safe(value: Any) -> str:
     return _TSV_UNSAFE_RE.sub(" ", str(value))
 
 
+def _tsv_bool(value: Any) -> str:
+    """Format a boolean for a TSV cell as ``TRUE`` / ``FALSE``.
+
+    Uppercase chosen for R interop (R reads native ``TRUE``/``FALSE``
+    without coercion) and for visual consistency across every TSV the
+    program writes.
+    """
+    return "TRUE" if bool(value) else "FALSE"
+
+
 # ---------------------------------------------------------------------------
 # Run log
 # ---------------------------------------------------------------------------
@@ -105,7 +115,7 @@ def write_qc_tsv(qc_report: QCReport, path: Path) -> None:
     """Write per-sequence QC removal details to TSV."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fh:
-        fh.write("sequence_id\treason\n")
+        fh.write("accession\treason\n")
         for entry in qc_report.details:
             fh.write(f"{_tsv_safe(entry['id'])}\t{_tsv_safe(entry['reason'])}\n")
 
@@ -114,19 +124,33 @@ def write_qc_tsv(qc_report: QCReport, path: Path) -> None:
 # Representative metadata TSV
 # ---------------------------------------------------------------------------
 
-def write_representative_tsv(representatives: list[Sequence], path: Path) -> None:
-    """Write metadata for all representative sequences to TSV."""
+def write_representative_sequences_tsv(
+    representatives: list[Sequence], path: Path
+) -> None:
+    """Write metadata for non-segmented representative sequences to TSV.
+
+    One row per representative sequence. Taxonomic ranks use the shared
+    :data:`_TAX_RANKS` ladder so this file and
+    ``_isolate_proteins.tsv`` are joinable on the same column names.
+    Sub-ranks (``subgenus``, ``subfamily``, ``suborder``, ``subclass``)
+    only populate when the resolver's lineage map carries them —
+    commonly blank for viruses.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = [
         "accession", "organism", "description", "strain",
         "host", "collection_date", "country", "segment", "isolate_id",
-        "seq_type", "length", "is_refseq", "is_reviewed",
-        "taxid", "species", "genus", "family", "order",
+        "molecule_type", "length_nt", "is_refseq", "is_reviewed",
+        "ncbi_taxon_id", *_TAX_RANKS,
     ]
     with open(path, "w") as fh:
         fh.write("\t".join(columns) + "\n")
         for seq in representatives:
             tax = seq.taxonomy
+            tax_cells = [
+                _tsv_safe(tax.get_rank(r) if tax else None)
+                for r in _TAX_RANKS
+            ]
             row = [
                 _tsv_safe(seq.accession),
                 _tsv_safe(seq.organism),
@@ -139,13 +163,66 @@ def write_representative_tsv(representatives: list[Sequence], path: Path) -> Non
                 _tsv_safe(seq.isolate_id),
                 _tsv_safe(seq.seq_type.value),
                 _tsv_safe(seq.length),
-                str(seq.is_refseq).lower(),
-                str(seq.is_reviewed).lower(),
+                _tsv_bool(seq.is_refseq),
+                _tsv_bool(seq.is_reviewed),
                 _tsv_safe(tax.taxid) if tax and tax.taxid else "",
-                _tsv_safe(tax.species) if tax else "",
-                _tsv_safe(tax.genus) if tax else "",
-                _tsv_safe(tax.family) if tax else "",
-                _tsv_safe(tax.order) if tax else "",
+                *tax_cells,
+            ]
+            fh.write("\t".join(row) + "\n")
+
+
+def write_representative_isolates_tsv(
+    representatives: list[Sequence], path: Path
+) -> None:
+    """Write metadata for segmented representative isolates to TSV.
+
+    One row per representative isolate (a synthetic
+    ``CONCAT|<isolate_id>`` Sequence). Columns that have no isolate-level
+    meaning (``accession``, ``segment``, ``description``,
+    ``molecule_type``) are replaced by isolate-level equivalents derived
+    from ``Sequence.concat_segments``: ``n_segments``, ``segments``
+    (comma-joined segment names in concat order), ``accessions``
+    (comma-joined per-segment GenBank accessions in concat order), and
+    ``total_length_nt`` (sum of per-segment NT lengths). Other metadata
+    (organism, strain, host, country, collection_date, taxonomy, RefSeq
+    / reviewed flags) is the isolate's, populated by
+    ``concatenate_isolate`` via first-non-empty / ``all()`` inheritance
+    across segments. Same ``_TAX_RANKS`` ladder as the sequence TSV.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    columns = [
+        "isolate_id", "organism", "strain", "host", "collection_date",
+        "country", "n_segments", "segments", "accessions",
+        "total_length_nt", "is_refseq", "is_reviewed", "ncbi_taxon_id",
+        *_TAX_RANKS,
+    ]
+    with open(path, "w") as fh:
+        fh.write("\t".join(columns) + "\n")
+        for seq in representatives:
+            tax = seq.taxonomy
+            tax_cells = [
+                _tsv_safe(tax.get_rank(r) if tax else None)
+                for r in _TAX_RANKS
+            ]
+            segs = seq.concat_segments or []
+            seg_names = [s.segment for s in segs if s.segment]
+            seg_accs = [s.accession or s.id for s in segs]
+            total_nt = sum(s.length for s in segs) if segs else seq.length
+            row = [
+                _tsv_safe(seq.isolate_id),
+                _tsv_safe(seq.organism),
+                _tsv_safe(seq.strain),
+                _tsv_safe(seq.host),
+                _tsv_safe(seq.collection_date),
+                _tsv_safe(seq.country),
+                _tsv_safe(len(segs) if segs else ""),
+                _tsv_safe(",".join(seg_names) if seg_names else ""),
+                _tsv_safe(",".join(seg_accs) if seg_accs else ""),
+                _tsv_safe(total_nt),
+                _tsv_bool(seq.is_refseq),
+                _tsv_bool(seq.is_reviewed),
+                _tsv_safe(tax.taxid) if tax and tax.taxid else "",
+                *tax_cells,
             ]
             fh.write("\t".join(row) + "\n")
 
@@ -243,7 +320,7 @@ def write_proteins_fasta(
     return True
 
 
-_ISOLATE_PROTEINS_TAX_RANKS = (
+_TAX_RANKS = (
     "species",
     "subgenus",
     "genus",
@@ -259,16 +336,25 @@ _ISOLATE_PROTEINS_TAX_RANKS = (
 def write_isolate_proteins_tsv(
     complete_isolates: dict[str, list[Sequence]],
     path: Path,
+    representative_isolate_ids: Optional[set[str]] = None,
 ) -> bool:
     """Write proteins per segment per isolate, one row per protein.
 
-    Columns: ``protein_id``, ``product``, ``length`` (protein length, aa),
-    ``isolate_id``, ``segment``, ``segment_length`` (nt length of the parent
-    segment), ``accession``, then the taxonomic ranks ``species``,
-    ``subgenus``, ``genus``, ``subfamily``, ``family``, ``suborder``,
-    ``order``, ``subclass``, ``class``. Sub-ranks are populated from the
-    resolver's lineage map (NCBI ``LineageEx``) and are commonly empty for
-    viruses, where ICTV often does not assign every intermediate rank.
+    Columns: ``protein_id``, ``product``, ``length_aa`` (protein length,
+    amino acids), ``isolate_id``, ``segment``, ``segment_length_nt``
+    (nucleotide length of the parent segment), ``accession``,
+    ``representative`` (``TRUE`` if the isolate was selected as a
+    clustering representative, ``FALSE`` otherwise), then the taxonomic
+    ranks ``species``, ``subgenus``, ``genus``, ``subfamily``,
+    ``family``, ``suborder``, ``order``, ``subclass``, ``class``.
+    Sub-ranks are populated from the resolver's lineage map (NCBI
+    ``LineageEx``) and are commonly empty for viruses, where ICTV often
+    does not assign every intermediate rank.
+
+    ``representative_isolate_ids`` is the set of isolate ids that survived
+    clustering — typically computed by the caller from
+    ``RunResult.representatives``. When ``None`` (legacy callers, direct
+    unit tests), every row's ``representative`` cell is ``FALSE``.
 
     Only emits a file when at least one segment has populated `proteins`.
     Returns True if the file was written, False if skipped.
@@ -279,21 +365,25 @@ def write_isolate_proteins_tsv(
     if not has_any:
         return False
 
+    rep_ids = representative_isolate_ids or set()
+
     path.parent.mkdir(parents=True, exist_ok=True)
     header = (
-        "protein_id\tproduct\tlength\tisolate_id\tsegment\tsegment_length\t"
-        "accession\t" + "\t".join(_ISOLATE_PROTEINS_TAX_RANKS) + "\n"
+        "protein_id\tproduct\tlength_aa\tisolate_id\tsegment\tsegment_length_nt\t"
+        "accession\trepresentative\t"
+        + "\t".join(_TAX_RANKS) + "\n"
     )
     with open(path, "w") as fh:
         fh.write(header)
         for isolate_id, segs in complete_isolates.items():
+            is_rep = _tsv_bool(isolate_id in rep_ids)
             for seq in segs:
                 if not seq.proteins:
                     continue
                 tax = seq.taxonomy
                 tax_cells = "\t".join(
                     _tsv_safe(tax.get_rank(r) if tax else None)
-                    for r in _ISOLATE_PROTEINS_TAX_RANKS
+                    for r in _TAX_RANKS
                 )
                 for prot in seq.proteins:
                     fh.write(
@@ -304,6 +394,7 @@ def write_isolate_proteins_tsv(
                         f"{_tsv_safe(seq.segment)}\t"
                         f"{_tsv_safe(seq.length)}\t"
                         f"{_tsv_safe(seq.accession or seq.id)}\t"
+                        f"{is_rep}\t"
                         f"{tax_cells}\n"
                     )
     return True
@@ -317,13 +408,13 @@ def write_cluster_tsv(result: RunResult, path: Path) -> None:
     """Write per-cluster summary to TSV."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fh:
-        fh.write("cluster_id\trepresentative_id\trepresentative_organism\tcluster_size\tis_refseq\tis_reviewed\n")
+        fh.write("cluster_id\taccession\torganism\tcluster_size\tis_refseq\tis_reviewed\n")
         for cluster in result.clusters:
             rep = cluster.representative
             fh.write(
                 f"{_tsv_safe(cluster.cluster_id)}\t{_tsv_safe(rep.accession or rep.id)}\t"
                 f"{_tsv_safe(rep.organism)}\t{cluster.size}\t"
-                f"{str(rep.is_refseq).lower()}\t{str(rep.is_reviewed).lower()}\n"
+                f"{_tsv_bool(rep.is_refseq)}\t{_tsv_bool(rep.is_reviewed)}\n"
             )
 
 
@@ -334,14 +425,15 @@ def write_cluster_tsv(result: RunResult, path: Path) -> None:
 def write_group_counts_tsv(result: RunResult, path: Path) -> bool:
     """Write per-group before/after selection counts to TSV.
 
-    One row per group at whatever dimension the mode stratified on
+    One row per stratum at whatever dimension the mode stratified on
     (taxonomic rank, host, time window, country, custom field, hybrid
-    field combination, or the whole dataset for ``global``). ``n_before``
-    is the number of sequences entering the group — in segmented runs
-    these are the concatenated per-isolate sequences. ``cutoff`` is the
-    MMseqs2 identity threshold the binary search settled on for that
-    group, left blank when the group was small enough to keep without
-    clustering (``clustered`` is then ``false``).
+    field combination, or the whole dataset for ``global``).
+    ``stratum_size_before`` is the number of sequences entering the
+    stratum — in segmented runs these are the concatenated per-isolate
+    sequences. ``cutoff`` is the MMseqs2 identity threshold the binary
+    search settled on for that stratum, left blank when the stratum
+    was small enough to keep without clustering (``clustered`` is then
+    ``FALSE``).
 
     Returns False without writing when the mode recorded no group stats.
     """
@@ -349,12 +441,12 @@ def write_group_counts_tsv(result: RunResult, path: Path) -> bool:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fh:
-        fh.write("grouping\tgroup\tn_before\tn_after\tclustered\tcutoff\n")
+        fh.write("stratified_by\tstratum\tstratum_size_before\tstratum_size_after\tclustered\tcutoff\n")
         for gs in result.group_stats:
             cutoff = f"{gs.cutoff:.4f}" if gs.cutoff is not None else ""
             fh.write(
                 f"{_tsv_safe(gs.grouping)}\t{_tsv_safe(gs.group)}\t{gs.n_before}\t{gs.n_after}\t"
-                f"{str(gs.clustered).lower()}\t{cutoff}\n"
+                f"{_tsv_bool(gs.clustered)}\t{cutoff}\n"
             )
     return True
 
@@ -376,13 +468,55 @@ def write_all_reports(
 
     write_run_log(result, qc_report, cfg, input_paths, output_files, out_dir / f"{prefix}_run.log")
     write_qc_tsv(qc_report, out_dir / f"{prefix}_qc_removed.tsv")
-    write_representative_tsv(result.representatives, out_dir / f"{prefix}_representatives.tsv")
+    # Mode-aware: segmented runs produce one row per representative
+    # isolate (CONCAT|<isolate_id> Sequence with concat_segments
+    # populated); non-segmented runs produce one row per representative
+    # sequence. The two writers emit different column sets — each
+    # tailored to the entity its rows actually represent.
+    if complete_isolates:
+        write_representative_isolates_tsv(
+            result.representatives,
+            out_dir / f"{prefix}_representative_isolates.tsv",
+        )
+    else:
+        write_representative_sequences_tsv(
+            result.representatives,
+            out_dir / f"{prefix}_representative_sequences.tsv",
+        )
     write_cluster_tsv(result, out_dir / f"{prefix}_clusters.tsv")
     write_group_counts_tsv(result, out_dir / f"{prefix}_group_counts.tsv")
     if complete_isolates:
+        rep_isolate_ids: set[str] = {
+            seq.isolate_id for seq in result.representatives if seq.isolate_id
+        }
+        # Segmented reps are emitted as synthetic CONCAT|<isolate_id>;
+        # mirror the parse used by write_proteins_fasta so the column is
+        # correct even if a rep lacks an isolate_id attribute.
+        for seq in result.representatives:
+            if seq.id.startswith("CONCAT|"):
+                parts = seq.id.split("|")
+                if len(parts) > 1:
+                    rep_isolate_ids.add(parts[1])
         write_isolate_proteins_tsv(
-            complete_isolates, out_dir / f"{prefix}_isolate_proteins.tsv"
+            complete_isolates,
+            out_dir / f"{prefix}_isolate_proteins.tsv",
+            representative_isolate_ids=rep_isolate_ids,
         )
+        # Row-filtered companion: same schema as _isolate_proteins.tsv,
+        # but only proteins of representative isolates. `representative`
+        # column is retained (all values TRUE) so the file format is
+        # byte-identical column-wise.
+        rep_only_isolates = {
+            iso_id: segs
+            for iso_id, segs in complete_isolates.items()
+            if iso_id in rep_isolate_ids
+        }
+        if rep_only_isolates:
+            write_isolate_proteins_tsv(
+                rep_only_isolates,
+                out_dir / f"{prefix}_representative_isolate_proteins.tsv",
+                representative_isolate_ids=rep_isolate_ids,
+            )
     write_proteins_fasta(
         result, complete_isolates, out_dir / f"{prefix}_proteins.fasta"
     )

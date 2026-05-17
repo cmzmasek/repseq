@@ -181,23 +181,67 @@ shape is hard-coded in `repseq/config.py:DEFAULTS`.
    `seq_type`. Cluster objects still carry the original NT-bearing
    `Sequence`, so rep selection and downstream output are unchanged.
 9. `write_results` writes the FASTA(s); `write_all_reports` writes the
-   plain-text/TSV reports — including `{prefix}_group_counts.tsv`
-   (one row per stratification group: `grouping, group, n_before,
-   n_after, clustered, cutoff` — populated from `RunResult.group_stats`,
-   which every mode fills in), `{prefix}_isolate_proteins.tsv`
-   (one row per CDS per passing isolate, segmented mode — columns:
-   `protein_id, product, length, isolate_id, segment, segment_length,
-   accession, species, subgenus, genus, subfamily, family, suborder,
-   order, subclass, class`; the four sub-ranks are populated only from
-   the resolver lineage map and commonly blank for viruses) and
-   `{prefix}_proteins.fasta` (amino-acid sequences for all proteins of
-   the selected representatives). The protein FASTA is reconstructed
-   from the same cached GenBank records — no extra network calls. When
-   any representative carries a populated `protein_sequence` (i.e.
-   `alphabet=protein` actually fired), an additional
-   `{prefix}_representatives_protein.fasta` is written, holding the AA
-   strings that were fed into the clustering step (per-isolate marker
-   concat in segmented mode, per-rep marker in non-segmented mode).
+   plain-text/TSV reports. Column names are deliberately harmonised
+   across files so the same concept (accession, organism, length, the
+   9-rank taxonomy ladder, boolean cells as `TRUE`/`FALSE`) carries the
+   same name everywhere — see `repseq/output/report.py` constants
+   `_TAX_RANKS` and `_tsv_bool`. The full set:
+
+   - `{prefix}_qc_removed.tsv`: `accession, reason`.
+   - `{prefix}_representative_sequences.tsv` (non-segmented mode):
+     `accession, organism, description, strain, host, collection_date,
+     country, segment, isolate_id, molecule_type, length_nt,
+     is_refseq, is_reviewed, ncbi_taxon_id`, then the 9-rank
+     `_TAX_RANKS` ladder (`species, subgenus, genus, subfamily,
+     family, suborder, order, subclass, class`). One row per
+     representative sequence.
+   - `{prefix}_representative_isolates.tsv` (segmented mode): one row
+     per representative isolate (synthetic `CONCAT|<isolate_id>`
+     Sequence with `concat_segments` populated). Columns: `isolate_id,
+     organism, strain, host, collection_date, country, n_segments,
+     segments` (comma-joined segment names in concat order),
+     `accessions` (comma-joined per-segment GenBank accessions in
+     concat order), `total_length_nt` (sum of per-segment NT lengths),
+     `is_refseq, is_reviewed, ncbi_taxon_id`, then the same
+     `_TAX_RANKS` ladder. The per-sequence columns (`accession`,
+     `segment`, `description`, `molecule_type`, `length_nt`) are
+     deliberately *absent* — they have no isolate-level meaning. Two
+     distinct writers (`write_representative_sequences_tsv` /
+     `write_representative_isolates_tsv`) so each schema stays clean.
+     Sub-ranks populate only from the resolver lineage map and are
+     commonly blank for viruses.
+   - `{prefix}_isolate_proteins.tsv` (segmented mode, one row per CDS
+     per passing isolate): `protein_id, product, length_aa, isolate_id,
+     segment, segment_length_nt, accession, representative`, then the
+     same `_TAX_RANKS` ladder. `representative` is `TRUE` if the
+     isolate survived clustering, `FALSE` otherwise — derived from
+     `result.representatives` (handles both `isolate_id` reps and
+     synthetic `CONCAT|<isolate_id>` reps).
+   - `{prefix}_representative_isolate_proteins.tsv` (segmented mode):
+     row-filtered companion to `_isolate_proteins.tsv`. Same exact
+     column schema (including the `representative` column, which is
+     always `TRUE` here) but only rows belonging to representative
+     isolates. Written by the same `write_isolate_proteins_tsv` writer
+     with a pre-filtered `complete_isolates` dict.
+   - `{prefix}_clusters.tsv`: `cluster_id, accession, organism,
+     cluster_size, is_refseq, is_reviewed`. `accession` is the
+     representative's accession.
+   - `{prefix}_group_counts.tsv` (one row per stratum):
+     `stratified_by, stratum, stratum_size_before, stratum_size_after,
+     clustered, cutoff` — populated from `RunResult.group_stats`,
+     which every mode fills in. Internal `GroupStat` field names are
+     still `grouping`/`group`/`n_before`/`n_after` for historical
+     reasons; only the column labels were harmonised.
+   - `{prefix}_tree_id_map.tsv` (only when `--phylo` ran):
+     `short_id, accession`.
+   - `{prefix}_proteins.fasta` (amino-acid sequences for all proteins
+     of the selected representatives). Reconstructed from the same
+     cached GenBank records — no extra network calls.
+   - `{prefix}_representatives_protein.fasta` (only when any
+     representative carries a populated `protein_sequence`, i.e.
+     `alphabet=protein` actually fired): the AA strings that were fed
+     into the clustering step — per-isolate marker concat in segmented
+     mode, per-rep marker in non-segmented mode.
 10. If `--plot` is passed, `viz.clustering_plot.write_clustering_plot`
     embeds the clustered sequences with UMAP on k-mer Jaccard distance
     and writes `{prefix}_clustering.png`. Cost-bounded by a default
@@ -370,500 +414,25 @@ repseq taxonomic1 -c my.yaml -i x.fasta --rank genus -n 5 --dry-run
 
 ## Status
 
-`v0.7.1` extends v0.7.0's tree annotation with four follow-up
-patches driven by the first real peribunyaviridae run.
+`v0.8.0` is a TSV output-schema overhaul. Column names are now
+harmonised across the six TSVs the program writes — the canonical
+sequence identifier is `accession` everywhere (was a mix of
+`sequence_id` / `representative_id` / `original_id`), booleans are
+`TRUE` / `FALSE` everywhere (was a mix of cases), length columns
+carry their alphabet (`length_nt` / `length_aa` / `segment_length_nt`
+/ `total_length_nt`), the taxonomic ladder is the same 9-rank
+sequence everywhere (`_TAX_RANKS`), and `_group_counts.tsv` adopts
+statistical vocabulary (`stratified_by`, `stratum`,
+`stratum_size_before/after`). `seq_type` became `molecule_type`,
+`taxid` became `ncbi_taxon_id`. The rep TSV split by mode:
+`_representative_sequences.tsv` (non-segmented, per-sequence schema)
+or `_representative_isolates.tsv` (segmented, per-isolate schema with
+`n_segments`, `segments`, `accessions`, `total_length_nt` instead of
+the per-sequence `accession`/`segment`/`description`/`molecule_type`/
+`length_nt`). `_isolate_proteins.tsv` gained a `representative`
+column (TRUE/FALSE) marking whether the isolate survived clustering.
+A new `_representative_isolate_proteins.tsv` is a row-filtered
+companion to `_isolate_proteins.tsv` carrying only proteins of
+representative isolates (same schema). Breaking change for any
+downstream script that parses output by column name or filename.
 
-**Pass C — multi-`<sequence>` leaves.** Fixes the
-biggest gap left by v0.7.0: each segmented-mode leaf is an isolate,
-not a single sequence, so the bare one-`<sequence>`-per-leaf shape was
-hiding the per-segment nuc accessions and every protein except the
-marker.
-
-Each leaf now emits:
-
-* **One `<sequence>` per underlying nucleotide segment** AND **one per
-  protein CDS** (markers used to build the tree come first, then
-  non-marker proteins, then nucs). The marker-first ordering matters
-  because many phyloXML viewers display only the first `<sequence>`
-  element — putting the marker first means the visible label is the
-  protein that actually drove the tree. `<sequence type="protein">`
-  for CDS records, `<sequence type="dna">` for segments (this also
-  fixes the v0.7.0 bug where CONCAT records emitted `type="dna"` on
-  an AA tree).
-* **Three new `repseq:`-namespaced summary properties**:
-  - `repseq:nuc_acc` — comma-joined nucleotide accessions (segment
-    order).
-  - `repseq:protein_acc` — comma-joined `protein_id` values, marker
-    first.
-  - `repseq:protein_names` — comma-joined `product` strings, marker
-    first.
-
-These reproduce the multi-`<sequence>` data in a form renderers
-parse uniformly even when they ignore subsequent `<sequence>`
-elements.
-
-The same shape applies uniformly to **segmented** and
-**non-segmented** input: a non-segmented leaf with several CDSes
-gets `N+1` `<sequence>` elements (one nuc + N proteins). Leaves
-with no CDS info fall back gracefully to the single nuc
-`<sequence>` (`repseq:nuc_acc` only).
-
-Data-model additions on `Sequence`:
-* `concat_segments: Optional[list[Sequence]]` — populated by
-  `concatenate_isolate` with references to the per-segment
-  `Sequence` objects (each already carries `.proteins`). `None` for
-  non-segmented input.
-* `marker_protein_ids: Optional[list[str]]` — for non-segmented
-  input the single marker's `protein_id` (set by
-  `populate_protein_sequences`); for segmented CONCAT records the
-  per-segment marker `protein_id` list in segment order (set by
-  `build_concatenated_sequences`).
-
-Removed: `phylo.phyloxml.embed_alignment` knob and all `<mol_seq>`
-emission. The MSA is always written separately to
-`{prefix}_msa.fasta`; embedding it inline was both redundant and a
-problem with multiple `<sequence>` elements per leaf.
-
-Tests updated/added:
-- `tests/test_phyloxml_writer.py`: dropped the two `embed_alignment`
-  tests; renamed the single-`<sequence>` test to "one dna sequence
-  when no proteins"; new tests for multi-`<sequence>` with markers
-  first, three summary property lists, segmented 7-element shape,
-  and summary-property omission when no proteins.
-- `tests/test_marker.py` (+1 assertion): `populate_protein_sequences`
-  sets `marker_protein_ids`.
-- `tests/test_segmented.py` (+2): `concatenate_isolate` stores
-  `concat_segments`; `build_concatenated_sequences` records the
-  per-segment marker ids.
-- `tests/test_config.py` (−2): dropped `embed_alignment` validation
-  cases.
-
-**Three Pass-C follow-up patches** layered on top:
-
-* **NCBI-Virus `<name>` pipe strip** — NCBI Virus FASTA headers
-  carry a pipe-separated metadata block (``NC_078889.1
-  |species|host|...|segment``), so the parsed ``seq.description``
-  starts with ``|`` and ends up in ``<sequence><name>`` as
-  ``|Turlock orthobunyavirus segment L...``. A new ``_clean_name``
-  helper in the writer strips leading/trailing pipes and collapses
-  adjacent ``||`` runs from empty NCBI-Virus fields. A proper
-  pipe-aware NCBI Virus header parser is queued as a future pass
-  (see the user's memory; the parser would lift metadata into
-  structured ``Sequence`` fields and eliminate the need for this
-  cosmetic strip).
-* **`markers=…` in `<phylogeny><description>`** — records which
-  marker proteins (by *product name*, not protein_id which differs
-  per isolate) actually fed the tree. Segmented:
-  ``markers=L:polymerase, M:glycoprotein, S:nucleoprotein``;
-  pipe-joined inside a segment when reps picked different products
-  (``L:RdRp|polymerase``). Non-segmented: flat comma-list of unique
-  product names. Omitted for nucleotide-alphabet runs.
-* **Bench-scientist progress messages** — the MAFFT, FastTree, and
-  IQ-TREE wrappers now emit ``[phylo] starting X (args)`` before
-  the subprocess and ``[phylo] X finished (Ys)`` after success
-  (stderr, matching the existing ``[iqtree]`` / ``[phylo skipped]``
-  style). Path-bearing args (binary path, ``-s INPUT``,
-  ``--prefix PFX``, input filename) are stripped from the display
-  string; user-meaningful args (model, threads, UFBoot count,
-  extras) are kept. Long-running steps no longer look like a
-  frozen pipeline.
-
-608 offline tests total (599 from v0.7.0 Pass C + 4 markers tests
-+ 5 progress-message tests = 608; the writer's pipe-strip test
-counts inside the +4 already).
-
-`v0.7.0` overhauls phylogenetic-tree annotation in two passes, both
-released together.
-
-**Pass B — rooting + internal-node LCA annotation** —
-builds on Pass A's rich phyloXML by post-processing the tree before
-serialisation. Two new modules:
-
-* `repseq/phylo/rooting.py` — picks a root via the chain
-  **taxonomy-guided → MAD → midpoint** (first success wins), or by
-  user-pinned method (`phylo.rooting.method`: `auto` default,
-  `taxonomy`, `mad`, `midpoint`, or `none`). Taxonomy-guided scoring
-  is mean LCA specificity across internal clades, weighted by clade
-  size, gated by ≥50% lineage coverage. MAD is a pure-Python port
-  (no external dep) that minimises Σρ² across all leaf pairs over
-  per-branch split points; analytical solution per branch.
-* `repseq/phylo/lca.py` — labels every internal clade with the
-  lowest common ancestor of its terminals (read from
-  `TaxonomyInfo.lineage`). Coverage gate `phylo.lca.coverage_threshold`
-  (default 0.5) skips bare clades; `phylo.lca.min_rank` (default
-  `"genus"` — viral data rarely reaches species universally)
-  excludes thinly-annotated leaves from the LCA vote without
-  removing them from the tree. `keep_deepest_labels` walks
-  largest-first and clears every nested duplicate so each
-  monophyletic group's label lands on the crown, not the
-  intermediate internals. `suppress_same_species_pairs` clears the
-  LCA name from any internal whose only children are two leaves of
-  the same species (the species name is already on the leaves).
-
-ICTV rank inference (`_infer_rank_from_name`) handles the common
-suffix → rank mapping (`-viridae` → family, `-virales` → order,
-`-viricetes` → class, single-word `…virus` → genus, etc.) for when
-the lineage map doesn't carry an explicit rank. PhyloXML's `<rank>`
-enum is validated via `phyloxml_rank` — unknown ranks (`"no rank"`,
-`"clade"`, NCBI's odd custom ranks) fall back to `"other"` so the
-file always validates.
-
-Writer (`phyloxml_writer.py`) now accepts a pre-parsed `tree=` (so
-the pipeline can root + LCA-annotate before serialisation). Internal
-clades emit `<name>` and `<taxonomy>` (`<scientific_name>` + `<rank>`)
-when `_lca_name` is set; otherwise stay bare. The
-`<phylogeny><description>` records which rooting method actually
-fired (`rooting=taxonomy` / `mad` / `midpoint`), so an `auto`-chain
-result is auditable from the file alone.
-
-New tests:
-- `tests/test_rooting.py` (10): LCA-prefix correctness, method=none
-  passthrough, midpoint fallback when no lineage, taxonomy method
-  fall-through when nothing to root by, taxonomy success on a tree
-  with clean family groups, MAD success, invalid method falls back to
-  auto, mean-LCA-specificity rewards consistent grouping, zero-score
-  with no lineage data.
-- `tests/test_lca.py` (15): ICTV-suffix inference (4: family, order,
-  phylum, class, subfamily — and the multi-word "X virus" → no rank
-  case), min_rank gate (species, too-coarse, "none" disables),
-  LCA-prefix on (rank, name) tuples; annotate_internal_nodes
-  family-rollup, coverage-gate skip, min_rank-filter excludes-but-keeps
-  leaves; keep_deepest clears nested duplicates and preserves
-  distinct labels; same-species pair suppression on 2-leaf internal,
-  no-op when species differ, no-op when >2 children; phyloxml_rank
-  accepts standard ranks and falls back to "other" for unknown.
-- `tests/test_phyloxml_writer.py` (+4): internal `<name>` +
-  `<taxonomy>(<scientific_name>,<rank>)` when LCA set; rank fallback
-  to "other"; no `<name>`/`<taxonomy>` on bare internals; rooting
-  method recorded in description.
-- `tests/test_config.py` (+9): rooting defaults, all-five-methods
-  accepted, unknown rejected, LCA defaults, enabled bool check,
-  min_rank accept-list, unknown min_rank rejected,
-  coverage_threshold range check.
-
-596 offline tests total (Pass A + Pass B combined).
-
-**Pass A — phyloXML annotation overhaul** — replaces the
-one-line `Bio.Phylo.write(...)` phyloXML emission with a hand-rolled
-writer (`repseq/phylo/phyloxml_writer.py`) that produces a
-**richly-annotated** tree. Each leaf now carries:
-
-* A formatted `<name>` driven by `phylo.labeling.format` (defaults
-  `"{species}|{id}|{host}"`) or `phylo.labeling.segmented_format`
-  (defaults `"{species}|{strain}|{host}"`) when segmented mode is on.
-  Empty placeholders drop the preceding separator so labels never
-  read `||` or end with `|`; `{strain}` falls back to `{isolate_id}`
-  when the GenBank `/strain` qualifier is missing — one template
-  works for both segmented and non-segmented runs.
-* A `<taxonomy>` block with `<id provider="ncbi">` (from
-  `TaxonomyInfo.taxid`) and `<scientific_name>` (species).
-* A `<sequence type="dna|protein">` block with
-  `<accession source="ncbi">` and `<name>` = original GenBank
-  header / description.
-* Repseq-namespaced `<property>` elements (under `xmlns:repseq=
-  https://github.com/cmzmasek/repseq`) for `host`, `collection_date`,
-  `country`, `strain`, `isolate_id`, `year` (parsed from
-  `collection_date`), `species`, `genus`, `subfamily`, `family`.
-  Empty values are **omitted**, not emitted as empty stubs.
-
-Tree-level: `<phylogeny>` gains `<name>` (e.g.
-`peribunyaviridae_genus5 [protein|MAFFT|IQ-TREE LG+G4]`) and
-`<description>` (run timestamp + MAFFT/IQ-TREE/FastTree versions
-captured via new `tool_version()` helpers + selected model + bootstrap
-count + extra args). Tree is **ladderized** (`reverse=True`, larger
-clades top) before write. Confidence values are normalised to **0-100
-integers**: FastTree's SH-like `[0,1]` is rescaled, IQ-TREE's UFBoot
-`[0,100]` passes through; the `<confidence type="...">` attribute
-records the metric (`sh_like` / `ufboot` / `sh_alrt` / `bootstrap`),
-overridable via `phylo.phyloxml.confidence_type`. Optional
-`phylo.phyloxml.embed_alignment: true` inlines the per-leaf aligned
-residues as `<mol_seq is_aligned="true">` (off by default —
-`{prefix}_msa.fasta` is always written separately).
-
-Per-isolate metadata inheritance in `concatenate_isolate` now uses
-**first non-empty** across segments instead of always segment 0, so a
-single blank field on the first segment no longer wipes the value
-from the concat record (e.g. host present on segment M but blank on
-segment L).
-
-New files: `repseq/phylo/labels.py` (placeholder substitution +
-separator-drop), `repseq/phylo/phyloxml_writer.py` (stdlib
-`xml.etree.ElementTree`, namespace-aware, schema-ordered children).
-The orchestrator (`repseq/phylo/pipeline.py`) now collects MAFFT /
-tree-tool versions and the resolved model + bootstrap count and
-passes them to the writer.
-
-New tests:
-- `tests/test_labels.py` (21): placeholder substitution, taxonomy
-  rank resolution, year parsing, empty-token handling, separator-drop
-  on empty, strain→isolate_id fallback, literal-text preservation,
-  config helpers (`pick_format_string` segmented/non-segmented,
-  `labeling_options` defaults + overrides).
-- `tests/test_phyloxml_writer.py` (20): confidence normalisation
-  (SH-like rescale, UFBoot passthrough, clamp, None → skip),
-  confidence-type mapping (defaults, override, auto, unknown-tool),
-  end-to-end write (XML well-formed, taxonomy block, sequence block,
-  property namespace + datatype + applies_to, omitted-empty
-  properties, year-from-date, phylogeny name + description, internal
-  confidence rescale, type attribute per tool, schema element order,
-  embed_alignment on/off, configured label format, segmented label
-  uses strain, ladderize).
-- `tests/test_segmented.py` (+2): first-non-empty inheritance picks
-  up later-segment metadata; segment-0-wins when all set.
-- `tests/test_config.py` (+8): labeling defaults, format type,
-  null-segmented-format accepted, replace_whitespace bool check;
-  phyloxml defaults, embed_alignment bool, all confidence_type
-  values accepted, unknown confidence_type rejected.
-
-Removed tests: two `_newick_to_phyloxml` direct tests in
-`tests/test_phylo.py` — the helper is gone (the orchestrator now
-calls `write_phyloxml` directly), and the dedicated writer test file
-covers the same ground in more detail.
-
-`v0.6.1` adds **IQ-TREE as the protein tree-builder**. New
-`phylo.tool` knob (`auto` | `iqtree` | `fasttree`); `auto` (default)
-picks IQ-TREE for protein alignments and FastTree for nucleotide.
-IQ-TREE is invoked with **ModelFinder Plus** (`-m MFP`, scans
-substitution models and picks by BIC — JTT vs WAG vs LG can change
-topology on viral proteins) and **1000 ultrafast-bootstrap replicates**
-(`-B 1000`, IQ-TREE's recommended minimum for interpretable support).
-Binary auto-detected: tries `iqtree2` first, then `iqtree`; overridable
-via `phylo.iqtree.binary`. The wrapper runs IQ-TREE under a temp
-`--prefix` so its ~8 auxiliary files (`.iqtree`, `.log`, `.bionj`,
-`.mldist`, `.contree`, `.splits.nex`, `.ckp.gz`) land in scratch and
-get deleted; only the canonical `.treefile` (→ `{prefix}_tree.nwk`)
-and the human-readable `.iqtree` model-selection report (→
-`{prefix}_iqtree_summary.txt`) are kept. UFBoot refuses `<4`
-sequences, so the wrapper auto-drops bootstrap with a stderr note when
-the MSA has 3 reps (keeps the tree). `doctor` gains `iqtree2` /
-`iqtree` to the external-binaries check (WARN-only). 27 new tests
-cover IQ-TREE binary auto-detect (4: prefer iqtree2, fall back to
-iqtree, override honoured, all-missing raises), argv construction
-(model / threads / seed / UFBoot / extra_args, 3), the UFBoot
-auto-skip below 4 seqs (1), config-disable of UFBoot (1), missing
-summary path (1), subprocess failure → IQTreeError (1), missing
-treefile detection (1), MSA record counting (1); dispatcher
-auto-by-alphabet (2: iqtree-for-protein, fasttree-for-NT), explicit
-tool override (1), IQ-TREE summary appended to output list (2:
-present and absent), IQ-TREE-error → PhyloError wrapping (1); config
-validation (8: defaults, tool override accepted/rejected, ufboot
-non-negative + integer, model + binary string typing); doctor
-binary check (2: dual-name accepted, missing-is-warn). 501 offline
-tests total.
-
-`v0.6.0` switches **clustering to amino-acid sequences by default**.
-The new `clustering.alphabet` knob (`protein` default, `nucleotide`,
-or `auto`) picks what's fed to MMseqs2 / cd-hit. The motivation is the
-v0.5.x Orthobunyavirus run that drove `--min-seq-id` to 0.30 looking
-for a target cluster count: synonymous substitutions inflate NT
-divergence by 30–40% with no biological signal, the binary search
-drifted into mmseqs2's sensitivity dead zone, and the reported cutoff
-ceased to mean anything. Protein clustering avoids both problems —
-reliable homology to ~25–30% identity, biologically meaningful
-thresholds. The new `clustering.marker.select_marker_protein` picks
-the marker per sequence (longest CDS by default; first matching
-`cluster_protein` alias against `/product` as a case-insensitive
-substring otherwise — alias order encodes preference). For segmented
-viruses, each segment contributes its own marker; the per-isolate
-concat lives on `concat.protein_sequence` and is what the clustering
-backend sees. Isolates whose marker is missing on any segment are
-dropped under `removed_incomplete_isolates`; non-segmented sequences
-without a viable marker are dropped under `removed_proteins`. The
-backends thread the alphabet through `_write_id_fasta`; the cd-hit
-dispatcher's `_is_protein` consults `cfg["clustering"]["alphabet"]`
-first, so the protein binary (`cd-hit`, 0.40 floor) is used even on
-NT-typed CONCAT records carrying a `protein_sequence`. The new
-`_setup_protein_alphabet` step auto-triggers `attach_proteins` if QC
-didn't already (one-shot GenBank CDS fetch, same `ncbi_proteins` cache);
-`--no-resolve` + `alphabet=protein` aborts at startup, `alphabet=auto`
-silently falls back to `nucleotide`. Output gains
-`{prefix}_representatives_protein.fasta` (AA strings actually fed to
-clustering) alongside the existing NT outputs; `--phylo` builds the
-MSA / tree on the AA strings when alphabet=protein actually fired
-(single `_msa.fasta`, FastTree JTT). 37 new tests cover the marker
-selector (8 cases: empty inputs, longest-CDS default, alias-order
-preference, case-insensitive substring match, alias fallback,
-translation-missing skip, all-translations-missing → None, alias-tie
-length break), non-segmented `populate_protein_sequences` (3:
-populates field, alias override, drops-no-marker sequences), segmented
-`build_concatenated_sequences` protein path (4: longest-CDS-per-segment
-fallback, per-segment alias selection, missing-marker drop, no-alias-
-match fallback), `_setup_protein_alphabet` (6: nucleotide no-op,
-auto-fetch when proteins missing, `--no-resolve` abort, auto fallback
-to nucleotide, segmented skips per-sequence populate, `_resolve_alphabet`
-auto branches), backend alphabet threading (`_write_id_fasta`
-protein-body and missing-protein error; cd-hit `_is_protein` honours
-alphabet override; cd-hit `min_threshold` floor follows override),
-config validation (5: default alphabet=protein, nucleotide/auto
-accepted, unknown rejected, non-list `cluster_protein` rejected,
-per-segment `cluster_protein` accepted + unknown-segment + empty-alias
-rejected), the writer's AA output (2: emitted when reps carry it,
-skipped otherwise), and the phylo AA path (1: AA bodies + protein
-model when alphabet=protein on NT-typed reps). 474 offline tests total.
-
-Cache compatibility: v0.5.9+ `ncbi_proteins` cache entries already
-carry `proteins[i]["sequence"]` (the GenBank `/translation`), so
-existing runs benefit immediately with no refetch. Older entries
-without translations return `None` from the marker selector and the
-isolate is dropped — clear the `ncbi_proteins` cache to refresh.
-
-`v0.5.10` makes segmented mode prefer **GenBank source-feature
-qualifiers** (`/isolate`, `/strain`, `/segment`) over the
-header-regex parse. Behind the new `segmented.use_genbank_metadata`
-toggle (default `true`). The new
-`NCBITaxonomy.fetch_source_metadata_batch` reuses the existing
-`ncbi_proteins` SQLite cache — a run with protein QC and segmented
-metadata extraction pays one efetch round trip, not two. Fetch happens
-in a new CLI helper `_populate_genbank_isolate_segment` that runs after
-`_run_protein_qc` and before `_handle_segmented`; UniProt sequences,
-sequences without an accession, and `--no-resolve` runs all fall back
-to the regex transparently (no warning, no error). `extract_isolate_id`
-and `identify_segment` in `segmented/completeness.py` were already
-written to short-circuit when `seq.isolate_id` / `seq.segment` are set
-— no changes needed there. Cache entries written by v0.5.9 are
-forwards-compatible: missing `source` key returns all-None and the
-regex fallback fires. 13 new tests cover the source-feature parser
-(qualifier present / absent), cache-sharing with protein QC,
-legacy-cache forward compatibility, all six branches of the CLI
-helper's gating, the strain-as-isolate fallback, and the bool config
-validation. 437 offline tests total.
-
-`v0.5.9` adds a **`repseq doctor`** self-test subcommand for
-bench-scientist debugging. Emits a grouped report
-(Python packages / external tools / network / configuration) with
-`[OK]`/`[WARN]`/`[FAIL]` tags and a one-line summary; exits non-zero
-only on `[FAIL]`. Policy: required Python packages (biopython, click,
-PyYAML, requests) are `FAIL` if missing; optional `[viz]` extras
-(umap-learn, matplotlib) are `WARN` (only needed for `--plot`); every
-external binary (mmseqs, cd-hit, cd-hit-est, mafft, FastTree) is
-`WARN` if missing (none is strictly required — pick a backend you
-have, or use a diversity-only mode); NCBI Entrez + UniProt REST are
-pinged with a 5s timeout and `WARN` on unreachable (you can run with
-`--no-resolve`); cache directory unwritable is `FAIL`; missing
-`taxonomy.ncbi_email` is `WARN` (works but rate-limited). The actual
-import is attempted (not just `find_spec`) so a broken install
-— e.g. a numpy/scipy ABI mismatch — is reported as missing rather
-than silently passing. `--no-network` skips the database pings.
-`_package_version` reads version via `importlib.metadata` so click 9.x
-losing `__version__` is a non-issue. 17 new tests cover the WARN-vs-
-FAIL policy, the network unreachable/timeout branches, cache-dir
-write failure, config validation surfacing, and the click-CLI exit
-codes. 424 offline tests total.
-
-`v0.5.8` adds an optional **phylogeny step** behind the new
-`--phylo` flag (works on every mode command). Builds an MSA with MAFFT
-(`--auto`) and an approximate-ML tree with FastTree on the final
-representative sequences (which in segmented mode are the concatenated
-per-isolate sequences, so the tree's leaves are isolates not segments).
-Every rep gets a deterministic short id (`S0001`…) before the MSA step
-because long names, whitespace, and pipes break many phylo tools; the
-final phyloXML restores each terminal clade's name to `seq.id` via
-`Bio.Phylo`, while the intermediate Newick keeps the short ids
-(decodable from `{prefix}_tree_id_map.tsv`). FastTree's substitution
-model is auto-picked from the rep alphabet (`-nt -gtr` for nucleotide,
-default JTT for protein). The step is fail-soft: skipped with a stderr
-`[phylo skipped]` when there are `<3` reps, when `mafft` or `FastTree`
-are missing, or when either subprocess errors — the rest of the run's
-outputs are always written. New tests cover short-id round-trip, name
-restoration in phyloXML (including pipe / non-ASCII originals), the
-`<3` skip rule, NT-vs-AA model selection, and the `[phylo skipped]`
-stderr path. 407 offline tests total.
-
-`v0.5.7` adds an optional **cd-hit clustering backend** alongside
-the existing MMseqs2 one. `cfg["clustering"]["backend"]` selects
-`"mmseqs2"` (default, unchanged behaviour) or `"cdhit"`. The cd-hit
-wrapper (`clustering/cdhit.py`) auto-picks `cd-hit` for protein input,
-`cd-hit-est` for nucleotide; auto-picks `-n` (word size) from the
-threshold per cd-hit's required table; writes input FASTAs through
-`_write_id_fasta` (so cd-hit's whitespace-truncation cannot corrupt the
-round-trip) and parses `.clstr` output via the `>id...` token marked
-with `*`. A shared dispatcher (`clustering/__init__.py:run_clustering`)
-routes modes between backends — modes now import from `..clustering`
-instead of `..clustering.mmseqs2`. Identity floors differ:
-mmseqs2 = 0.0, cd-hit (protein) = 0.40, cd-hit-est (nucleotide) = 0.80;
-`clustering.min_threshold(cfg, sequences)` returns the active floor and
-`_binary_search_threshold` clamps `lo` to it so the search never asks
-the backend for a value it would refuse. New regression tests cover the
-`.clstr` parser, auto-binary selection, threshold floor, dispatch, the
-binary-search floor-clamp, and config validation of the new
-`clustering.cdhit` block. 394 offline tests total.
-
-`v0.5.6`. All 8 modes structurally complete, optional protein-annotation
-QC (batched GenBank fetch + per-segment count check), a protein-FASTA
-output reconstructed from cached records, per-segment nucleotide length
-bounds (`segment_lengths` in virus config, applied after completeness
-filter), and an optional UMAP scatter of the clustering result (`--plot`,
-behind the `[viz]` extras: `matplotlib` + `umap-learn`). In segmented mode
-the whole-pool QC length filter is skipped automatically (mixed segment
-lengths make a pooled median meaningless and would drop short segments,
-leaving every isolate incomplete) — use `segment_lengths` instead.
-Exact-duplicate removal is likewise skipped on the segment pool and
-applied instead to the concatenated per-isolate sequences in
-`_handle_segmented` — a segment conserved across two distinct isolates
-must not delete either isolate by leaving it "incomplete". Every
-run ends with a one-line CLI summary (representatives/clusters selected, QC
-pass rate) or, when nothing is selected, a stderr warning naming the most
-likely cause (`cli._final_summary`). Every mode also records per-group
-before/after counts (`RunResult.group_stats`) written to
-`{prefix}_group_counts.tsv`. Taxonomic lineage is resolved via NCBI
-`efetch` XML (`ncbi._parse_taxonomy_xml`) — the taxonomy *esummary*
-endpoint carries no lineage for viruses, which used to group every
-viral sequence under "Unknown". Offline regression tests cover IO,
-QC, selector, segmented logic (including per-segment length filtering),
-cache TTL, config validation, diversity selection, resolver fallback, mode
-dispatch (clustering mocked), protein parser + filter, FASTA writer, segment
-aliases, the closing CLI summary, per-group count reporting, and the
-clustering plot (auto-skipped if `umap-learn` is missing). NCBI Entrez paths have been
-live-tested against the H1N1 RefSeq genome (8 segments, 11 proteins).
-
-A full pipeline audit (see git history around this note) fixed, with
-regression tests: clustering ID round-trip for UniProt/CONCAT inputs,
-RefSeq-nucleotide accession misrouting, the `MAG:` keyword filter, an
-**inverted binary-search direction** (the threshold↔cluster-count
-relationship was backwards, so `n-per-group` searches walked away from
-the target), NCBI host/country/date now harvested from esummary
-`subtype`/`subname` with the DB taking precedence over header heuristics,
-a length-robust containment distance for diversity selection, thread-safe
-caches and rate limiters, and assorted QC/parsing corrections.
-
-`v0.5.5` hardens every place where header or identifier text crosses a
-format boundary. The trigger was a Peribunyaviridae run where a 73-seq
-genus came out of clustering as 73 reps at `cutoff = 1.0000`: isolate
-names like `yaba-7 virus strain yaba 7` contain whitespace, so the
-normalised id (and the derived `CONCAT|<isolate>` `seq.id`) carried
-spaces; MMseqs2 truncates a FASTA header token at the first whitespace,
-the parser then could not match cluster-TSV rows back to inputs, and
-the binary search misread the empty cluster list as "≤ target" — falling
-through to the final `best_reps = list(sequences)` fallback at `hi = 1.0`.
-Fixes, with regression tests:
-`_normalise_isolate_id` replaces both whitespace **and** the pipe
-separator with `_` so `seq.id` survives MMseqs2 truncation and
-`split("|")[1]` CONCAT parsing; `run_clustering` raises
-`MMseqs2Error("Cluster round-trip mismatch...")` if the parsed cluster
-membership does not account for every input; both FASTA writers
-(`io/fasta.write_fasta`, `clustering/mmseqs2._write_id_fasta`)
-collapse embedded `\r`/`\n` in headers to a space so a malformed
-header cannot inject a phantom record; every TSV writer routes free-
-text fields through a new `output/report._tsv_safe` helper that
-neutralises tab and line-break characters so a stray value cannot
-shift columns or rows. A 200-case brittleness probe
-(`tests/test_unusual_characters.py`) exercises every (surface,
-character) pair across whitespace and the punctuation classes most
-common in viral metadata. 362 offline regression tests total.
-
-`v0.5.6` enriches `{prefix}_isolate_proteins.tsv`. The previous six
-columns (`isolate_id, segment, accession, protein_id, product, length`)
-are reordered and extended to sixteen: `protein_id, product, length,
-isolate_id, segment, segment_length, accession, species, subgenus,
-genus, subfamily, family, suborder, order, subclass, class`. The
-protein columns lead so the table reads as "what gene, on which
-segment of which isolate, in what organism." `segment_length` is the
-nucleotide length of the parent segment (`seq.length`). Taxonomy is
-read via `TaxonomyInfo.get_rank(rank)`, which checks the standard
-fields first and falls back to the resolver's lineage map (NCBI
-`LineageEx`); the four sub-ranks (`subgenus`, `subfamily`, `suborder`,
-`subclass`) have no standard field and come exclusively from the
-lineage map — they are commonly blank for viruses, where ICTV often
-skips intermediate ranks. Two regression tests cover the lineage-
-backed sub-ranks and the missing-taxonomy fallback (all 9 rank cells
-blank). 364 offline regression tests total.

@@ -429,14 +429,16 @@ def test_write_isolate_proteins_tsv(tmp_path: Path, make_seq):
     complete_isolates = {"A/duck/HK/1/97": [s1, s2]}
 
     path = tmp_path / "iso_proteins.tsv"
-    wrote = write_isolate_proteins_tsv(complete_isolates, path)
+    wrote = write_isolate_proteins_tsv(
+        complete_isolates, path, representative_isolate_ids={"A/duck/HK/1/97"}
+    )
     assert wrote is True
 
     lines = path.read_text().strip().splitlines()
     assert lines[0] == (
-        "protein_id\tproduct\tlength\tisolate_id\tsegment\tsegment_length\t"
-        "accession\tspecies\tsubgenus\tgenus\tsubfamily\tfamily\tsuborder\t"
-        "order\tsubclass\tclass"
+        "protein_id\tproduct\tlength_aa\tisolate_id\tsegment\tsegment_length_nt\t"
+        "accession\trepresentative\tspecies\tsubgenus\tgenus\tsubfamily\t"
+        "family\tsuborder\torder\tsubclass\tclass"
     )
     assert len(lines) == 3  # header + 2 protein rows
 
@@ -448,20 +450,22 @@ def test_write_isolate_proteins_tsv(tmp_path: Path, make_seq):
     assert row1[4] == "HA"
     assert row1[5] == "1600"           # len("ACGT" * 400)
     assert row1[6] == "NC_001.1"
-    assert row1[7] == "Influenza A virus"
-    assert row1[8] == ""                # subgenus (absent)
-    assert row1[9] == "Alphainfluenzavirus"
-    assert row1[10] == ""               # subfamily (absent)
-    assert row1[11] == "Orthomyxoviridae"
-    assert row1[12] == ""               # suborder (absent)
-    assert row1[13] == "Articulavirales"
-    assert row1[14] == ""               # subclass (absent)
-    assert row1[15] == "Insthoviricetes"
+    assert row1[7] == "TRUE"            # representative
+    assert row1[8] == "Influenza A virus"
+    assert row1[9] == ""                # subgenus (absent)
+    assert row1[10] == "Alphainfluenzavirus"
+    assert row1[11] == ""               # subfamily (absent)
+    assert row1[12] == "Orthomyxoviridae"
+    assert row1[13] == ""               # suborder (absent)
+    assert row1[14] == "Articulavirales"
+    assert row1[15] == ""               # subclass (absent)
+    assert row1[16] == "Insthoviricetes"
 
     row2 = lines[2].split("\t")
     assert row2[0] == "NA_P1"
     assert row2[4] == "NA"
     assert row2[5] == "1400"            # len("ACGT" * 350)
+    assert row2[7] == "TRUE"            # representative
 
 
 def test_write_isolate_proteins_tsv_emits_sub_ranks_from_lineage(
@@ -494,10 +498,11 @@ def test_write_isolate_proteins_tsv_emits_sub_ranks_from_lineage(
     path = tmp_path / "iso_proteins.tsv"
     assert write_isolate_proteins_tsv({"ISO1": [s]}, path) is True
     row = path.read_text().strip().splitlines()[1].split("\t")
-    assert row[8] == "Simbu serogroup"           # subgenus
-    assert row[10] == "Bunyavirinae"             # subfamily
-    assert row[12] == "Bunyavirales-suborder"    # suborder
-    assert row[14] == "Some-subclass"            # subclass
+    assert row[7] == "FALSE"                     # representative (no set passed)
+    assert row[9] == "Simbu serogroup"           # subgenus
+    assert row[11] == "Bunyavirinae"             # subfamily
+    assert row[13] == "Bunyavirales-suborder"    # suborder
+    assert row[15] == "Some-subclass"            # subclass
 
 
 def test_write_isolate_proteins_tsv_no_taxonomy_leaves_rank_cells_blank(
@@ -512,9 +517,41 @@ def test_write_isolate_proteins_tsv_no_taxonomy_leaves_rank_cells_blank(
     rows = path.read_text().splitlines()
     row = rows[1].split("\t")
     assert row[0] == "P1"
-    assert row[5] == "4"   # segment_length
-    # All 9 taxonomy cells (indices 7..15) are blank
-    assert row[7:] == [""] * 9
+    assert row[5] == "4"   # segment_length_nt
+    assert row[7] == "FALSE"             # representative column
+    # All 9 taxonomy cells (indices 8..16) are blank
+    assert row[8:] == [""] * 9
+
+
+def test_write_isolate_proteins_tsv_representative_column(
+    tmp_path: Path, make_seq
+):
+    """Selected isolate → TRUE; isolate not in the rep set → FALSE.
+    The value is per-isolate, so every protein row of the same isolate
+    shares it."""
+    s1 = make_seq("s1", "ACGT", segment="HA", accession="A.1")
+    s1.proteins = [
+        {"protein_id": "P1A", "product": "x", "length": 1},
+        {"protein_id": "P1B", "product": "y", "length": 2},
+    ]
+    s2 = make_seq("s2", "ACGT", segment="HA", accession="B.1")
+    s2.proteins = [{"protein_id": "P2", "product": "z", "length": 3}]
+
+    path = tmp_path / "iso_proteins.tsv"
+    assert write_isolate_proteins_tsv(
+        {"ISO_PICKED": [s1], "ISO_DROPPED": [s2]},
+        path,
+        representative_isolate_ids={"ISO_PICKED"},
+    )
+
+    rows = [ln.split("\t") for ln in path.read_text().splitlines()[1:]]
+    # Two rows for ISO_PICKED, one for ISO_DROPPED.
+    picked_rows = [r for r in rows if r[3] == "ISO_PICKED"]
+    dropped_rows = [r for r in rows if r[3] == "ISO_DROPPED"]
+    assert len(picked_rows) == 2
+    assert len(dropped_rows) == 1
+    assert all(r[7] == "TRUE" for r in picked_rows)
+    assert all(r[7] == "FALSE" for r in dropped_rows)
 
 
 def test_write_proteins_fasta_segmented(tmp_path: Path, make_seq):

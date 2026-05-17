@@ -191,18 +191,19 @@ Everything is written to the output directory (`./repseq_output/` by default):
 | File | What's in it |
 | --- | --- |
 | `{prefix}_representatives.fasta` | **The main result** — your selected sequences. |
-| `{prefix}_representatives.tsv` | A spreadsheet: one row per representative, with accession, organism, host, country, date, taxonomy. Opens in Excel. |
+| `{prefix}_representative_isolates.tsv` *(segmented mode)* or `{prefix}_representative_sequences.tsv` *(non-segmented mode)* | A spreadsheet: one row per representative isolate (or sequence), with accession, organism, host, country, date, taxonomy. Opens in Excel. |
 | `{prefix}_clusters.tsv` | Which sequences ended up grouped together, and which one was picked. |
 | `{prefix}_group_counts.tsv` | One row per group (genus, host, year, country, … — whatever your mode stratified on): how many sequences went *in*, how many came *out*, whether clustering ran, and the similarity cutoff it settled on. The quickest way to see where the reduction happened. |
 | `{prefix}_qc_removed.tsv` | Every sequence that was dropped during cleaning, and *why*. Check this if you lost more than expected. |
 | `{prefix}_run.log` | Plain-text record of the settings used and the per-step counts. |
 | `{prefix}_proteins.fasta` | *(if protein QC is on)* The protein sequences of all your representatives. |
-| `{prefix}_isolate_proteins.tsv` | *(segmented + protein QC)* One row per gene per kept isolate. Columns: `protein_id`, `product`, `length` (aa), `isolate_id`, `segment`, `segment_length` (nt), `accession`, and the taxonomic ranks `species`, `subgenus`, `genus`, `subfamily`, `family`, `suborder`, `order`, `subclass`, `class` (sub-ranks come from the NCBI lineage and are often blank for viruses). |
+| `{prefix}_isolate_proteins.tsv` | *(segmented + protein QC)* One row per gene per kept isolate. Columns: `protein_id`, `product`, `length_aa`, `isolate_id`, `segment`, `segment_length_nt`, `accession`, `representative` (TRUE/FALSE — was the isolate selected?), and the taxonomic ranks `species`, `subgenus`, `genus`, `subfamily`, `family`, `suborder`, `order`, `subclass`, `class` (sub-ranks come from the NCBI lineage and are often blank for viruses). |
+| `{prefix}_representative_isolate_proteins.tsv` | *(segmented + protein QC)* Same columns as `_isolate_proteins.tsv` but only the rows for selected (representative) isolates. The quickest way to see which proteins are in your reduced set. |
 | `{prefix}_clustering.png` | *(if `--plot`)* A diagnostic scatter plot of the clustering — see below. |
 | `{prefix}_msa.fasta` | *(if `--phylo`)* MAFFT alignment of the representatives, FASTA headers are short ids (`S0001`…) for compatibility with downstream tools. |
 | `{prefix}_tree.nwk` | *(if `--phylo`)* FastTree Newick — leaf names are the same short ids as in the MSA. |
 | `{prefix}_tree.xml` | *(if `--phylo`)* **The tree you'll usually open** — phyloXML with the original sequence names restored on every leaf. |
-| `{prefix}_tree_id_map.tsv` | *(if `--phylo`)* Two columns, `short_id` ↔ `original_id`, for decoding the MSA / Newick. |
+| `{prefix}_tree_id_map.tsv` | *(if `--phylo`)* Two columns, `short_id` ↔ `accession`, for decoding the MSA / Newick. |
 
 Segmented-virus runs also write `{prefix}_concatenated.fasta` (all segments of an
 isolate joined head-to-tail) and one `{prefix}_segment_<name>.fasta` per segment.

@@ -28,7 +28,7 @@ Outputs (all under ``{prefix}_*``):
     {prefix}_msa.fasta           aligned MSA, short-id headers
     {prefix}_tree.nwk            tree-builder Newick, short-id leaves
     {prefix}_tree.xml            phyloXML, rich per-leaf annotation
-    {prefix}_tree_id_map.tsv     short_id<TAB>original_id
+    {prefix}_tree_id_map.tsv     short_id<TAB>accession
     {prefix}_iqtree_summary.txt  IQ-TREE ModelFinder report (IQ-TREE only)
 
 The orchestrator never raises out of the click command — it catches its
@@ -153,7 +153,7 @@ def _write_short_id_fasta(
 def _write_id_map(id_map: dict[str, str], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fh:
-        fh.write("short_id\toriginal_id\n")
+        fh.write("short_id\taccession\n")
         for short, original in id_map.items():
             fh.write(f"{short}\t{original}\n")
 
