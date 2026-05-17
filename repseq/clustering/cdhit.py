@@ -193,33 +193,71 @@ def run_clustering(
         except subprocess.CalledProcessError as e:
             raise CDHitError(f"{binary_name} failed:\n{e.stderr}") from e
 
-        clusters = _parse_clstr_file(
+        clusters, unmatched_clstr_ids = _parse_clstr_file(
             clstr_path=str(output_prefix) + ".clstr",
             sequences=sequences,
         )
 
     accounted = sum(1 + len(c.members) for c in clusters)
     if accounted != len(sequences):
-        raise CDHitError(
+        # Pinpoint the gap so the user can see the actual offending ID(s)
+        # instead of just a count mismatch. Track both directions:
+        # input seqs that never appeared in the .clstr, and .clstr IDs
+        # the parser couldn't match back to an input seq.
+        accounted_ids = {c.representative.id for c in clusters}
+        accounted_ids.update(m.id for c in clusters for m in c.members)
+        missing_from_clstr = [s.id for s in sequences if s.id not in accounted_ids]
+        details = [
             f"Cluster round-trip mismatch: {len(sequences)} sequences in, "
-            f"{accounted} accounted for across {len(clusters)} clusters. "
-            "Likely an ID/whitespace issue between input FASTA and the "
-            ".clstr file."
+            f"{accounted} accounted for across {len(clusters)} clusters."
+        ]
+        if missing_from_clstr:
+            preview = ", ".join(repr(x) for x in missing_from_clstr[:5])
+            extra = (
+                f" (+{len(missing_from_clstr) - 5} more)"
+                if len(missing_from_clstr) > 5
+                else ""
+            )
+            details.append(
+                f"  Input IDs absent from .clstr ({len(missing_from_clstr)}): "
+                f"{preview}{extra}"
+            )
+        if unmatched_clstr_ids:
+            preview = ", ".join(repr(x) for x in unmatched_clstr_ids[:5])
+            extra = (
+                f" (+{len(unmatched_clstr_ids) - 5} more)"
+                if len(unmatched_clstr_ids) > 5
+                else ""
+            )
+            details.append(
+                f"  .clstr IDs not in input ({len(unmatched_clstr_ids)}): "
+                f"{preview}{extra}"
+            )
+        details.append(
+            "  Most likely cause: a seq.id contains characters cd-hit "
+            "truncates or transforms in the .clstr file (e.g. internal "
+            "'...' or whitespace, or an id longer than cd-hit's name buffer)."
         )
+        raise CDHitError("\n".join(details))
 
     return clusters
 
 
-# Matches a member line: "<index>\t<len>(aa|nt), >SEQID... *" or "...at 99.93%"
-# The id is everything between '>' and the final '...'. cd-hit always emits
-# the '...' even when -d 0 keeps the full id.
-_CLSTR_MEMBER_RE = re.compile(r">(?P<id>.+?)\.\.\.\s*(?P<rep>\*)?")
+# Matches a member line: "<index>\t<len>(aa|nt), >SEQID... *"
+# or "<index>\t<len>(aa|nt), >SEQID... at 99.93%". Greedy ``.+`` plus the
+# required ``*`` or ``at NN%`` tail anchors the match to the end of the
+# line, so a seq id that itself contains ``...`` is captured correctly
+# (a non-greedy ``.+?`` would stop at the first internal ``...`` and
+# silently drop the sequence from the round-trip count).
+_CLSTR_MEMBER_RE = re.compile(
+    r">(?P<id>.+)\.\.\.\s*(?:(?P<rep>\*)|at\s+[\d.]+%)\s*$"
+)
 
 
 def _parse_clstr_file(
     clstr_path: str,
     sequences: list[Sequence],
-) -> list[Cluster]:
+) -> tuple[list[Cluster], list[str]]:
     """Parse a cd-hit ``.clstr`` file into Cluster objects.
 
     .clstr format:
@@ -230,6 +268,13 @@ def _parse_clstr_file(
     The line starting with ``>Cluster`` opens a new cluster; subsequent
     indented lines list members, one of which is marked ``*`` as the
     representative.
+
+    Returns:
+        (clusters, unmatched_clstr_ids)
+        where ``unmatched_clstr_ids`` lists every id parsed out of the
+        .clstr file that we couldn't match back to a ``Sequence`` —
+        surfaced by ``run_clustering`` so a round-trip mismatch error
+        names the actual offending id(s) rather than just a count.
     """
     clstr = Path(clstr_path)
     if not clstr.exists():
@@ -269,6 +314,7 @@ def _parse_clstr_file(
     _flush()
 
     clusters: list[Cluster] = []
+    unmatched: list[str] = []
     for i, (rep_id, member_ids) in enumerate(raw):
         if rep_id is None:
             # Defensive: cd-hit always writes a representative, but skip
@@ -276,8 +322,18 @@ def _parse_clstr_file(
             continue
         rep_seq = seq_map.get(rep_id)
         if rep_seq is None:
+            unmatched.append(rep_id)
+            # Whole cluster is unrecoverable without the representative;
+            # also flag the members so they show up in the diagnostic.
+            unmatched.extend(m for m in member_ids if m not in seq_map)
             continue
-        members = [seq_map[m] for m in member_ids if m in seq_map]
+        members: list[Sequence] = []
+        for mid in member_ids:
+            mseq = seq_map.get(mid)
+            if mseq is None:
+                unmatched.append(mid)
+            else:
+                members.append(mseq)
         clusters.append(
             Cluster(
                 cluster_id=f"cluster_{i+1:06d}",
@@ -286,4 +342,4 @@ def _parse_clstr_file(
             )
         )
 
-    return clusters
+    return clusters, unmatched

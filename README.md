@@ -79,17 +79,21 @@ result:
 pip install -e '.[viz]'
 ```
 
-**MSA + tree (optional, `--phylo`)** — to build a multiple-sequence alignment
-and an approximate-ML phylogeny over the final representatives, install
-MAFFT and FastTree:
+**MSA + tree (optional, `--phylo`)** — to build a multiple-sequence
+alignment and a maximum-likelihood phylogeny over the final
+representatives, install MAFFT plus a tree builder. `repseq` auto-picks
+**IQ-TREE** for protein alignments (ModelFinder + UFBoot — best topology
+quality) and **FastTree** for nucleotide alignments (much faster on
+large NT MSAs). Install whichever pair you'll use:
 
 ```bash
-brew install mafft fasttree                     # macOS
-conda install -c bioconda mafft fasttree        # Linux (conda)
+brew install mafft iqtree fasttree              # macOS
+conda install -c bioconda mafft iqtree fasttree # Linux (conda)
 ```
 
-If either is missing the rest of the run still finishes; `repseq` just skips
-the tree step with a warning.
+If MAFFT or the relevant tree builder is missing the rest of the run
+still finishes; `repseq` just skips the tree step with a clear
+stderr message. Pin one tool with `phylo.tool: iqtree` (or `fasttree`).
 
 ---
 
@@ -162,58 +166,358 @@ your FASTA file(s)
   read it, figure out the format (UniProt / NCBI / NCBI Virus)
         │
         ▼
-  look up organism, host, country, date     (from NCBI & UniProt, cached locally)
+  look up organism, host, country, date          (from NCBI & UniProt, cached locally)
         │
         ▼
-  clean: drop duplicates → too-short/long → too many ambiguous chars
-         → bad-keyword annotations → (optional) wrong protein count
+  clean (QC):
+    drop duplicates → length filter → too many ambiguous chars
+    → bad-keyword annotations → (optional) wrong protein count
         │
         ▼
-  (optional) segmented-virus step: keep only isolates that have ALL segments
+  (segmented mode only)
+    populate /isolate, /segment from GenBank
+    → drop isolates whose segments disagree on species (taxonomy_consistency)
+    → keep only isolates with ALL expected segments
+    → per-segment length bounds (drop the whole isolate if any segment is out of range)
+    → fetch the marker protein per segment, concatenate per isolate
         │
         ▼
-  group + pick the best representative from each group
+  group by your chosen mode (rank / host / decade / similarity / …)
+  cluster each group down to ~N reps (binary search over identity threshold)
+  pick the best representative per cluster (RefSeq > reviewed UniProt > longest)
         │
         ▼
-  write: representative FASTA + metadata tables + a plain-text run log
+  write:
+    • selected representatives (FASTA, per-segment FASTAs, concatenated FASTA)
+    • their proteins (per-CDS FASTA + per-CDS TSV)
+    • per-rep metadata spreadsheet
+    • per-stratum + per-cluster + per-drop TSVs
+    • plain-text run log
+    • (optional) UMAP clustering plot                            (--plot)
+    • (optional) MAFFT MSA + IQ-TREE / FastTree + phyloXML tree  (--phylo)
 ```
 
-The run log (`{prefix}_run.log`) records exactly what settings were used and what
-got dropped at each step — keep it with your results so the selection is
-reproducible.
+The run log (`{prefix}_run.log`) records exactly what settings were used
+and what got dropped at each step — keep it with your results so the
+selection is reproducible.
 
 ---
 
 ## Output files
 
-Everything is written to the output directory (`./repseq_output/` by default):
+Everything is written to a single output directory (`./repseq_output/` by
+default, set via `output.dir` in the config or `-o/--output-dir` on the
+command line). `repseq` **refuses to write into a non-empty directory** so a
+run can never silently overwrite or mix into a previous one — empty it,
+delete it, or point somewhere new.
 
-| File | What's in it |
-| --- | --- |
-| `{prefix}_representatives.fasta` | **The main result** — your selected sequences. |
-| `{prefix}_representative_isolates.tsv` *(segmented mode)* or `{prefix}_representative_sequences.tsv` *(non-segmented mode)* | A spreadsheet: one row per representative isolate (or sequence), with accession, organism, host, country, date, taxonomy. Opens in Excel. |
-| `{prefix}_clusters.tsv` | Which sequences ended up grouped together, and which one was picked. |
-| `{prefix}_group_counts.tsv` | One row per group (genus, host, year, country, … — whatever your mode stratified on): how many sequences went *in*, how many came *out*, whether clustering ran, and the similarity cutoff it settled on. The quickest way to see where the reduction happened. |
-| `{prefix}_qc_removed.tsv` | Every sequence that was dropped during cleaning, and *why*. Check this if you lost more than expected. |
-| `{prefix}_run.log` | Plain-text record of the settings used and the per-step counts. |
-| `{prefix}_representative_isolate_proteins.fasta` *(segmented)* or `{prefix}_representative_sequence_proteins.fasta` *(non-segmented)* | *(if protein QC is on)* The protein sequences of all your representatives. Headers carry organism, isolate, segment, host, country, collection date, length, and parent accession as `[key=value]` tags. **For many downstream uses (BLAST DB build, HMMER profile search) this is the main result.** |
-| `{prefix}_isolate_proteins.tsv` | *(segmented + protein QC)* One row per gene per kept isolate. Columns: `protein_id`, `product`, `length_aa`, `isolate_id`, `segment`, `segment_length_nt`, `accession`, `representative` (TRUE/FALSE — was the isolate selected?), and the taxonomic ranks `species`, `subgenus`, `genus`, `subfamily`, `family`, `suborder`, `order`, `subclass`, `class` (sub-ranks come from the NCBI lineage and are often blank for viruses). |
-| `{prefix}_representative_isolate_proteins.tsv` | *(segmented + protein QC)* Same columns as `_isolate_proteins.tsv` but only the rows for selected (representative) isolates. The quickest way to see which proteins are in your reduced set. |
-| `{prefix}_clustering.png` | *(if `--plot`)* A diagnostic scatter plot of the clustering — see below. |
-| `{prefix}_msa.fasta` | *(if `--phylo`)* MAFFT alignment of the representatives, FASTA headers are short ids (`S0001`…) for compatibility with downstream tools. |
-| `{prefix}_tree.nwk` | *(if `--phylo`)* FastTree Newick — leaf names are the same short ids as in the MSA. |
-| `{prefix}_tree.xml` | *(if `--phylo`)* **The tree you'll usually open** — phyloXML with the original sequence names restored on every leaf. |
-| `{prefix}_tree_id_map.tsv` | *(if `--phylo`)* Two columns, `short_id` ↔ `accession`, for decoding the MSA / Newick. |
+The exact set of files depends on whether you ran in **segmented** mode and
+which optional flags you passed (`--plot`, `--phylo`). At a glance:
 
-Segmented-virus runs also write `{prefix}_concatenated.fasta` (all segments of an
-isolate joined head-to-tail) and one `{prefix}_segment_<name>.fasta` per segment.
+| File family | Always written? | What it is |
+| --- | --- | --- |
+| `{prefix}_run.log` | yes | Settings used and per-step counts. Keep with your results. |
+| `{prefix}_qc_removed.tsv` | yes | Every dropped sequence and the reason. |
+| `{prefix}_group_counts.tsv` | yes | One row per stratum: in / out / clustered / cutoff. |
+| `{prefix}_clusters.tsv` | yes | Which sequences ended up grouped, who represents whom. |
+| `{prefix}_representatives.fasta` | non-segmented | Selected representative sequences. |
+| `{prefix}_representative_sequences.tsv` | non-segmented | Per-representative metadata spreadsheet. |
+| `{prefix}_concatenated.fasta` | segmented | Per-isolate head-to-tail concat of all segments. |
+| `{prefix}_segment_<NAME>.fasta` | segmented | One file per expected segment, just the representative isolates. |
+| `{prefix}_representative_isolates.tsv` | segmented | Per-representative-isolate metadata spreadsheet. |
+| `{prefix}_isolate_proteins.tsv` | segmented + GenBank | Every protein of every isolate that survived QC, with a `representative` TRUE/FALSE column. |
+| `{prefix}_representative_isolate_proteins.tsv` | segmented + GenBank | Same schema as above, row-filtered to representatives only. |
+| `{prefix}_representative_isolate_proteins.fasta` | segmented + GenBank | AA FASTA of every protein of every representative isolate. |
+| `{prefix}_representative_sequence_proteins.fasta` | non-segmented + GenBank | AA FASTA of every protein of every representative sequence. |
+| `{prefix}_representatives_protein.fasta` | when `alphabet=protein` (default) | The AA strings actually fed into the clusterer. |
+| `{prefix}_clustering.png` | only with `--plot` | Diagnostic scatter of the clustering. |
+| `{prefix}_msa.fasta`, `_tree.nwk`, `_tree.xml`, `_tree_id_map.tsv` | only with `--phylo` | Alignment + tree + name mapping. |
+| `{prefix}_iqtree_summary.txt` | only with `--phylo` + IQ-TREE | IQ-TREE ModelFinder report. |
+
+"Segmented + GenBank" means: segmented mode is on **and** the GenBank source
+features are reachable (either cached or fetched on demand) so the per-isolate
+CDS list could be built — true by default; falls away under `--no-resolve` or
+when `segmented.use_genbank_metadata: false` and no protein QC ran.
+
+The detailed sections below tell you what's actually in each file, what
+columns you'll see, and what each one is good for downstream.
+
+### Sequence files (FASTA)
+
+#### `{prefix}_representatives.fasta` — non-segmented mode
+
+The main result for a non-segmented run: the selected representative
+sequences in whatever alphabet you fed in (nucleotide or amino acid).
+Header format matches the input format that was auto-detected (NCBI,
+UniProt, or NCBI Virus). One record per representative.
+
+Use it for: the new curated set, BLAST/DIAMOND database build, downstream
+alignment, anything that needs the original sequences.
+
+#### `{prefix}_concatenated.fasta` — segmented mode
+
+One record per **representative isolate**, with each isolate's segments
+joined head-to-tail in the canonical order you declared
+(`segmented.viruses.<v>.segments`, e.g. `[L, M, S]`). The header is
+`>CONCAT|<isolate_id>|<acc1>|<acc2>|<acc3>` and the body is the literal
+concatenation of all segment sequences.
+
+Use it for: whole-isolate phylogenetics on synonymous sites, gene-content
+overviews, dotplots — anywhere you want each isolate as a single entity.
+
+#### `{prefix}_segment_<NAME>.fasta` — segmented mode
+
+One file per expected segment (e.g. `_segment_L.fasta`, `_segment_M.fasta`,
+`_segment_S.fasta`). Each file holds **only the representative isolates'
+copies of that one segment**, with the original GenBank/UniProt headers
+preserved. The per-isolate accessions for the representatives are also
+listed in `{prefix}_representative_isolates.tsv` under the `accessions`
+column, in segment order.
+
+Use it for: per-segment BLAST databases, building one tree per segment
+(useful for reassortment analysis), feeding a per-segment HMM build.
+
+#### `{prefix}_representative_isolate_proteins.fasta` *(segmented)* / `{prefix}_representative_sequence_proteins.fasta` *(non-segmented)*
+
+Amino-acid FASTA covering **every annotated protein of every representative**.
+Reconstructed from the same cached GenBank records the pipeline already
+fetched, so no extra network calls are made.
+
+Headers carry NCBI-style bracketed tags so each protein remains
+self-describing in any downstream pipeline:
+
+```
+>NP_123456.1 [organism=Hantaan orthohantavirus] [ncbi_taxon_id=11599] \
+   [species=Orthohantavirus hantanense] [genus=Orthohantavirus] \
+   [family=Hantaviridae] [order=Elliovirales] [class=Bunyaviricetes] \
+   [isolate=76-118] [segment=L] [host=Apodemus agrarius] \
+   [country=South Korea] [collection_date=1976] [length=2151] \
+   [parent=NC_005222.1]
+```
+
+Empty fields are omitted; bracket characters in values are scrubbed so
+organism names like `Foo virus [strain X]` can't break the tag syntax.
+
+Use it for: **the protein set you'll almost certainly hand to BLAST,
+DIAMOND, HMMER, MMseqs2 search, or any sequence-search tool** — it's
+both pre-curated and pre-annotated. This is usually "the" output file
+for protein-centric workflows.
+
+#### `{prefix}_representatives_protein.fasta` *(when `clustering.alphabet=protein` actually fired)*
+
+The **AA strings that were fed into the clusterer** — the per-isolate
+marker-protein concat in segmented mode, or the per-rep marker in
+non-segmented mode. Written only if every representative ended up with a
+populated `protein_sequence` (i.e. the protein-alphabet path completed; not
+written if `auto` fell back to nucleotide, and obviously not written for
+`alphabet: nucleotide`).
+
+This is a *diagnostic*, not a primary output: useful if you want to
+reproduce or audit the clustering input. For a clean per-protein set, use
+`_representative_*_proteins.fasta` instead.
+
+### Spreadsheets (TSV)
+
+All TSVs use a harmonised vocabulary (since v0.8.0): the canonical
+identifier column is always `accession`; booleans are always `TRUE` /
+`FALSE`; length columns carry their alphabet (`length_nt`, `length_aa`,
+`segment_length_nt`, `total_length_nt`); taxonomic ranks always appear in
+the same nine-rank ladder (`species`, `subgenus`, `genus`, `subfamily`,
+`family`, `suborder`, `order`, `subclass`, `class`). Sub-ranks come from
+the NCBI lineage and are commonly blank for viruses.
+
+#### `{prefix}_representative_sequences.tsv` — non-segmented mode
+
+One row per representative sequence. Columns:
+
+`accession`, `organism`, `description`, `strain`, `host`,
+`collection_date`, `country`, `segment`, `isolate_id`, `molecule_type`,
+`length_nt`, `is_refseq`, `is_reviewed`, `ncbi_taxon_id`, then the
+nine-rank taxonomic ladder.
+
+Open in Excel / Numbers / your scripting language — this is the
+spreadsheet you'll usually hand to a collaborator.
+
+#### `{prefix}_representative_isolates.tsv` — segmented mode
+
+One row per representative **isolate** (not per sequence — segmented
+representatives are whole isolates, not single segments). Columns:
+
+`isolate_id`, `organism`, `strain`, `host`, `collection_date`, `country`,
+`n_segments`, `segments` (comma-joined segment names in concat order),
+`accessions` (comma-joined per-segment GenBank accessions in concat
+order), `total_length_nt`, `is_refseq`, `is_reviewed`, `ncbi_taxon_id`,
+then the nine-rank taxonomic ladder.
+
+The per-sequence columns (`accession`, `segment`, `description`,
+`molecule_type`, `length_nt`) are deliberately absent — they have no
+isolate-level meaning. Use `_isolate_proteins.tsv` (or the per-segment
+FASTA files) for per-segment / per-CDS detail.
+
+#### `{prefix}_isolate_proteins.tsv` — segmented mode (when proteins are reachable)
+
+One row per **CDS** of every isolate that survived QC, whether or not it
+was picked as a representative. Columns:
+
+`protein_id`, `product`, `length_aa`, `isolate_id`, `segment`,
+`segment_length_nt`, `accession`, `representative` (`TRUE` if the isolate
+made it into the final set, `FALSE` otherwise), then the nine-rank
+taxonomic ladder.
+
+Use it for: a full per-protein audit of what made it through QC, and to
+join back from a hit in a downstream analysis to the isolate it came from.
+
+#### `{prefix}_representative_isolate_proteins.tsv` — segmented mode (when proteins are reachable)
+
+Same exact schema as `_isolate_proteins.tsv`, but **filtered to the
+representative isolates only** (i.e. every row has `representative=TRUE`).
+Easier on the eye when you just want "the proteins in my reduced set".
+
+#### `{prefix}_clusters.tsv` — always
+
+One row per cluster member. Columns: `cluster_id`, `accession` (of the
+*representative*), `organism`, `cluster_size`, `is_refseq`, `is_reviewed`.
+
+Use it for: tracing which sequences ended up in the same cluster, or for
+re-running selection with a different priority (e.g. "I want the reviewed
+UniProt entry not the longest one") without re-clustering.
+
+#### `{prefix}_group_counts.tsv` — always
+
+One row per stratum (whatever your mode grouped on: genus, host, decade,
+country, custom field, …). Columns: `stratified_by`, `stratum`,
+`stratum_size_before`, `stratum_size_after`, `clustered` (TRUE/FALSE —
+did the binary-search clusterer run, or was the group already small
+enough to keep whole?), `cutoff` (the identity threshold the clusterer
+settled on, if it ran).
+
+**The fastest way to see where the reduction happened.** If a single
+genus ate most of your "selected" budget, you'll see it here.
+
+#### `{prefix}_qc_removed.tsv` — always
+
+Every sequence dropped during cleaning, with the reason. Two columns:
+`accession` and `reason`. Typical reasons:
+
+- `duplicate` — exact duplicate of another record
+- `length:<n><[<>]<m>` — failed the whole-pool length filter (non-segmented mode)
+- `segment_length:<seg>:<n><[<>]<m>` — failed the per-segment length bounds (segmented mode; whole isolate is dropped, so all of its segments appear with this reason)
+- `ambiguous_fraction:<f>>0.05` — too many `N`/`X`/other ambiguous characters
+- `annotation_keyword:<word>` — description contains a blacklisted keyword
+- `protein_count:<n><[<>]<m>` — wrong number of annotated CDS (when protein QC is on)
+- `segmented_filter:could_not_identify_isolate_or_segment` — the GenBank lookup and `isolate_regex` fallback both failed
+- `incomplete_isolate:missing_segments:<list>` — an isolate that was missing one or more expected segments
+- `taxonomy_mismatch:<rank>` — segments of one isolate disagreed on the configured taxonomy rank (default `species`), so the whole isolate was dropped (new in v0.9.0)
+
+**Check this file first when more was dropped than you expected.** Sort
+by `reason` to see which filter did the damage; the same information
+shows up summarised in `_run.log`.
+
+### Run record
+
+#### `{prefix}_run.log`
+
+Plain-text record of the run: version, date, exact command-line, every
+config setting that was active, the per-step QC counts, the mode's
+results, and the list of output files. Save this with your data — it
+makes the selection fully reproducible.
+
+The "QC SUMMARY" block also shows the new **per-segment length-filter
+breakdown** (since v0.9.1) so you can tell *which* segment caused
+isolates to fall out, not just that "some did".
+
+### Diagnostic plot
+
+#### `{prefix}_clustering.png` — only if `--plot` is passed
+
+Two-panel UMAP scatter of the clustered sequences (k-mer Jaccard
+distance):
+
+- **Left** — every (sub)sampled sequence as a dot, coloured by genus.
+- **Right** — the same dots, coloured by cluster, sized by cluster
+  population, with faint lines from each member to its representative.
+
+Bounded by a default 2000-point subsample for very large runs
+(representatives are always kept). Skipped when the run produced no
+clusters (`global -n` mode). Requires the `[viz]` extras
+(`pip install -e '.[viz]'`).
+
+### Phylogeny outputs
+
+Written only when you pass `--phylo`. The full pipeline:
+short-id remap → MAFFT (`--auto`) → tree builder → root → label internal
+nodes by LCA → phyloXML. Tree builder is auto-picked from your
+clustering alphabet: **IQ-TREE for protein** (ModelFinder + UFBoot
+bootstrap by default) and **FastTree for nucleotide** (with `-nt -gtr`).
+Set `phylo.tool: fasttree` (or `iqtree`) to pin one.
+
+#### `{prefix}_msa.fasta`
+
+The MAFFT alignment. Headers are `>S0001 <pretty-label>` — the short
+`SNNNN` id stays the first whitespace-separated token (safe for any
+phylo tool), and the descriptive label (built from `phylo.labeling.format`
+/ `segmented_format`) is appended as the FASTA description so AliView /
+Jalview / MEGA show recognisable names without confusing the underlying
+tools.
+
+#### `{prefix}_tree.nwk`
+
+Tree-builder Newick output. Leaf names are the **short ids** (`S0001`,
+`S0002`, …) so the file works with any downstream tool that expects
+short, safe leaf labels. Use the id map below to recover real names.
+
+#### `{prefix}_tree.xml` — **the tree you'll usually open**
+
+phyloXML with rich, browseable annotation:
+
+- Every leaf gets a formatted `<name>`, a `<taxonomy>` block with NCBI
+  taxon id, a `<sequence>` block with the GenBank accession + title, and
+  one repseq-namespaced `<property>` per per-leaf attribute (host,
+  collection_date, country, strain, isolate_id, year, species, genus,
+  subfamily, family — empties dropped).
+- Every annotated internal clade gets a `<name>` and a `<taxonomy>`
+  block holding the LCA's scientific name + rank (`min_rank=genus` by
+  default; the labeller keeps each monophyletic clade labelled at its
+  crown and suppresses obvious duplications like a 2-leaf same-species
+  pair).
+- The `<phylogeny>` element carries a `<name>` and `<description>` with
+  MAFFT/IQ-TREE/FastTree versions, the selected substitution model, the
+  bootstrap settings, and the rooting method that actually fired.
+- Confidence values are normalised to 0–100 integers (`sh_like` for
+  FastTree, `ufboot` for IQ-TREE). The tree is ladderized.
+
+Opens directly in [Archaeopteryx](https://sites.google.com/view/aptxjs)
+([web version](https://sites.google.com/view/aptxjs))
+([source](https://github.com/cmzmasek/forester)) which makes use of the
+the rich annotation.
+The annotation is also visible in any other phyloXML-aware tool (Dendroscope, etc).
+
+#### `{prefix}_tree_id_map.tsv`
+
+Two-column mapping `short_id` ↔ `accession`. Use it when you need to
+trace a leaf in `_tree.nwk` or the MSA back to a real sequence id.
+
+#### `{prefix}_iqtree_summary.txt` — only when IQ-TREE ran
+
+The IQ-TREE ModelFinder report — which substitution model was selected
+and why, plus the log-likelihood and bootstrap settings. Worth a glance
+before quoting a model in a methods section.
+
+> **Fail-soft:** if MAFFT, IQ-TREE, or FastTree are missing, or fewer
+> than 3 representatives survived, the phylogeny step is skipped with a
+> stderr message and the rest of the run's outputs are still written.
+> IQ-TREE additionally refuses UFBoot with fewer than 4 sequences; the
+> wrapper drops bootstrap automatically in that case but still produces
+> the tree.
 
 ---
 
 ## Cleaning (QC) — what gets dropped and how to control it
 
-All cleaning settings live under `qc:` in your config file. Defaults are sensible;
-loosen them if you're losing sequences you want to keep.
+All cleaning settings live under `qc:` in your config file. Defaults are
+sensible; loosen them if you're losing sequences you want to keep. Every
+drop is logged in `{prefix}_qc_removed.tsv` with a precise reason — that
+file is your first stop when QC ate more than expected.
 
 ```yaml
 qc:
@@ -238,15 +542,26 @@ qc:
 
 A few things worth knowing:
 
-- **`median_percent` compares every sequence to the median length of the whole
-  file.** That's perfect for a single gene, but **wrong for a mixed file** (e.g.
-  several different genes, or a whole genome plus its individual genes) — the
-  median is meaningless and you'll drop things unfairly. For mixed files, use
-  `min_max` with explicit numbers instead.
+- **`median_percent` compares every sequence to the median length of the
+  whole file.** That's perfect for a single gene, but **wrong for a mixed
+  file** (e.g. several different genes, or a whole genome plus its
+  individual genes) — the median is meaningless and you'll drop things
+  unfairly. For mixed files, use `min_max` with explicit numbers instead.
 - **In segmented-virus mode, the whole-file length filter is skipped
   automatically** — a file of influenza segments mixes 2,300-nt and 890-nt
-  sequences, so a single median can't work. Use per-segment length bounds instead
-  (see below).
+  sequences, so a single median can't work. Use per-segment length bounds
+  instead (`segmented.viruses.<v>.segment_lengths`, see below). Since
+  v0.9.1 the QC summary breaks per-segment drops down as
+  `L too short : N`, `M too long : N`, etc., so you can see exactly which
+  segment cutoff was the bottleneck.
+- **Segmented mode adds a taxonomy-consistency check (since v0.9.0).** Any
+  isolate whose segments resolve to *different* taxa at the configured
+  rank (default `species`) is dropped — usually a reassortant, a
+  contaminated record, or two unrelated viruses sharing an `/isolate`
+  qualifier. Missing labels are ignored (only *populated disagreement*
+  counts), so isolates with sparse taxonomy survive. Configure under
+  `segmented.taxonomy_consistency.{enabled, rank}` and set
+  `enabled: false` to skip it entirely.
 
 ---
 
@@ -370,6 +685,7 @@ taxonomy:
 
 clustering:
   backend: mmseqs2                # or "cdhit"
+  alphabet: protein               # protein (default since v0.6.0), nucleotide, or auto
   mmseqs2_mode: easy-linclust     # fast; use easy-cluster for tighter, slower clustering
   coverage: 0.8
   # cd-hit options (only used when backend == cdhit) live under
@@ -378,6 +694,18 @@ clustering:
 representative:
   priority: [refseq, reviewed_uniprot, longest]   # tie-break order for picking the "best"
 ```
+
+**About `clustering.alphabet`:** since v0.6.0 the default is `protein`,
+which clusters on amino-acid sequences rather than raw nucleotides. The
+biology motivation: synonymous substitutions inflate NT divergence by
+30–40% with no functional signal, and protein homology stays reliable
+down to ~25–30% identity vs ~50–60% for nucleotide — so protein clustering
+gives tighter, biologically meaningful groups. For segmented input,
+repseq picks a "marker protein" per segment (longest CDS by default,
+overridable via `cluster_protein` aliases) and clusters on the per-isolate
+concatenation of those markers. Set `alphabet: nucleotide` if you actually
+want genome-identity targets or your input is non-coding. `auto` falls
+back to nucleotide when no proteins can be fetched.
 
 You can also set your NCBI email/key via the environment variables
 `REPSEQ_NCBI_EMAIL` and `REPSEQ_NCBI_API_KEY` instead of putting them in the file.
@@ -433,18 +761,42 @@ the real run, and make sure your `ncbi_email` is set in the config.
 **Lookups are slow the first time** — that's expected; they're cached, so the
 *second* run on the same data is fast. An NCBI API key speeds up the first run.
 
-**Not sure if everything's installed?** Run `repseq doctor`. It checks every
-required and optional dependency, the external tools (`mmseqs`, `cd-hit`,
-`mafft`, `FastTree`), reaches NCBI and UniProt to confirm the network is
-working, and verifies your config is valid — then tells you in plain English
-what (if anything) needs fixing. Add `--no-network` to skip the database
-pings if you're offline.
+**Not sure if everything's installed?** Run `repseq doctor`. It checks
+every required and optional dependency, the external tools (`mmseqs`,
+`cd-hit`, `cd-hit-est`, `mafft`, `FastTree`, `iqtree2`), reaches NCBI
+and UniProt to confirm the network is working, and verifies your config
+is valid — then tells you in plain English what (if anything) needs
+fixing. Add `--no-network` to skip the database pings if you're offline.
 
-**`[phylo skipped]` / `[phylo failed]`** — the `--phylo` step is fail-soft: if
-fewer than 3 representatives survived, or `mafft` / `FastTree` are missing or
-errored, the message is printed to stderr and the rest of the run's outputs
-are still written. To enable it, install MAFFT and FastTree (see
-[Installation](#installation)).
+**`[phylo skipped]` / `[phylo failed]`** — the `--phylo` step is
+fail-soft: if fewer than 3 representatives survived, or
+`mafft` / `iqtree2` / `FastTree` are missing or errored, the message is
+printed to stderr and the rest of the run's outputs are still written.
+To enable it, install MAFFT plus the tree builder you want
+(see [Installation](#installation)). IQ-TREE additionally refuses
+UFBoot bootstrap with fewer than 4 sequences; the wrapper falls back to
+no-bootstrap automatically in that case.
+
+**`CDHitError: Cluster round-trip mismatch: N sequences in, M accounted for…`** —
+the cd-hit wrapper does a strict round-trip check on its `.clstr` output
+and refuses to silently undercount. The error names the specific seq IDs
+that fell out (both directions: input IDs absent from the `.clstr`, and
+`.clstr` IDs not in the input). The usual cause is a seq id with
+characters cd-hit transforms in its output — internal `...`, very long
+IDs, or whitespace. If you hit a new one, the error message points
+straight at the offending id.
+
+**`taxonomy_mismatch:<rank>` rows in `_qc_removed.tsv`** — these are
+isolates dropped because their segments resolved to different taxa at
+the configured rank (usually reassortants or `/isolate` collisions). To
+keep them, set `segmented.taxonomy_consistency.enabled: false` in your
+config (or relax the rank to a higher level, e.g. `genus`).
+
+**Per-segment length-filter drops surprised you** — open `_run.log` and
+scroll to the "QC SUMMARY" block. Since v0.9.1, segmented runs print a
+per-segment, isolate-level breakdown (`L too short : 257` etc.). If a
+single segment ate most of your input, that's where to widen the
+`segment_lengths` bounds.
 
 ---
 
@@ -462,65 +814,44 @@ to run anywhere and finish in a couple of seconds.
 
 ## Status
 
-**`v0.5.4`** — all 8 selection modes, optional protein-annotation QC (with
-per-segment counts and per-segment length bounds), segment-name synonyms, a
-protein-FASTA output, and an optional UMAP plot of the clustering.
+Current: **`v0.9.1`**. All 8 selection modes, protein-alphabet clustering
+by default (`alphabet: protein`), MMseqs2 and cd-hit backends, optional
+protein-annotation QC, per-isolate taxonomy-consistency QC for segmented
+viruses, segment-name synonyms, rich phyloXML output, and an optional
+UMAP plot of the clustering. **636 offline regression tests pass**; the
+NCBI-backed paths have been validated end-to-end against live
+influenza-A, peribunyaviridae, and hantaviridae datasets.
 
-New in `v0.5.4`:
+Highlights of recent releases (newest first):
 
-- **Won't overwrite a previous run.** If the output directory already exists
-  and is not empty, the program now stops immediately with a clear error
-  instead of writing new files alongside (or on top of) the old ones. Empty
-  it, delete it, or point `--output-dir` somewhere else.
-
-New in `v0.5.3`:
-
-- **Correct duplicate removal for segmented viruses.** Exact-duplicate
-  removal used to run on the pool of individual segments *before*
-  concatenation. A segment that happens to be identical between two
-  otherwise distinct isolates (a conserved segment) would get one copy
-  dropped — and the affected isolate was then silently discarded as
-  "incomplete". Duplicate removal now runs on the *concatenated isolates*
-  instead: two isolates collapse only when every segment matches. This
-  only affects segmented-mode runs; you may now see slightly more isolates
-  retained.
-
-New in `v0.5.2`:
-
-- **Taxonomy lineage fix.** Genus/family/order are now resolved from NCBI's
-  `efetch` endpoint, which actually returns the ranked lineage. The previous
-  code read NCBI's taxonomy *summary* endpoint, which carries no lineage for
-  viruses — so taxonomic modes silently grouped every viral sequence under
-  "Unknown". **If you ran an earlier version, clear the cached taxonomy first:**
-  `repseq cache clear --source ncbi_taxonomy` and
-  `repseq cache clear --source ncbi_nuccore`.
-- `repseq --version` always reports the real version (single source of truth
-  in the package, no stale-install surprises).
-
-New in `v0.5.1`:
-
-- **Per-group counts report.** Every run now writes `{prefix}_group_counts.tsv`
-  — one row per group (genus, host, year, country, …) with how many sequences
-  went in, how many came out, whether clustering ran, and the similarity cutoff
-  used. The fastest way to see exactly where the reduction happened.
-- **Honest plot-dependency errors.** When `--plot` is skipped, the message now
-  distinguishes "the plotting extras aren't installed" from "they're installed
-  but failing to import" (usually a NumPy/SciPy version clash in the
-  environment) instead of always telling you to reinstall.
-
-New in `v0.5.0`:
-
-- **Clearer endings.** Every run finishes with a one-line summary (how many
-  sequences passed cleaning, how many representatives were selected) — or, if
-  nothing came out, a warning naming the most likely cause.
-- **Smarter segmented-virus cleaning.** The whole-file length filter is now
-  skipped automatically in segmented mode, where a single median length is
-  meaningless and would wrongly discard the short segments. Use per-segment
-  `segment_lengths` instead.
-- A full pipeline audit — corrected sequence-ID handling through clustering,
-  RefSeq accession routing, the `MAG:` keyword filter, the similarity-threshold
-  search direction, NCBI host/country/date harvesting, a length-robust diversity
-  metric, and thread-safe caching.
-
-**160 offline regression tests pass.** The NCBI-backed paths have been tested
-end-to-end against a live influenza A H1N1 RefSeq genome (8 segments, 11 proteins).
+- **`v0.9.1`** — segmented runs now report a **per-segment, isolate-level
+  length-filter breakdown** during the run and in the QC summary
+  (`L too short : 257`, `M too long : 6`, …) instead of the misleading
+  "skipped (segmented mode)" line.
+- **`v0.9.0`** — new segmented-only QC step
+  `segmented.taxonomy_consistency` (on by default). Drops any isolate
+  whose segments disagree on the configured taxonomy rank (default
+  `species`) — typically reassortants or `/isolate` collisions. Missing
+  labels are ignored; dropped segments appear in `_qc_removed.tsv` with
+  reason `taxonomy_mismatch:<rank>`.
+- **`v0.8.0` / `v0.8.1`** — TSV and FASTA output schemas overhauled and
+  harmonised. Canonical identifier column is always `accession`;
+  booleans are always `TRUE` / `FALSE`; length columns carry their
+  alphabet (`length_nt`, `length_aa`, `segment_length_nt`,
+  `total_length_nt`); taxonomic ladder is the same nine ranks
+  everywhere. Representative FASTA now splits by mode
+  (`_representative_isolate_proteins.fasta` segmented vs
+  `_representative_sequence_proteins.fasta` non-segmented) with NCBI
+  bracket-tag headers carrying organism, full taxonomy, host, country,
+  collection date, and protein length. **Breaking change** for any
+  downstream script that parses output by column or filename.
+- **`v0.7.0` / `v0.7.1`** — rich phyloXML output: every leaf carries
+  taxonomy, accession, host/country/date as `<property>` elements; every
+  annotated internal clade carries an LCA scientific name + rank;
+  taxonomy-guided rooting (with MAD / midpoint fallbacks); deterministic
+  short-id remap so phylo binaries can't lose track of identity.
+- **`v0.6.0` / `v0.6.1`** — **protein-alphabet clustering is now the
+  default.** Segmented runs cluster on the per-isolate concatenated
+  marker proteins (longest CDS per segment, overridable). IQ-TREE
+  becomes the protein-tree default (ModelFinder + UFBoot); FastTree
+  stays the nucleotide default.

@@ -127,8 +127,9 @@ def test_parse_clstr_file_returns_clusters_with_rep_marked_by_star(tmp_path):
         ">Cluster 1\n"
         "0\t6aa, >seq_C... *\n"
     )
-    clusters = _parse_clstr_file(str(clstr), seqs)
+    clusters, unmatched = _parse_clstr_file(str(clstr), seqs)
     assert len(clusters) == 2
+    assert unmatched == []
     by_rep = {c.representative.id: c for c in clusters}
     assert set(by_rep) == {"seq_A", "seq_C"}
     assert [m.id for m in by_rep["seq_A"].members] == ["seq_B"]
@@ -150,9 +151,54 @@ def test_parse_clstr_file_handles_pipe_and_slash_ids(tmp_path):
         ">Cluster 1\n"
         "0\t4nt, >strain/2009/H1N1... *\n"
     )
-    clusters = _parse_clstr_file(str(clstr), seqs)
+    clusters, unmatched = _parse_clstr_file(str(clstr), seqs)
+    assert unmatched == []
     rep_ids = sorted(c.representative.id for c in clusters)
     assert rep_ids == ["CONCAT|iso_1", "strain/2009/H1N1"]
+
+
+def test_parse_clstr_file_handles_ellipsis_inside_id(tmp_path):
+    # Regression for the round-trip mismatch we hit on a Hantaviridae run:
+    # a seq.id containing '...' would be silently dropped because the
+    # old non-greedy regex stopped at the first internal '...'. The
+    # tightened, end-anchored regex must keep the full id intact.
+    seqs = [
+        _seq("CONCAT|weird...iso", "MKLPQE"),
+        _seq("ordinary_id", "AAAAAA"),
+    ]
+    clstr = tmp_path / "result.clstr"
+    clstr.write_text(
+        ">Cluster 0\n"
+        "0\t6aa, >CONCAT|weird...iso... *\n"
+        ">Cluster 1\n"
+        "0\t6aa, >ordinary_id... *\n"
+    )
+    clusters, unmatched = _parse_clstr_file(str(clstr), seqs)
+    assert unmatched == []
+    rep_ids = sorted(c.representative.id for c in clusters)
+    assert rep_ids == ["CONCAT|weird...iso", "ordinary_id"]
+
+
+def test_parse_clstr_file_reports_unmatched_clstr_ids(tmp_path):
+    # If cd-hit ever emits an id we can't match back (length cap, truncation,
+    # weird transform), _parse_clstr_file must surface it so the caller can
+    # build an informative round-trip error instead of silently undercounting.
+    seqs = [_seq("seq_A", "MKLPQE"), _seq("seq_B", "MMMMMM")]
+    clstr = tmp_path / "result.clstr"
+    clstr.write_text(
+        ">Cluster 0\n"
+        "0\t6aa, >seq_A... *\n"
+        "1\t6aa, >totally_unknown... at 99.93%\n"
+        ">Cluster 1\n"
+        "0\t6aa, >seq_B... *\n"
+    )
+    clusters, unmatched = _parse_clstr_file(str(clstr), seqs)
+    assert unmatched == ["totally_unknown"]
+    # The cluster whose member couldn't match should still be kept,
+    # just without that member — so the count gap is visible.
+    by_rep = {c.representative.id: c for c in clusters}
+    assert by_rep["seq_A"].members == []
+    assert by_rep["seq_B"].members == []
 
 
 # ---------------------------------------------------------------------------
@@ -223,8 +269,15 @@ def test_run_clustering_raises_when_round_trip_drops_sequences(tmp_path):
     with patch("repseq.clustering.cdhit._check_binary", return_value="cd-hit"), \
          patch("repseq.clustering.cdhit.subprocess.run",
                side_effect=_fake_subprocess_writer(clstr_body)):
-        with pytest.raises(CDHitError, match="round-trip"):
+        with pytest.raises(CDHitError) as exc:
             run_clustering(seqs, 0.9, {"temp_dir": str(tmp_path)})
+    msg = str(exc.value)
+    assert "round-trip" in msg
+    # The error must name BOTH sides of the gap so the user can debug:
+    # input seqs that never made it into the .clstr, AND .clstr ids that
+    # we couldn't match back to any input.
+    assert "seq_X" in msg and "seq_Y" in msg
+    assert "ghost" in msg
 
 
 def test_run_clustering_picks_cdhit_est_for_nucleotide(tmp_path):
