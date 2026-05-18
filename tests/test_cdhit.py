@@ -179,6 +179,57 @@ def test_parse_clstr_file_handles_ellipsis_inside_id(tmp_path):
     assert rep_ids == ["CONCAT|weird...iso", "ordinary_id"]
 
 
+def test_parse_clstr_file_handles_cdhit_est_strand_prefix(tmp_path):
+    """Regression for v0.10.2: cd-hit-est member lines carry strand info
+    (``at +/99.93%`` or ``at -/99.93%``) that cd-hit protein output does
+    not. The old regex matched only ``at 99.93%`` and silently dropped
+    every member of every cluster when alphabet=nucleotide — symptom on
+    a hantaviridae run was ``91 sequences in, 34 accounted for`` (the
+    34 reps had `*`; the 57 members all parsed as no-match)."""
+    seqs = [
+        _seq("CONCAT|iso1", "ACGTACGTACGT"),
+        _seq("CONCAT|iso2", "ACGTACGTACGT"),
+        _seq("CONCAT|iso3", "ACGTACGTACGT"),
+        _seq("CONCAT|iso4", "ACGTACGTACGT"),
+    ]
+    clstr = tmp_path / "result.clstr"
+    # cd-hit-est nucleotide .clstr — strand info on every member line.
+    clstr.write_text(
+        ">Cluster 0\n"
+        "0\t12nt, >CONCAT|iso1... *\n"
+        "1\t12nt, >CONCAT|iso2... at +/99.93%\n"
+        "2\t12nt, >CONCAT|iso3... at -/95.00%\n"
+        ">Cluster 1\n"
+        "0\t12nt, >CONCAT|iso4... *\n"
+    )
+    clusters, unmatched = _parse_clstr_file(str(clstr), seqs)
+    assert unmatched == []
+    by_rep = {c.representative.id: c for c in clusters}
+    iso1_members = sorted(m.id for m in by_rep["CONCAT|iso1"].members)
+    assert iso1_members == ["CONCAT|iso2", "CONCAT|iso3"]
+    assert by_rep["CONCAT|iso4"].members == []
+
+
+def test_parse_clstr_file_still_handles_cdhit_protein_no_strand(tmp_path):
+    """Regression guard: the v0.10.2 regex change must not break the
+    plain ``at 99.93%`` format that cd-hit protein emits."""
+    seqs = [
+        _seq("rep", "MKLPQE"),
+        _seq("mem", "MKLPQF"),
+    ]
+    clstr = tmp_path / "result.clstr"
+    clstr.write_text(
+        ">Cluster 0\n"
+        "0\t6aa, >rep... *\n"
+        "1\t6aa, >mem... at 99.93%\n"
+    )
+    clusters, unmatched = _parse_clstr_file(str(clstr), seqs)
+    assert unmatched == []
+    assert len(clusters) == 1
+    assert clusters[0].representative.id == "rep"
+    assert [m.id for m in clusters[0].members] == ["mem"]
+
+
 def test_parse_clstr_file_reports_unmatched_clstr_ids(tmp_path):
     # If cd-hit ever emits an id we can't match back (length cap, truncation,
     # weird transform), _parse_clstr_file must surface it so the caller can

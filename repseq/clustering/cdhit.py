@@ -271,14 +271,25 @@ def run_clustering(
     return clusters
 
 
-# Matches a member line: "<index>\t<len>(aa|nt), >SEQID... *"
-# or "<index>\t<len>(aa|nt), >SEQID... at 99.93%". Greedy ``.+`` plus the
-# required ``*`` or ``at NN%`` tail anchors the match to the end of the
-# line, so a seq id that itself contains ``...`` is captured correctly
-# (a non-greedy ``.+?`` would stop at the first internal ``...`` and
-# silently drop the sequence from the round-trip count).
+# Matches a member line. cd-hit emits two formats for non-rep members:
+#
+#   cd-hit (protein):   "<idx>\t<len>aa, >SEQID... at 99.93%"
+#   cd-hit-est (nuc):   "<idx>\t<len>nt, >SEQID... at +/99.93%"
+#                       "<idx>\t<len>nt, >SEQID... at -/99.93%"
+#
+# The `+/` / `-/` strand prefix is cd-hit-est-only and was silently
+# dropping every member from our round-trip when alphabet=nucleotide:
+# rep lines (with `*`) parsed fine, but every `at +/...%` line failed
+# the regex, so clusters looked like singletons and every member was
+# reported as "absent from .clstr". The `(?:[+-]/)?` group makes the
+# strand prefix optional so both formats parse.
+#
+# Greedy ``.+`` plus the required ``*`` or ``at ...%`` tail anchors the
+# match to the end of the line, so a seq id that itself contains ``...``
+# is captured correctly (non-greedy would stop at the first internal
+# ``...`` and silently drop the sequence — that was the v0.9.2 bug).
 _CLSTR_MEMBER_RE = re.compile(
-    r">(?P<id>.+)\.\.\.\s*(?:(?P<rep>\*)|at\s+[\d.]+%)\s*$"
+    r">(?P<id>.+)\.\.\.\s*(?:(?P<rep>\*)|at\s+(?:[+-]/)?[\d.]+%)\s*$"
 )
 
 
