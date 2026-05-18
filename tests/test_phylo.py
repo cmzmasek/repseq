@@ -230,7 +230,7 @@ def test_run_phylogeny_uses_protein_sequence_when_alphabet_protein(tmp_path):
         # IQ-TREE-on-protein dispatch is covered separately.
         run_phylogeny(
             reps,
-            {"clustering": {"alphabet": "protein"}, "phylo": {"tool": "fasttree"}},
+            {"clustering": {"alphabet_for_clustering": "protein"}, "phylo": {"tool": "fasttree"}},
             tmp_path, "test",
         )
 

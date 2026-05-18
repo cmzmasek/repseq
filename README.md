@@ -229,7 +229,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_representative_isolate_proteins.tsv` | segmented + GenBank | Same schema as above, row-filtered to representatives only. |
 | `{prefix}_representative_isolate_proteins.fasta` | segmented + GenBank | AA FASTA of every protein of every representative isolate. |
 | `{prefix}_representative_sequence_proteins.fasta` | non-segmented + GenBank | AA FASTA of every protein of every representative sequence. |
-| `{prefix}_representatives_protein.fasta` | when `alphabet=protein` (default) | The AA strings actually fed into the clusterer. |
+| `{prefix}_representatives_protein.fasta` | when `alphabet_for_clustering: protein` (default) | The AA strings actually fed into the clusterer. |
 | `{prefix}_clustering.png` | only with `--plot` | Diagnostic scatter of the clustering. |
 | `{prefix}_msa.fasta`, `_tree.nwk`, `_tree.xml`, `_tree_id_map.tsv` | only with `--phylo` | Alignment + tree + name mapping. |
 | `{prefix}_iqtree_summary.txt` | only with `--phylo` + IQ-TREE | IQ-TREE ModelFinder report. |
@@ -303,14 +303,13 @@ DIAMOND, HMMER, MMseqs2 search, or any sequence-search tool** — it's
 both pre-curated and pre-annotated. This is usually "the" output file
 for protein-centric workflows.
 
-#### `{prefix}_representatives_protein.fasta` *(when `clustering.alphabet=protein` actually fired)*
+#### `{prefix}_representatives_protein.fasta` *(when `clustering.alphabet_for_clustering: protein` actually fired)*
 
 The **AA strings that were fed into the clusterer** — the per-isolate
 marker-protein concat in segmented mode, or the per-rep marker in
 non-segmented mode. Written only if every representative ended up with a
-populated `protein_sequence` (i.e. the protein-alphabet path completed; not
-written if `auto` fell back to nucleotide, and obviously not written for
-`alphabet: nucleotide`).
+populated `protein_sequence` (i.e. the protein-alphabet path completed;
+not written for `alphabet_for_clustering: nucleotide`).
 
 This is a *diagnostic*, not a primary output: useful if you want to
 reproduce or audit the clustering input. For a clean per-protein set, use
@@ -749,7 +748,7 @@ taxonomy:
 
 clustering:
   backend: mmseqs2                # or "cdhit"
-  alphabet: protein               # protein (default since v0.6.0), nucleotide, or auto
+  alphabet_for_clustering: protein  # protein (default) or nucleotide
   mmseqs2_mode: easy-linclust     # fast; use easy-cluster for tighter, slower clustering
   coverage: 0.8
   # cd-hit options (only used when backend == cdhit) live under
@@ -759,17 +758,27 @@ representative:
   priority: [refseq, reviewed_uniprot, longest]   # tie-break order for picking the "best"
 ```
 
-**About `clustering.alphabet`:** since v0.6.0 the default is `protein`,
-which clusters on amino-acid sequences rather than raw nucleotides. The
-biology motivation: synonymous substitutions inflate NT divergence by
-30–40% with no functional signal, and protein homology stays reliable
-down to ~25–30% identity vs ~50–60% for nucleotide — so protein clustering
-gives tighter, biologically meaningful groups. For segmented input,
-repseq picks a "marker protein" per segment (longest CDS by default,
-overridable via `cluster_protein` aliases) and clusters on the per-isolate
-concatenation of those markers. Set `alphabet: nucleotide` if you actually
-want genome-identity targets or your input is non-coding. `auto` falls
-back to nucleotide when no proteins can be fetched.
+### About `clustering.alphabet_for_clustering`
+
+**This setting *only* changes what the clustering backend sees.** It does
+**not** disable GenBank CDS download, protein-count QC
+(`qc.protein_annotation.enabled`), or the per-segment
+`virus.expected_proteins_per_segment` check — those run on every isolate
+regardless of which alphabet you cluster on. Pick this purely on what kind
+of identity threshold makes sense for your data.
+
+| Value | Clustering input | When to pick it |
+|---|---|---|
+| `protein` *(default)* | Non-segmented: the per-sequence marker protein (longest CDS by default, overridable via `cluster_protein` aliases). Segmented: per-isolate concatenation of each segment's marker. Triggers a one-shot GenBank CDS fetch if proteins aren't already cached. | Diverged viral families: synonymous substitutions inflate NT divergence by 30–40% with no biological signal, and protein homology stays reliable down to ~25–30% identity vs ~50–60% for nucleotide. |
+| `nucleotide` | Non-segmented: the input FASTA sequence as-is. Segmented: concatenation of all segments in `segments` order. | Tight species-level reference sets where genome-identity targets are what you want; non-coding input; or fully offline runs (`--no-resolve`), which require this value. |
+
+`auto` was removed in v0.10.0 — pick `protein` or `nucleotide` explicitly.
+
+Override at run time without editing the YAML:
+
+```bash
+repseq global -c my.yaml -i x.fasta -T 0.95 --alphabet-for-clustering nucleotide
+```
 
 You can also set your NCBI email/key via the environment variables
 `REPSEQ_NCBI_EMAIL` and `REPSEQ_NCBI_API_KEY` instead of putting them in the file.
@@ -890,17 +899,29 @@ to run anywhere and finish in a couple of seconds.
 
 ## Status
 
-Current: **`v0.9.4`**. All 8 selection modes, protein-alphabet clustering
-by default (`alphabet: protein`), MMseqs2 and cd-hit backends, optional
-protein-annotation QC, per-isolate taxonomy-consistency QC for segmented
-viruses, **strain-as-isolate provenance + collision detection**,
-segment-name synonyms, rich phyloXML output, and an optional UMAP plot
-of the clustering. **650 offline regression tests pass**; the
-NCBI-backed paths have been validated end-to-end against live
-influenza-A, peribunyaviridae, and hantaviridae datasets.
+Current: **`v0.10.0`**. All 8 selection modes, protein-alphabet clustering
+by default (`alphabet_for_clustering: protein`), MMseqs2 and cd-hit
+backends, optional protein-annotation QC, per-isolate
+taxonomy-consistency QC for segmented viruses, **strain-as-isolate
+provenance + collision detection**, segment-name synonyms, rich phyloXML
+output, and an optional UMAP plot of the clustering. **650 offline
+regression tests pass**; the NCBI-backed paths have been validated
+end-to-end against live influenza-A, peribunyaviridae, and hantaviridae
+datasets.
 
 Highlights of recent releases (newest first):
 
+- **`v0.10.0`** — the clustering alphabet is now a user-facing choice
+  end-to-end. The config knob `clustering.alphabet` was renamed to
+  `clustering.alphabet_for_clustering` to make the scope unambiguous
+  (it only chooses what the clustering backend sees — GenBank CDS
+  download, protein-count QC, and the per-segment
+  `expected_proteins_per_segment` check still run regardless). A new
+  CLI flag `--alphabet-for-clustering [protein|nucleotide]` overrides
+  the YAML at run time. The little-used `auto` value was dropped:
+  pick `protein` or `nucleotide` explicitly (a `--no-resolve` run must
+  pick `nucleotide`). **Breaking change** for any YAML that set
+  `clustering.alphabet`.
 - **`v0.9.4`** — the QC summary's `Passed QC` line was misleading: it
   only counted what survived the basic-QC stages (duplicates / length /
   ambiguous / annotation), not protein-QC, segmented completeness,

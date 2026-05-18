@@ -288,22 +288,29 @@ def test_validate_config_rejects_out_of_range_coverage_threshold():
 
 def test_validate_config_default_alphabet_is_protein():
     cfg = load_config(None)
-    assert cfg["clustering"]["alphabet"] == "protein"
+    assert cfg["clustering"]["alphabet_for_clustering"] == "protein"
     assert validate_config(cfg) == []
 
 
-def test_validate_config_accepts_alphabet_nucleotide_and_auto():
+def test_validate_config_accepts_alphabet_nucleotide():
     cfg = load_config(None)
-    for alpha in ("nucleotide", "auto"):
-        cfg["clustering"]["alphabet"] = alpha
-        assert validate_config(cfg) == []
+    cfg["clustering"]["alphabet_for_clustering"] = "nucleotide"
+    assert validate_config(cfg) == []
 
 
 def test_validate_config_rejects_unknown_alphabet():
     cfg = load_config(None)
-    cfg["clustering"]["alphabet"] = "dna"
+    cfg["clustering"]["alphabet_for_clustering"] = "dna"
     errors = validate_config(cfg)
-    assert any("clustering.alphabet" in e for e in errors)
+    assert any("clustering.alphabet_for_clustering" in e for e in errors)
+
+
+def test_validate_config_rejects_auto_alphabet():
+    """v0.10.0 dropped the 'auto' alphabet — it's no longer accepted."""
+    cfg = load_config(None)
+    cfg["clustering"]["alphabet_for_clustering"] = "auto"
+    errors = validate_config(cfg)
+    assert any("clustering.alphabet_for_clustering" in e for e in errors)
 
 
 def test_validate_config_rejects_non_list_cluster_protein():

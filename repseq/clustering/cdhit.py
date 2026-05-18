@@ -65,10 +65,11 @@ _NUCLEOTIDE_MIN = 0.80
 def _is_protein(sequences: list[Sequence], cfg: Optional[dict[str, Any]] = None) -> bool:
     """Choose the binary by clustering alphabet, else by majority sequence type.
 
-    ``cfg['clustering']['alphabet']`` is consulted first: ``protein`` forces
-    ``cd-hit`` regardless of ``seq.seq_type`` (the upstream pipeline may
-    populate ``seq.protein_sequence`` on a nucleotide-typed concat record).
-    ``nucleotide`` forces ``cd-hit-est`` for the same reason.
+    ``cfg['clustering']['alphabet_for_clustering']`` is consulted first:
+    ``protein`` forces ``cd-hit`` regardless of ``seq.seq_type`` (the
+    upstream pipeline may populate ``seq.protein_sequence`` on a
+    nucleotide-typed concat record). ``nucleotide`` forces ``cd-hit-est``
+    for the same reason.
 
     Without a config override we fall back to the alphabet of the records
     themselves: bias to ``cd-hit-est`` only when every sequence is explicitly
@@ -76,7 +77,7 @@ def _is_protein(sequences: list[Sequence], cfg: Optional[dict[str, Any]] = None)
     has the wider acceptable threshold range).
     """
     if cfg is not None:
-        alphabet = cfg.get("clustering", {}).get("alphabet")
+        alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering")
         if alphabet == "protein":
             return True
         if alphabet == "nucleotide":
@@ -130,7 +131,7 @@ def run_clustering(
     """
     cluster_cfg = cfg.get("clustering", {})
     cdhit_cfg = cluster_cfg.get("cdhit", {}) or {}
-    alphabet = cluster_cfg.get("alphabet", "nucleotide")
+    alphabet = cluster_cfg.get("alphabet_for_clustering", "nucleotide")
 
     protein = _is_protein(sequences, cfg)
     floor = _PROTEIN_MIN if protein else _NUCLEOTIDE_MIN

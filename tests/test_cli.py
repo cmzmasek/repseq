@@ -9,8 +9,8 @@ from repseq.cli import (
     _check_output_dir,
     _final_summary,
     _handle_segmented,
+    _load_and_validate,
     _populate_genbank_isolate_segment,
-    _resolve_alphabet,
     _setup_protein_alphabet,
 )
 from repseq.models import Cluster, QCReport, RunResult, SequenceSource
@@ -120,7 +120,7 @@ def _segmented_cfg():
         # These tests exercise nucleotide-level dedup of the concat sequences;
         # protein-alphabet clustering would require marker proteins which the
         # fixture sequences don't carry.
-        "clustering": {"alphabet": "nucleotide"},
+        "clustering": {"alphabet_for_clustering": "nucleotide"},
         "segmented": {
             "enabled": True,
             "virus": "test",
@@ -175,7 +175,7 @@ def test_handle_segmented_collapses_fully_identical_isolates(make_seq):
 
 def _cfg_with_toggle(use_genbank_metadata: bool = True) -> dict:
     return {
-        "clustering": {"alphabet": "nucleotide"},
+        "clustering": {"alphabet_for_clustering": "nucleotide"},
         "segmented": {
             "enabled": True,
             "use_genbank_metadata": use_genbank_metadata,
@@ -285,7 +285,7 @@ def _cds(product: str, aa: str):
 
 def test_setup_protein_alphabet_no_op_when_nucleotide(make_seq):
     a = make_seq("a", "ACGT")
-    cfg = {"clustering": {"alphabet": "nucleotide"}}
+    cfg = {"clustering": {"alphabet_for_clustering": "nucleotide"}}
     out = _setup_protein_alphabet([a], cfg, QCReport(), MagicMock())
     assert out == [a]
     assert a.protein_sequence is None
@@ -299,7 +299,7 @@ def test_setup_protein_alphabet_fetches_when_proteins_missing(make_seq):
     def _attach(seqs, _ncbi):
         for s in seqs:
             s.proteins = [_cds("polymerase", "MMMMM")]
-    cfg = {"clustering": {"alphabet": "protein"}, "segmented": {"enabled": False}}
+    cfg = {"clustering": {"alphabet_for_clustering": "protein"}, "segmented": {"enabled": False}}
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("repseq.cli.attach_proteins", _attach)
         out = _setup_protein_alphabet([a], cfg, QCReport(), ncbi)
@@ -309,19 +309,10 @@ def test_setup_protein_alphabet_fetches_when_proteins_missing(make_seq):
 
 def test_setup_protein_alphabet_aborts_when_no_resolve_and_protein(make_seq):
     a = make_seq("a", "ACGT", source=SequenceSource.NCBI, accession="NC_001.1")
-    cfg = {"clustering": {"alphabet": "protein"}, "segmented": {"enabled": False}}
+    cfg = {"clustering": {"alphabet_for_clustering": "protein"}, "segmented": {"enabled": False}}
     with pytest.raises(SystemExit) as exc:
         _setup_protein_alphabet([a], cfg, QCReport(), ncbi=None)
     assert exc.value.code == 1
-
-
-def test_setup_protein_alphabet_auto_falls_back_to_nucleotide(make_seq):
-    """alphabet=auto + no proteins + no ncbi → silent nucleotide fallback."""
-    a = make_seq("a", "ACGT", source=SequenceSource.NCBI, accession="NC_001.1")
-    cfg = {"clustering": {"alphabet": "auto"}, "segmented": {"enabled": False}}
-    out = _setup_protein_alphabet([a], cfg, QCReport(), ncbi=None)
-    assert out == [a]
-    assert cfg["clustering"]["alphabet"] == "nucleotide"
 
 
 def test_setup_protein_alphabet_segmented_does_not_set_protein_sequence(make_seq):
@@ -329,24 +320,43 @@ def test_setup_protein_alphabet_segmented_does_not_set_protein_sequence(make_seq
     the per-sequence helper must not touch seq.protein_sequence on segments."""
     a = make_seq("a_S", "ACGT", source=SequenceSource.NCBI, accession="NC_001.1")
     a.proteins = [_cds("nucleoprotein", "NNNN")]
-    cfg = {"clustering": {"alphabet": "protein"}, "segmented": {"enabled": True}}
+    cfg = {"clustering": {"alphabet_for_clustering": "protein"}, "segmented": {"enabled": True}}
     ncbi = MagicMock()
     out = _setup_protein_alphabet([a], cfg, QCReport(), ncbi)
     assert out == [a]
     assert a.protein_sequence is None
 
 
-def test_resolve_alphabet_auto_picks_protein_when_proteins_present(make_seq):
-    a = make_seq("a", "ACGT")
-    a.proteins = [_cds("polymerase", "MMMM")]
-    cfg = {"clustering": {"alphabet": "auto"}}
-    assert _resolve_alphabet(cfg, [a]) == "protein"
+# ---------------------------------------------------------------------------
+# _load_and_validate — --alphabet-for-clustering CLI override
+# ---------------------------------------------------------------------------
+
+def test_load_and_validate_alphabet_override_applies(tmp_path):
+    """--alphabet-for-clustering nucleotide overrides the YAML default."""
+    out_dir = tmp_path / "out"
+    cfg = _load_and_validate(
+        config_path=None,
+        output_dir=str(out_dir),
+        prefix=None,
+        threads=None,
+        seed=None,
+        alphabet_for_clustering="nucleotide",
+    )
+    assert cfg["clustering"]["alphabet_for_clustering"] == "nucleotide"
 
 
-def test_resolve_alphabet_auto_picks_nucleotide_when_no_proteins(make_seq):
-    a = make_seq("a", "ACGT")
-    cfg = {"clustering": {"alphabet": "auto"}}
-    assert _resolve_alphabet(cfg, [a]) == "nucleotide"
+def test_load_and_validate_alphabet_default_unchanged_when_no_override(tmp_path):
+    """Without --alphabet-for-clustering the YAML default ('protein') wins."""
+    out_dir = tmp_path / "out"
+    cfg = _load_and_validate(
+        config_path=None,
+        output_dir=str(out_dir),
+        prefix=None,
+        threads=None,
+        seed=None,
+        alphabet_for_clustering=None,
+    )
+    assert cfg["clustering"]["alphabet_for_clustering"] == "protein"
 
 
 # ---------------------------------------------------------------------------

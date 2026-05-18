@@ -93,14 +93,26 @@ DEFAULTS: dict[str, Any] = {
     },
     "clustering": {
         "backend": "mmseqs2",              # "mmseqs2" | "cdhit"
-        # Alphabet fed to the clustering backend. "protein" (default) feeds
-        # the marker protein (longest CDS, or the first matching alias in
-        # `cluster_protein`) — for segmented input, an in-order concat of
-        # each segment's marker. "nucleotide" feeds the raw sequence (the
-        # pre-0.6 behaviour). "auto" picks protein when any sequence has
-        # CDS info available, else nucleotide. Triggers a one-shot
-        # GenBank CDS fetch when proteins aren't already cached.
-        "alphabet": "protein",
+        # Alphabet fed to the clustering backend.
+        #
+        # IMPORTANT: this setting only chooses what the clustering backend
+        # (mmseqs2 / cd-hit) sees. It does NOT disable GenBank CDS download,
+        # protein-count QC (qc.protein_annotation), or the
+        # virus.expected_proteins_per_segment check — those run on every
+        # isolate regardless of this value.
+        #
+        #   "protein"    — cluster on amino acid sequences (recommended for
+        #                  diverged virus families). Non-segmented: the
+        #                  marker protein (longest CDS, or the first
+        #                  matching alias in `cluster_protein`).
+        #                  Segmented: in-order concat of each segment's
+        #                  marker protein. Triggers a one-shot GenBank CDS
+        #                  fetch when proteins aren't already cached.
+        #   "nucleotide" — cluster on the raw nucleotide sequence.
+        #                  Non-segmented: the input FASTA sequence as-is.
+        #                  Segmented: concat of all segments in
+        #                  `segments` order.
+        "alphabet_for_clustering": "protein",
         # Non-segmented marker-protein override. Alias list, matched
         # case-insensitively as substrings against /product. First alias
         # that matches a CDS wins; if no aliases match (or the list is
@@ -563,11 +575,11 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             f"(use 'mmseqs2' or 'cdhit')"
         )
 
-    alphabet = cfg.get("clustering", {}).get("alphabet", "protein")
-    if alphabet not in ("protein", "nucleotide", "auto"):
+    alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
+    if alphabet not in ("protein", "nucleotide"):
         errors.append(
-            f"clustering.alphabet '{alphabet}' is not supported "
-            f"(use 'protein', 'nucleotide', or 'auto')"
+            f"clustering.alphabet_for_clustering '{alphabet}' is not supported "
+            f"(use 'protein' or 'nucleotide')"
         )
 
     cluster_protein_global = cfg.get("clustering", {}).get("cluster_protein", [])

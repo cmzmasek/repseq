@@ -74,23 +74,23 @@ def test_is_protein_any_protein_is_true():
 
 
 def test_is_protein_alphabet_override_wins_over_seq_type():
-    """clustering.alphabet=protein on NT-typed concat must pick cd-hit."""
+    """clustering.alphabet_for_clustering=protein on NT-typed concat must pick cd-hit."""
     seqs = [_seq("CONCAT|iso1", "ACGT", SequenceType.NUCLEOTIDE)]
-    cfg = {"clustering": {"alphabet": "protein"}}
+    cfg = {"clustering": {"alphabet_for_clustering": "protein"}}
     assert _is_protein(seqs, cfg) is True
 
 
 def test_is_protein_alphabet_nucleotide_forces_cdhit_est():
-    """clustering.alphabet=nucleotide picks cd-hit-est even with protein input."""
+    """clustering.alphabet_for_clustering=nucleotide picks cd-hit-est even with protein input."""
     seqs = [_seq("a", "MKLV", SequenceType.PROTEIN)]
-    cfg = {"clustering": {"alphabet": "nucleotide"}}
+    cfg = {"clustering": {"alphabet_for_clustering": "nucleotide"}}
     assert _is_protein(seqs, cfg) is False
 
 
 def test_min_threshold_floor_follows_alphabet_override():
-    """alphabet=protein with NT-typed sequences uses the 0.40 protein floor."""
+    """alphabet_for_clustering=protein with NT-typed sequences uses the 0.40 protein floor."""
     seqs = [_seq("a", "ACGT", SequenceType.NUCLEOTIDE)]
-    cfg = {"clustering": {"backend": "cdhit", "alphabet": "protein"}}
+    cfg = {"clustering": {"backend": "cdhit", "alphabet_for_clustering": "protein"}}
     assert min_threshold(cfg, seqs) == 0.40
 
 

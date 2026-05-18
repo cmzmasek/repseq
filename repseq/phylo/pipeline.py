@@ -94,14 +94,14 @@ def _pick_tree_tool(cfg: Optional[dict[str, Any]], is_protein: bool) -> str:
 def _use_protein_sequence(reps: list[Sequence], cfg: Optional[dict[str, Any]]) -> bool:
     """True when the phylo input should be each rep's protein_sequence.
 
-    Active when ``clustering.alphabet="protein"`` AND every rep actually
-    carries a protein_sequence (a no-resolve fallback or missing-marker
-    drop could leave some empty; we never want a half-protein, half-NT
-    alignment).
+    Active when ``clustering.alphabet_for_clustering="protein"`` AND every
+    rep actually carries a protein_sequence (a no-resolve fallback or
+    missing-marker drop could leave some empty; we never want a
+    half-protein, half-NT alignment).
     """
     if cfg is None:
         return False
-    if cfg.get("clustering", {}).get("alphabet") != "protein":
+    if cfg.get("clustering", {}).get("alphabet_for_clustering") != "protein":
         return False
     return all(r.protein_sequence for r in reps)
 

@@ -124,7 +124,17 @@ clustering:
   # rules. Pick one and stick with it for a given reference set.
   backend: mmseqs2
 
-  # Alphabet fed to the clustering backend:
+  # Alphabet fed to the clustering backend.
+  #
+  # IMPORTANT: this setting ONLY chooses what the clustering backend
+  # (mmseqs2 / cd-hit) sees. It does NOT disable:
+  #   • GenBank CDS download (still runs — protein QC, phylogeny, and the
+  #     per-protein TSV/FASTA outputs all rely on it),
+  #   • protein-count QC (qc.protein_annotation.enabled),
+  #   • the virus.expected_proteins_per_segment per-segment check.
+  # All of those run on every isolate regardless of which alphabet you
+  # choose here.
+  #
   #   protein     — cluster on amino acid sequences. Default and recommended
   #                 for viral workflows: synonymous substitutions inflate NT
   #                 divergence by 30–40% with no biological signal, and
@@ -137,15 +147,18 @@ clustering:
   #                 cluster_protein (this block, non-segmented) or
   #                 segmented.viruses.<v>.cluster_protein (per segment).
   #   nucleotide  — cluster on the raw input sequence (the pre-0.6 behaviour).
-  #                 Choose this for genome-level identity targets or when
-  #                 input is non-coding.
-  #   auto        — protein when any sequence has CDS info, else nucleotide.
-  # When alphabet=protein, repseq triggers a one-shot GenBank CDS fetch if
-  # proteins are not already cached (results cached under ncbi_proteins;
-  # shared with protein-annotation QC, so no duplicate round trips). Skipped
-  # under --no-resolve, in which case the run aborts if no proteins are
-  # available — switch to alphabet: nucleotide for offline runs.
-  alphabet: protein
+  #                 Choose this for genome-level identity targets, when
+  #                 input is non-coding, or for offline runs (--no-resolve).
+  #
+  # When alphabet_for_clustering=protein, repseq triggers a one-shot GenBank
+  # CDS fetch if proteins are not already cached (results cached under
+  # ncbi_proteins; shared with protein-annotation QC, so no duplicate round
+  # trips). Under --no-resolve a 'protein' run aborts with an error — switch
+  # to alphabet_for_clustering: nucleotide for fully offline runs.
+  #
+  # The CLI flag --alphabet-for-clustering protein|nucleotide overrides
+  # this value when passed.
+  alphabet_for_clustering: protein
 
   # Non-segmented marker-protein override. Alias list matched case-
   # insensitively (substring) against /product. First alias that matches

@@ -89,7 +89,7 @@ def run_clustering(
     coverage = cluster_cfg.get("coverage", 0.8)
     coverage_mode = cluster_cfg.get("coverage_mode", 0)
     extra_args: list[str] = cluster_cfg.get("extra_args", [])
-    alphabet = cluster_cfg.get("alphabet", "nucleotide")
+    alphabet = cluster_cfg.get("alphabet_for_clustering", "nucleotide")
     threads = cfg.get("threads", 4)
 
     work_dir = Path(tmp_dir or cfg.get("temp_dir", "/tmp/repseq"))

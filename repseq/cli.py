@@ -88,10 +88,24 @@ def _shared_options(fn):
             "Default: auto (detect from header format)."
         ),
     )(fn)
+    fn = click.option(
+        "--alphabet-for-clustering",
+        type=click.Choice(["protein", "nucleotide"]),
+        default=None,
+        help=(
+            "Alphabet fed to the clustering backend (overrides config). "
+            "'protein' clusters on amino acid sequences (default; recommended "
+            "for diverged virus families); 'nucleotide' clusters on raw NT. "
+            "ONLY affects clustering — GenBank CDS download, protein-count QC, "
+            "and the per-segment expected-proteins check still run on every "
+            "isolate regardless of this value."
+        ),
+    )(fn)
     return fn
 
 
-def _load_and_validate(config_path, output_dir, prefix, threads, seed) -> dict:
+def _load_and_validate(config_path, output_dir, prefix, threads, seed,
+                       alphabet_for_clustering=None) -> dict:
     cfg = load_config(config_path)
     if output_dir:
         cfg["output"]["dir"] = output_dir
@@ -101,6 +115,8 @@ def _load_and_validate(config_path, output_dir, prefix, threads, seed) -> dict:
         cfg["threads"] = threads
     if seed is not None:
         cfg["seed"] = seed
+    if alphabet_for_clustering is not None:
+        cfg.setdefault("clustering", {})["alphabet_for_clustering"] = alphabet_for_clustering
     errors = validate_config(cfg)
     if errors:
         for e in errors:
@@ -201,68 +217,33 @@ def _run_protein_qc(sequences, cfg, qc_report, ncbi):
     return kept
 
 
-def _resolve_alphabet(cfg, sequences) -> str:
-    """Resolve clustering.alphabet, expanding ``auto`` for the current input."""
-    alphabet = cfg.get("clustering", {}).get("alphabet", "protein")
-    if alphabet == "auto":
-        any_proteins = any(
-            (seq.proteins or []) and any(p.get("sequence") for p in seq.proteins)
-            for seq in sequences
-        )
-        return "protein" if any_proteins else "nucleotide"
-    return alphabet
-
-
 def _setup_protein_alphabet(sequences, cfg, qc_report, ncbi):
-    """When clustering.alphabet=protein, ensure CDS proteins are fetched and
-    set seq.protein_sequence on each non-segmented sequence.
+    """When clustering.alphabet_for_clustering=protein, ensure CDS proteins
+    are fetched and set seq.protein_sequence on each non-segmented sequence.
 
     Triggers a one-shot GenBank CDS fetch if QC didn't already do it. Drops
     sequences without a viable marker (incremented under removed_proteins).
-    No-op when alphabet=nucleotide. For segmented input the protein concat
-    is built later by ``_handle_segmented``; this step still triggers the
-    fetch so the marker selection in that step has data to work with.
+    No-op when alphabet_for_clustering=nucleotide. For segmented input the
+    protein concat is built later by ``_handle_segmented``; this step still
+    triggers the fetch so the marker selection in that step has data to
+    work with.
     """
-    alphabet = cfg.get("clustering", {}).get("alphabet", "protein")
+    alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
     if alphabet == "nucleotide":
         return sequences
-    # 'auto' or 'protein': both want proteins available if at all possible.
     needs_proteins = any(seq.proteins is None for seq in sequences)
     if needs_proteins:
         if ncbi is None:
-            if alphabet == "auto":
-                # No proteins available, no way to fetch — silently fall back
-                # to nucleotide. The dispatcher reads cfg afresh, so we
-                # mutate the live config in place.
-                cfg.setdefault("clustering", {})["alphabet"] = "nucleotide"
-                click.echo(
-                    "  [alphabet=auto] no NCBI client (--no-resolve) and no "
-                    "cached proteins; falling back to nucleotide clustering."
-                )
-                return sequences
             click.echo(
-                "[error] clustering.alphabet='protein' requires GenBank CDS "
-                "fetch, but --no-resolve was set. Either drop --no-resolve "
-                "or switch to clustering.alphabet: nucleotide.",
+                "[error] clustering.alphabet_for_clustering='protein' "
+                "requires GenBank CDS fetch, but --no-resolve was set. "
+                "Either drop --no-resolve or switch to "
+                "clustering.alphabet_for_clustering: nucleotide.",
                 err=True,
             )
             sys.exit(1)
         click.echo("Fetching CDS proteins for protein-alphabet clustering ...")
         attach_proteins(sequences, ncbi)
-    # If 'auto' and nothing came back, fall back to nucleotide.
-    if alphabet == "auto":
-        any_proteins = any(
-            (seq.proteins or []) and any(p.get("sequence") for p in seq.proteins)
-            for seq in sequences
-        )
-        if not any_proteins:
-            cfg.setdefault("clustering", {})["alphabet"] = "nucleotide"
-            click.echo(
-                "  [alphabet=auto] no usable CDS translations found; falling "
-                "back to nucleotide clustering."
-            )
-            return sequences
-        cfg["clustering"]["alphabet"] = "protein"
     # Non-segmented: pick the marker per-sequence now. Segmented isolates
     # get a per-isolate concat in _handle_segmented (each segment contributes
     # its own marker), so we leave them alone here.
@@ -480,7 +461,7 @@ def _handle_segmented(sequences, cfg, qc_report):
                     )
     click.echo(f"  Complete isolates : {len(complete_isolates)}")
     click.echo(f"  Individual seqs   : {len(kept)}")
-    alphabet = cfg.get("clustering", {}).get("alphabet", "protein")
+    alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
     require_protein = alphabet == "protein"
     cluster_protein = virus_cfg.get("cluster_protein")
     concat_seqs = build_concatenated_sequences(
@@ -701,12 +682,13 @@ def run_doctor_cmd(config_path, no_network):
 @click.option("--n-select", "-n", default=None, type=int,
               help="Number of representative sequences to select.")
 def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, threshold, n_select):
+               segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, alphabet_for_clustering, threshold, n_select):
     """Global mode: cluster at a threshold or select N diverse sequences."""
     if threshold is None and n_select is None:
         raise click.UsageError("Provide --threshold or --n-select.")
 
-    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed)
+    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
+                             alphabet_for_clustering=alphabet_for_clustering)
     if segmented:
         cfg["segmented"]["enabled"] = True
 
@@ -743,9 +725,10 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-group", "-n", required=True, type=int,
               help="Target representatives per taxonomic group.")
 def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, rank, n_per_group):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, alphabet_for_clustering, rank, n_per_group):
     """Taxonomic mode 1: N representatives per taxonomic rank group."""
-    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed)
+    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
+                             alphabet_for_clustering=alphabet_for_clustering)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -779,7 +762,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--rank-levels", "-r", required=True,
               help='JSON list of {rank, n_per_group} dicts. E.g. \'[{"rank":"family","n_per_group":20},{"rank":"genus","n_per_group":5}]\'')
 def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, rank_levels):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, alphabet_for_clustering, rank_levels):
     """Taxonomic mode 2: hierarchical multi-rank nested clustering."""
     import json as _json
     try:
@@ -787,7 +770,8 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
     except Exception:
         raise click.UsageError("--rank-levels must be valid JSON.")
 
-    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed)
+    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
+                             alphabet_for_clustering=alphabet_for_clustering)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -821,9 +805,10 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-host", "-n", required=True, type=int,
               help="Target representatives per host organism.")
 def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, n_per_host):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, alphabet_for_clustering, n_per_host):
     """Host-stratified mode: N representatives per host organism."""
-    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed)
+    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
+                             alphabet_for_clustering=alphabet_for_clustering)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -859,9 +844,10 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--window", default="year",
               help='Time window: "year", "decade", or a number (e.g. "5" for 5-year bins).')
 def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, n_per_window, window):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, alphabet_for_clustering, n_per_window, window):
     """Time-stratified mode: N representatives per time window."""
-    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed)
+    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
+                             alphabet_for_clustering=alphabet_for_clustering)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -895,9 +881,10 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-country", "-n", required=True, type=int,
               help="Target representatives per country.")
 def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, n_per_country):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, alphabet_for_clustering, n_per_country):
     """Geographic mode: N representatives per country."""
-    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed)
+    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
+                             alphabet_for_clustering=alphabet_for_clustering)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -937,10 +924,11 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--field-regex", default=None,
               help="Regex to extract the field value from FASTA headers.")
 def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, field, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, alphabet_for_clustering, field, n_per_group,
                metadata_table, field_regex):
     """Custom metadata mode: group by any field or metadata table column."""
-    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed)
+    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
+                             alphabet_for_clustering=alphabet_for_clustering)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -983,11 +971,12 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--metadata-table", default=None,
               help="Path to TSV/CSV metadata table with accession column.")
 def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, fields, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, source_override, alphabet_for_clustering, fields, n_per_group,
                metadata_table):
     """Hybrid mode: multi-dimensional stratification (e.g. genus × host × year)."""
     field_list = [f.strip() for f in fields.split(",")]
-    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed)
+    cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
+                             alphabet_for_clustering=alphabet_for_clustering)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
