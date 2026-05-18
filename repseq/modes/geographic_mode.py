@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..clustering import compute_diversity_curve
 from ..models import Cluster, GroupStat, RunResult, Sequence
 from .base import BaseMode
 from .taxonomic1 import _binary_search_threshold
@@ -58,6 +59,7 @@ class GeographicMode(BaseMode):
                     grouping="country", group=country,
                     n_before=len(group_seqs), n_after=len(reps),
                     clustered=True, cutoff=threshold,
+                    cutoff_counts=compute_diversity_curve(group_seqs, self.cfg),
                 ))
 
         return RunResult(

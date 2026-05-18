@@ -172,6 +172,13 @@ class GroupStat:
     n_after: int             # representatives selected from the group
     clustered: bool          # whether MMseqs2 clustering ran (vs. kept whole)
     cutoff: Optional[float] = None   # MMseqs2 identity threshold used, if clustered
+    # Diversity curve: cluster count at each configured "standard" identity
+    # threshold (e.g. {0.99: 87, 0.95: 42, 0.90: 18, 0.80: 5, 0.70: None}).
+    # ``None`` for a cutoff means it is below the active backend's identity
+    # floor (cd-hit-est refuses <0.80) and was not run. Populated only when
+    # ``clustered=True`` and ``clustering.diversity_curve_cutoffs`` is
+    # non-empty; reporting only — does not influence selection.
+    cutoff_counts: Optional[dict[float, Optional[int]]] = None
 
 
 @dataclass

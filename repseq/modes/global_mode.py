@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 import click
 
-from ..clustering import run_clustering
+from ..clustering import compute_diversity_curve, run_clustering
 from ..clustering.diversity import select_diverse
 from ..models import Cluster, GroupStat, RunResult, Sequence
 from ..representative.selector import apply_representative_selection
@@ -59,6 +59,7 @@ class GlobalMode(BaseMode):
                 grouping="global", group="(all)",
                 n_before=len(sequences), n_after=len(representatives),
                 clustered=True, cutoff=self.threshold,
+                cutoff_counts=compute_diversity_curve(sequences, self.cfg),
             )],
             config_snapshot={"threshold": self.threshold},
         )

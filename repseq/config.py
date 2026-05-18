@@ -118,6 +118,16 @@ DEFAULTS: dict[str, Any] = {
         # that matches a CDS wins; if no aliases match (or the list is
         # empty), the longest CDS on the sequence is used.
         "cluster_protein": [],
+        # Diagnostic: for each stratum where binary-search clustering ran,
+        # also run the clustering backend at each of these identity
+        # thresholds and report the cluster count as additional columns
+        # (n_clusters_0.99, n_clusters_0.95, ...) in
+        # {prefix}_group_counts.tsv. Reporting-only — does NOT influence
+        # representative selection. Cutoffs below the backend's identity
+        # floor (cd-hit-est: 0.80, cd-hit protein: 0.40, MMseqs2: 0) are
+        # reported as NA. Set to [] to disable (e.g. on huge runs where
+        # the extra clustering work would dominate runtime).
+        "diversity_curve_cutoffs": [0.99, 0.95, 0.9, 0.8, 0.7],
         "mmseqs2_mode": "easy-linclust",   # "easy-linclust" | "easy-cluster"
         "coverage": 0.8,
         "coverage_mode": 0,
@@ -590,6 +600,20 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             "clustering.cluster_protein must be a list of non-empty strings "
             "(case-insensitive substring aliases for /product)"
         )
+
+    diversity_cutoffs = cfg.get("clustering", {}).get("diversity_curve_cutoffs", [])
+    if not isinstance(diversity_cutoffs, list):
+        errors.append(
+            "clustering.diversity_curve_cutoffs must be a list of floats in (0, 1]"
+        )
+    else:
+        for v in diversity_cutoffs:
+            if not isinstance(v, (int, float)) or not (0.0 < float(v) <= 1.0):
+                errors.append(
+                    f"clustering.diversity_curve_cutoffs entry {v!r} is not a "
+                    f"number in (0, 1]"
+                )
+                break
 
     mmseqs2_mode = cfg.get("clustering", {}).get("mmseqs2_mode")
     if mmseqs2_mode not in ("easy-linclust", "easy-cluster"):

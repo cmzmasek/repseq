@@ -166,6 +166,20 @@ clustering:
   # used. Examples: ["polymerase"], ["RNA-dependent RNA polymerase", "L"].
   cluster_protein: []
 
+  # Diagnostic "diversity curve" reporting. For each stratum where the
+  # binary-search clustering ran (clustered=TRUE in
+  # {prefix}_group_counts.tsv), the backend is also run at each of these
+  # identity thresholds and the resulting cluster counts are reported as
+  # additional columns (n_clusters_0.99, n_clusters_0.95, ...). This is
+  # purely diagnostic — REPRESENTATIVE SELECTION IS NOT AFFECTED. It
+  # gives a sense of how conserved each stratum is (e.g. does the group
+  # collapse to 5 clusters at 0.99 or only at 0.70?). Cutoffs below the
+  # backend's identity floor (cd-hit-est 0.80, cd-hit protein 0.40,
+  # MMseqs2 0.0) are reported as NA in the TSV. Empty list disables the
+  # feature — useful on very large runs where the extra clustering work
+  # would dominate runtime.
+  diversity_curve_cutoffs: [0.99, 0.95, 0.9, 0.8, 0.7]
+
   # ---- MMseqs2 backend options (used when backend == mmseqs2) ----
   # easy-linclust: linear-time, scales to very large datasets, but APPROXIMATE
   #   — it does not guarantee every pair within a cluster meets --min-seq-id,

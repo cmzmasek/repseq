@@ -402,6 +402,17 @@ did the binary-search clusterer run, or was the group already small
 enough to keep whole?), `cutoff` (the identity threshold the clusterer
 settled on, if it ran).
 
+When `clustering.diversity_curve_cutoffs` is non-empty (default
+`[0.99, 0.95, 0.9, 0.8, 0.7]`), every clustered stratum also carries
+trailing `n_clusters_<c>` columns — the cluster count obtained by
+re-running the backend at that fixed identity threshold. This is a
+**diagnostic only — representative selection is not affected**. It
+lets you read off how conserved a group is at a glance: a stratum that
+collapses to 5 clusters at 0.99 vs one that needs 0.70 to collapse to
+the same 5 are very different beasts. Cells are `NA` for cutoffs below
+the backend's identity floor (cd-hit-est < 0.80, cd-hit protein < 0.40),
+and empty for unclustered strata.
+
 **The fastest way to see where the reduction happened.** If a single
 genus ate most of your "selected" budget, you'll see it here.
 
@@ -900,19 +911,32 @@ to run anywhere and finish in a couple of seconds.
 
 ## Status
 
-Current: **`v0.11.0`**. All 8 selection modes, protein-alphabet clustering
+Current: **`v0.12.0`**. All 8 selection modes, protein-alphabet clustering
 by default (`alphabet_for_clustering: protein`), MMseqs2 and cd-hit
 backends, optional protein-annotation QC, per-isolate
 taxonomy-consistency QC for segmented viruses, **strain-as-isolate
 provenance + collision detection**, segment-name synonyms, rich phyloXML
-output, an optional UMAP plot of the clustering, and an **auto-generated
-Methods-section starter (`_summary.md`) on every run**. **665 offline
-regression tests pass**; the NCBI-backed paths have been validated
-end-to-end against live influenza-A, peribunyaviridae, and hantaviridae
-datasets.
+output, an optional UMAP plot of the clustering, an auto-generated
+Methods-section starter (`_summary.md`) on every run, and a **per-
+stratum diversity curve in `_group_counts.tsv`** (cluster counts at
+fixed identity thresholds). **678 offline regression tests pass**; the
+NCBI-backed paths have been validated end-to-end against live
+influenza-A, peribunyaviridae, and hantaviridae datasets.
 
 Highlights of recent releases (newest first):
 
+- **`v0.12.0`** — `_group_counts.tsv` gains a per-stratum diversity
+  curve. For each stratum where the binary-search clustering ran, the
+  clustering backend is also invoked at each of the configured
+  "standard" identity thresholds (default `[0.99, 0.95, 0.9, 0.8, 0.7]`)
+  and the resulting cluster counts are reported as trailing
+  `n_clusters_<c>` columns. Purely diagnostic — representative
+  selection is unchanged. Cutoffs below the backend's identity floor
+  (cd-hit-est < 0.80, cd-hit protein < 0.40) are reported as `NA`.
+  Configurable via `clustering.diversity_curve_cutoffs`; set to `[]`
+  to disable on very large runs where the extra clustering work would
+  dominate runtime. Mentioned by the `_summary.md` writer so the
+  Methods section is aware of it.
 - **`v0.11.0`** — every successful run now writes `{prefix}_summary.md`,
   a Markdown Methods-section starter that reads as scientific prose
   with the live numbers from the run filled in (input count, per-stage

@@ -493,24 +493,61 @@ def write_group_counts_tsv(result: RunResult, path: Path) -> bool:
     field combination, or the whole dataset for ``global``).
     ``stratum_size_before`` is the number of sequences entering the
     stratum — in segmented runs these are the concatenated per-isolate
-    sequences. ``cutoff`` is the MMseqs2 identity threshold the binary
-    search settled on for that stratum, left blank when the stratum
-    was small enough to keep without clustering (``clustered`` is then
-    ``FALSE``).
+    sequences. ``cutoff`` is the identity threshold the binary search
+    settled on for that stratum, left blank when the stratum was small
+    enough to keep without clustering (``clustered`` is then ``FALSE``).
+
+    When ``clustering.diversity_curve_cutoffs`` is configured, each
+    clustered stratum also carries cluster counts at those fixed
+    cutoffs in trailing ``n_clusters_<c>`` columns (e.g.
+    ``n_clusters_0.99``). Cells are ``NA`` for cutoffs below the
+    backend's identity floor (cd-hit-est < 0.80, cd-hit protein <
+    0.40); rows with ``clustered=FALSE`` leave every curve cell
+    empty. Columns appear only when at least one row has
+    ``cutoff_counts`` populated — the schema adapts to the data.
 
     Returns False without writing when the mode recorded no group stats.
     """
     if not result.group_stats:
         return False
+
+    # Column set is the union of cutoffs seen across all rows, sorted
+    # high → low so the most stringent threshold is leftmost. Reading
+    # from the data (not from cfg) keeps the schema consistent with
+    # what was actually computed for this run.
+    curve_cutoffs: set[float] = set()
+    for gs in result.group_stats:
+        if gs.cutoff_counts:
+            curve_cutoffs.update(gs.cutoff_counts.keys())
+    sorted_cutoffs = sorted(curve_cutoffs, reverse=True)
+    curve_cols = [f"n_clusters_{c:g}" for c in sorted_cutoffs]
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fh:
-        fh.write("stratified_by\tstratum\tstratum_size_before\tstratum_size_after\tclustered\tcutoff\n")
+        header = (
+            "stratified_by\tstratum\tstratum_size_before\t"
+            "stratum_size_after\tclustered\tcutoff"
+        )
+        if curve_cols:
+            header += "\t" + "\t".join(curve_cols)
+        fh.write(header + "\n")
         for gs in result.group_stats:
             cutoff = f"{gs.cutoff:.4f}" if gs.cutoff is not None else ""
-            fh.write(
-                f"{_tsv_safe(gs.grouping)}\t{_tsv_safe(gs.group)}\t{gs.n_before}\t{gs.n_after}\t"
-                f"{_tsv_bool(gs.clustered)}\t{cutoff}\n"
+            row = (
+                f"{_tsv_safe(gs.grouping)}\t{_tsv_safe(gs.group)}\t"
+                f"{gs.n_before}\t{gs.n_after}\t"
+                f"{_tsv_bool(gs.clustered)}\t{cutoff}"
             )
+            if curve_cols:
+                cells = []
+                for c in sorted_cutoffs:
+                    if gs.cutoff_counts is None:
+                        cells.append("")
+                    else:
+                        v = gs.cutoff_counts.get(c)
+                        cells.append("NA" if v is None else str(v))
+                row += "\t" + "\t".join(cells)
+            fh.write(row + "\n")
     return True
 
 

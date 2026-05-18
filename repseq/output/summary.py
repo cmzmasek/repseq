@@ -296,6 +296,20 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
     mode_desc = _describe_mode(result.mode, cfg)
     rep_unit = "representative isolates" if segmented else "representative sequences"
 
+    diversity_cutoffs = cluster_cfg.get("diversity_curve_cutoffs") or []
+    if diversity_cutoffs:
+        cutoffs_str = ", ".join(f"{c:g}" for c in sorted(diversity_cutoffs, reverse=True))
+        diversity_sentence = (
+            f" For comparison and as a diagnostic of within-stratum "
+            f"sequence diversity, the same clustering backend was also "
+            f"run at fixed identity thresholds ({cutoffs_str}) for each "
+            f"clustered stratum; the resulting cluster counts are "
+            f"reported in `{{prefix}}_group_counts.tsv` and did not "
+            f"influence representative selection."
+        )
+    else:
+        diversity_sentence = ""
+
     return (
         f"## Representative selection\n\n"
         f"Clustering was performed on {input_desc} using **{tool_name}** "
@@ -303,7 +317,7 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
         f"representative was chosen by the configured priority "
         f"(**{priority}**, with sequence length as the final tiebreaker). "
         f"The final set contains **{_fmt_int(n_reps)} {rep_unit}** "
-        f"across **{_fmt_int(n_clusters)} cluster(s)**.\n"
+        f"across **{_fmt_int(n_clusters)} cluster(s)**.{diversity_sentence}\n"
     )
 
 

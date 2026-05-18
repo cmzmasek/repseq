@@ -5,6 +5,7 @@ from __future__ import annotations
 from itertools import product
 from typing import Any, Optional
 
+from ..clustering import compute_diversity_curve
 from ..models import Cluster, GroupStat, RunResult, Sequence
 from .base import BaseMode
 from .custom_mode import _get_field_value, load_metadata_table
@@ -110,6 +111,7 @@ class HybridMode(BaseMode):
                     grouping=grouping, group=label,
                     n_before=len(group_seqs), n_after=len(reps),
                     clustered=True, cutoff=threshold,
+                    cutoff_counts=compute_diversity_curve(group_seqs, self.cfg),
                 ))
 
         return RunResult(

@@ -75,6 +75,62 @@ def test_write_group_counts_tsv_skips_when_no_stats(tmp_path):
     assert not path.exists()
 
 
+def test_write_group_counts_tsv_emits_diversity_curve_columns(tmp_path):
+    """When any row has cutoff_counts populated, the TSV gains
+    n_clusters_<c> columns sorted from most-to-least stringent.
+    Rows without cutoff_counts (unclustered groups) leave those cells
+    empty; below-floor cutoffs are emitted as NA."""
+    result = RunResult(
+        mode="taxonomic1",
+        group_stats=[
+            GroupStat(
+                grouping="genus", group="A",
+                n_before=100, n_after=20, clustered=True, cutoff=0.91,
+                cutoff_counts={0.99: 87, 0.95: 42, 0.9: 18, 0.8: 5, 0.7: None},
+            ),
+            # Below-target group with no clustering: no curve cells.
+            GroupStat(
+                grouping="genus", group="B",
+                n_before=3, n_after=3, clustered=False,
+            ),
+        ],
+    )
+    path = tmp_path / "g.tsv"
+    assert write_group_counts_tsv(result, path) is True
+    lines = path.read_text().splitlines()
+    # Header gains 5 trailing curve columns, descending cutoff order.
+    assert lines[0] == (
+        "stratified_by\tstratum\tstratum_size_before\tstratum_size_after\t"
+        "clustered\tcutoff\t"
+        "n_clusters_0.99\tn_clusters_0.95\tn_clusters_0.9\t"
+        "n_clusters_0.8\tn_clusters_0.7"
+    )
+    # Row A: cutoff_counts populated, 0.7 below cd-hit-est floor → NA.
+    assert lines[1] == (
+        "genus\tA\t100\t20\tTRUE\t0.9100\t87\t42\t18\t5\tNA"
+    )
+    # Row B: unclustered, curve cells empty (not NA — different meaning).
+    assert lines[2] == "genus\tB\t3\t3\tFALSE\t\t\t\t\t\t"
+
+
+def test_write_group_counts_tsv_no_curve_columns_when_feature_off(tmp_path):
+    """When no row has cutoff_counts, the schema reverts to the original
+    6-column layout. Backward-compat for runs that set
+    diversity_curve_cutoffs: []."""
+    result = RunResult(
+        mode="taxonomic1",
+        group_stats=[
+            GroupStat(grouping="genus", group="A",
+                      n_before=10, n_after=5, clustered=True, cutoff=0.9),
+        ],
+    )
+    path = tmp_path / "g.tsv"
+    write_group_counts_tsv(result, path)
+    lines = path.read_text().splitlines()
+    assert "n_clusters" not in lines[0]
+    assert lines[1] == "genus\tA\t10\t5\tTRUE\t0.9000"
+
+
 def test_write_representative_isolates_tsv_emits_isolate_columns(tmp_path):
     """A CONCAT|<isolate_id> rep with concat_segments populated must
     produce: n_segments, comma-joined segments, comma-joined accessions

@@ -12,7 +12,7 @@ from typing import Any, Literal, Optional
 
 import click
 
-from ..clustering import min_threshold, run_clustering
+from ..clustering import compute_diversity_curve, min_threshold, run_clustering
 from ..clustering.diversity import select_diverse
 from ..models import Cluster, GroupStat, RunResult, Sequence
 from ..representative.selector import apply_representative_selection
@@ -213,6 +213,7 @@ class TaxonomicMode1(BaseMode):
                     grouping=self.rank, group=group_label,
                     n_before=len(group_seqs), n_after=len(reps),
                     clustered=True, cutoff=threshold,
+                    cutoff_counts=compute_diversity_curve(group_seqs, self.cfg),
                 ))
 
         return RunResult(

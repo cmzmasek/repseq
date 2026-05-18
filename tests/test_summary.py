@@ -143,6 +143,27 @@ def test_render_summary_cdhit_backend_named_in_selection(make_seq, tmp_path):
     assert "cd-hit-est" in md
 
 
+def test_render_summary_mentions_diversity_curve_when_configured(make_seq, tmp_path):
+    """When clustering.diversity_curve_cutoffs is non-empty, the selection
+    section names the cutoffs and points the reader at group_counts.tsv."""
+    cfg = _base_cfg(tmp_path)
+    cfg["clustering"]["diversity_curve_cutoffs"] = [0.99, 0.95, 0.9]
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "fixed identity thresholds (0.99, 0.95, 0.9)" in md
+    assert "group_counts.tsv" in md
+    assert "did not influence representative selection" in md
+
+
+def test_render_summary_omits_diversity_curve_sentence_when_disabled(make_seq, tmp_path):
+    """Empty cutoff list → no sentence at all (don't pollute Methods with
+    a feature that wasn't on)."""
+    cfg = _base_cfg(tmp_path)
+    cfg["clustering"]["diversity_curve_cutoffs"] = []
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "fixed identity thresholds" not in md
+    assert "diagnostic of within-stratum" not in md
+
+
 def test_render_summary_software_table_marks_used_and_unused(make_seq, tmp_path):
     """When backend=mmseqs2, cd-hit row must read '(not used)' and vice versa."""
     cfg = _base_cfg(tmp_path)

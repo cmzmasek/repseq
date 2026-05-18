@@ -46,4 +46,40 @@ def min_threshold(cfg: dict[str, Any], sequences: list[Sequence]) -> float:
     return 0.0
 
 
-__all__ = ["run_clustering", "min_threshold", "mmseqs2", "cdhit"]
+def compute_diversity_curve(
+    sequences: list[Sequence],
+    cfg: dict[str, Any],
+) -> Optional[dict[float, Optional[int]]]:
+    """Cluster ``sequences`` at each configured "standard" identity threshold
+    and return ``{cutoff: n_clusters}``. Reporting-only — does not influence
+    representative selection.
+
+    Cutoffs below the active backend's identity floor (``min_threshold``)
+    map to ``None`` and the backend is not invoked for them. The TSV
+    writer renders ``None`` as ``NA``.
+
+    Returns ``None`` (not an empty dict) when the feature is disabled —
+    either because ``clustering.diversity_curve_cutoffs`` is missing /
+    empty, or because the caller passed no sequences. ``None`` lets the
+    TSV writer distinguish "feature off" from "feature on, all cells
+    below floor".
+    """
+    cutoffs = cfg.get("clustering", {}).get("diversity_curve_cutoffs", []) or []
+    if not cutoffs or not sequences:
+        return None
+    floor = min_threshold(cfg, sequences)
+    out: dict[float, Optional[int]] = {}
+    for raw in cutoffs:
+        c = float(raw)
+        if c < floor:
+            out[c] = None
+            continue
+        clusters = run_clustering(sequences, c, cfg)
+        out[c] = len(clusters)
+    return out
+
+
+__all__ = [
+    "run_clustering", "min_threshold", "compute_diversity_curve",
+    "mmseqs2", "cdhit",
+]

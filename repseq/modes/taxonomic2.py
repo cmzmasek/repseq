@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..clustering import run_clustering
+from ..clustering import compute_diversity_curve, run_clustering
 from ..models import Cluster, GroupStat, RunResult, Sequence
 from ..representative.selector import apply_representative_selection
 from .base import BaseMode
@@ -117,6 +117,7 @@ class TaxonomicMode2(BaseMode):
                     grouping=rank, group=group_prefix,
                     n_before=len(group_seqs), n_after=len(reps),
                     clustered=True, cutoff=threshold,
+                    cutoff_counts=compute_diversity_curve(group_seqs, self.cfg),
                 ))
                 # Recurse into next level with the representatives
                 self._recurse(reps, next_levels, all_reps, all_clusters,
