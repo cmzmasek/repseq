@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -10,6 +11,15 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..models import Cluster, Sequence
+
+
+# Anything not in ACGTN (either case). cd-hit-est silently skips any
+# sequence containing IUPAC ambiguity codes (W, R, Y, K, M, S, B, D, H, V)
+# even though the binary exits 0 — the warning lands on stderr which our
+# subprocess.run swallows. Sanitizing to N before writing keeps cd-hit-est
+# happy without mutating the original ``seq.sequence`` (so downstream
+# output FASTAs keep the original characters).
+_NT_NONCANONICAL_RE = re.compile(r"[^ACGTNacgtn]")
 
 
 class MMseqs2Error(RuntimeError):
@@ -30,7 +40,8 @@ def _write_id_fasta(
     path: Path,
     line_width: int = 70,
     alphabet: str = "nucleotide",
-) -> None:
+    sanitize_nt: bool = False,
+) -> tuple[int, int]:
     """Write a FASTA whose header is exactly ``seq.id``.
 
     MMseqs2 uses the first whitespace-delimited token of each header as the
@@ -45,8 +56,19 @@ def _write_id_fasta(
     (the marker protein, or concat thereof in segmented mode) — the
     upstream pipeline guarantees it's populated. Cluster objects returned
     by the backend still carry the original NT-bearing ``Sequence``.
+
+    When ``sanitize_nt=True`` AND ``alphabet=="nucleotide"``, any
+    character outside ``ACGTN`` (case-insensitive) is replaced by ``N``
+    in the FASTA body only — ``seq.sequence`` is not mutated. Used by
+    the cd-hit dispatcher; MMseqs2 passes False because it tolerates
+    IUPAC ambiguity codes natively.
+
+    Returns ``(total_substitutions, sequences_affected)``: both 0 unless
+    sanitization actually fired.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    total_subs = 0
+    seqs_affected = 0
     with open(path, "w") as fh:
         for seq in sequences:
             body = seq.protein_sequence if alphabet == "protein" else seq.sequence
@@ -56,6 +78,11 @@ def _write_id_fasta(
                     f"{'protein_sequence' if alphabet == 'protein' else 'sequence'} "
                     f"to write to the clustering input."
                 )
+            if sanitize_nt and alphabet == "nucleotide":
+                body, subs = _NT_NONCANONICAL_RE.subn("N", body)
+                if subs > 0:
+                    total_subs += subs
+                    seqs_affected += 1
             # Defensive: a seq.id with a stray newline or carriage
             # return would split one record into two in the FASTA we
             # hand to MMseqs2, and the post-break fragment would then
@@ -64,6 +91,7 @@ def _write_id_fasta(
             fh.write(f">{safe_id}\n")
             for i in range(0, len(body), line_width):
                 fh.write(body[i : i + line_width] + "\n")
+    return total_subs, seqs_affected
 
 
 def run_clustering(

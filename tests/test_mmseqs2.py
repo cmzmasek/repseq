@@ -77,6 +77,52 @@ def test_write_id_fasta_alphabet_protein_raises_when_missing(tmp_path):
         _write_id_fasta([seq], fasta, alphabet="protein")
 
 
+def test_write_id_fasta_sanitize_nt_replaces_non_acgtn_with_n(tmp_path):
+    """sanitize_nt=True turns IUPAC ambiguity codes (W/R/Y/etc.) into N."""
+    seq = _seq("CONCAT|iso1", "ACGTWRYKMNSBDHV")  # 4 canonical, 1 N, 10 ambiguous
+    fasta = tmp_path / "input.fasta"
+    _write_id_fasta([seq], fasta, alphabet="nucleotide", sanitize_nt=True)
+    body = "".join(
+        line for line in fasta.read_text().splitlines()
+        if not line.startswith(">")
+    )
+    # ACGTN survive; W R Y K M S B D H V → N.
+    assert body == "ACGT" + "N" * 11
+    # seq.sequence must NOT be mutated — downstream output FASTAs need
+    # the original.
+    assert seq.sequence == "ACGTWRYKMNSBDHV"
+
+
+def test_write_id_fasta_sanitize_nt_returns_counts(tmp_path):
+    """Return value is (total_subs, sequences_affected)."""
+    clean = _seq("clean", "ACGTACGT")
+    dirty1 = _seq("dirty1", "ACGTW")    # 1 sub
+    dirty2 = _seq("dirty2", "WRYKM")    # 5 subs
+    fasta = tmp_path / "input.fasta"
+    total_subs, seqs_affected = _write_id_fasta(
+        [clean, dirty1, dirty2], fasta,
+        alphabet="nucleotide", sanitize_nt=True,
+    )
+    assert total_subs == 6
+    assert seqs_affected == 2
+
+
+def test_write_id_fasta_sanitize_nt_false_is_noop(tmp_path):
+    """sanitize_nt=False leaves the FASTA body unmodified (MMseqs2 path)."""
+    seq = _seq("CONCAT|iso1", "ACGTWRY")
+    fasta = tmp_path / "input.fasta"
+    total_subs, seqs_affected = _write_id_fasta(
+        [seq], fasta, alphabet="nucleotide", sanitize_nt=False,
+    )
+    body = "".join(
+        line for line in fasta.read_text().splitlines()
+        if not line.startswith(">")
+    )
+    assert body == "ACGTWRY"
+    assert total_subs == 0
+    assert seqs_affected == 0
+
+
 def test_parse_cluster_tsv_matches_id_headers(tmp_path):
     # cluster.tsv produced from an _write_id_fasta input carries seq.id
     # values; the parser must resolve them back to the Sequence objects.

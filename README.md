@@ -899,18 +899,28 @@ to run anywhere and finish in a couple of seconds.
 
 ## Status
 
-Current: **`v0.10.0`**. All 8 selection modes, protein-alphabet clustering
+Current: **`v0.10.1`**. All 8 selection modes, protein-alphabet clustering
 by default (`alphabet_for_clustering: protein`), MMseqs2 and cd-hit
 backends, optional protein-annotation QC, per-isolate
 taxonomy-consistency QC for segmented viruses, **strain-as-isolate
 provenance + collision detection**, segment-name synonyms, rich phyloXML
-output, and an optional UMAP plot of the clustering. **650 offline
+output, and an optional UMAP plot of the clustering. **653 offline
 regression tests pass**; the NCBI-backed paths have been validated
 end-to-end against live influenza-A, peribunyaviridae, and hantaviridae
 datasets.
 
 Highlights of recent releases (newest first):
 
+- **`v0.10.1`** — fixed a silent data-loss bug in cd-hit-est when
+  clustering on nucleotides. cd-hit-est rejects sequences containing
+  IUPAC ambiguity codes (W, R, Y, K, M, S, B, D, H, V) but writes the
+  warning to stderr only — our wrapper swallowed it on a 0 exit, and a
+  hantaviridae run hit 91 concat sequences in / 34 out / 57 silently
+  dropped. Fixed by sanitizing the cd-hit FASTA input (non-ACGTN → N)
+  before clustering; original `seq.sequence` and all downstream output
+  FASTAs are untouched. MMseqs2 tolerates IUPAC codes natively so its
+  path is unchanged. A one-time stderr notice prints when
+  sanitization fires.
 - **`v0.10.0`** — the clustering alphabet is now a user-facing choice
   end-to-end. The config knob `clustering.alphabet` was renamed to
   `clustering.alphabet_for_clustering` to make the scope unambiguous

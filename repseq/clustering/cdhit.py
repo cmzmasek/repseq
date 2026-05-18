@@ -29,6 +29,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
@@ -39,6 +40,12 @@ from .mmseqs2 import _write_id_fasta
 
 class CDHitError(RuntimeError):
     pass
+
+
+# Process-wide latch so a binary-search loop that runs cd-hit-est many
+# times on the same input doesn't flood stderr with identical
+# sanitization notices. The user only needs to hear it once.
+_SANITIZATION_NOTICE_SHOWN = False
 
 
 # Word-size selection tables. Each entry: (low_inclusive, high_inclusive, default_n).
@@ -166,7 +173,27 @@ def run_clustering(
         input_fasta = td / "input.fasta"
         output_prefix = td / "result"
 
-        _write_id_fasta(sequences, input_fasta, alphabet=alphabet)
+        # cd-hit-est silently skips any NT sequence containing IUPAC
+        # ambiguity codes (W, R, Y, K, M, S, B, D, H, V) — the warning
+        # lands on stderr which subprocess.run swallows on a 0 exit. We
+        # replace non-ACGTN with N in the FASTA only (seq.sequence is
+        # untouched, so downstream output keeps the original characters).
+        total_subs, seqs_affected = _write_id_fasta(
+            sequences,
+            input_fasta,
+            alphabet=alphabet,
+            sanitize_nt=(alphabet == "nucleotide"),
+        )
+        global _SANITIZATION_NOTICE_SHOWN
+        if total_subs > 0 and not _SANITIZATION_NOTICE_SHOWN:
+            print(
+                f"[cd-hit] Replaced {total_subs} non-ACGTN character(s) "
+                f"with N across {seqs_affected} sequence(s) for cd-hit-est "
+                f"compatibility (original seq.sequence unchanged; affects "
+                f"clustering input only).",
+                file=sys.stderr,
+            )
+            _SANITIZATION_NOTICE_SHOWN = True
 
         cmd = [
             binary,
