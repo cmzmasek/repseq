@@ -21,6 +21,7 @@ from .qc.pipeline import remove_duplicates, run_qc
 from .qc.protein_qc import _stderr_batch_progress, attach_proteins, run_protein_qc
 from .segmented.completeness import (
     build_concatenated_sequences,
+    detect_strain_collisions,
     filter_complete_isolates,
     segment_length_filter,
 )
@@ -312,12 +313,24 @@ def _populate_genbank_isolate_segment(sequences, cfg, ncbi):
     )
     populated = 0
     for acc, meta in meta_by_acc.items():
-        isolate = meta.get("isolate") or meta.get("strain")
+        # Prefer /isolate; fall back to /strain when /isolate is absent.
+        # Track which qualifier supplied the value on
+        # ``seq.isolate_id_source`` so downstream tooling (TSV writer,
+        # collision detector, run summary) can flag the over-merge risk
+        # of strain-derived ids — a single named strain is often shared
+        # across distinct biological samples.
+        if meta.get("isolate"):
+            isolate, isolate_source = meta["isolate"], "isolate"
+        elif meta.get("strain"):
+            isolate, isolate_source = meta["strain"], "strain"
+        else:
+            isolate, isolate_source = None, None
         segment = meta.get("segment")
         strain = meta.get("strain")
         for seq in by_acc.get(acc, []):
             if isolate and not seq.isolate_id:
                 seq.isolate_id = isolate
+                seq.isolate_id_source = isolate_source
             if segment and not seq.segment:
                 seq.segment = segment
             if strain and not seq.strain:
@@ -328,6 +341,20 @@ def _populate_genbank_isolate_segment(sequences, cfg, ncbi):
         f"  Populated isolate/segment fields on {populated} of "
         f"{len(sequences)} sequences from GenBank metadata."
     )
+    # Provenance breakdown — surfaces the strain-as-isolate fallback
+    # before clustering happens, so a bench scientist sees it in the
+    # run log without having to grep the TSV.
+    src_counts = {"isolate": 0, "strain": 0}
+    for seq in sequences:
+        if seq.isolate_id_source in src_counts:
+            src_counts[seq.isolate_id_source] += 1
+    if src_counts["isolate"] or src_counts["strain"]:
+        click.echo(
+            f"  Isolate IDs from: {src_counts['isolate']} /isolate, "
+            f"{src_counts['strain']} /strain "
+            f"(strain-derived ids may over-merge — see the strain-collision "
+            f"check below if any)."
+        )
 
 
 def _filter_taxonomy_consistent(sequences, cfg, qc_report):
@@ -357,10 +384,67 @@ def _filter_taxonomy_consistent(sequences, cfg, qc_report):
     return kept
 
 
+def _check_strain_collisions(sequences, cfg, qc_report):
+    """Run the strain-collision detector and act on it per config.
+
+    A collision is two or more distinct accessions sharing the same
+    strain-derived isolate_id AND the same segment — the over-merge
+    signature of the /strain -> isolate_id fallback. ``warn`` (default)
+    prints one line per collision; ``drop`` removes every accession
+    involved in any collision before the completeness filter runs.
+
+    Returns the (possibly filtered) sequence list.
+    """
+    seg_cfg = cfg.get("segmented", {}) or {}
+    action = seg_cfg.get("strain_collision_action", "warn")
+    collisions = detect_strain_collisions(sequences)
+    if not collisions:
+        return sequences
+    click.echo(
+        f"  Strain-collision check: found {len(collisions)} (isolate, segment) "
+        f"pair(s) where /strain is shared across distinct accessions.",
+        err=True,
+    )
+    for (iso, seg), accs in sorted(collisions.items()):
+        click.echo(
+            f"    isolate '{iso}' segment '{seg}': "
+            f"{len(accs)} accessions ({', '.join(accs)})",
+            err=True,
+        )
+    if action != "drop":
+        click.echo(
+            "    Action: warn (no records dropped). Set "
+            "segmented.strain_collision_action: drop to remove them.",
+            err=True,
+        )
+        return sequences
+    # Drop every sequence whose (isolate_id, segment) appears in
+    # collisions. Use the same (iso, seg) key as the detector so the
+    # set membership is exact.
+    bad_keys = set(collisions.keys())
+    kept: list = []
+    for seq in sequences:
+        key = (seq.isolate_id, seq.segment)
+        if key in bad_keys:
+            reason = f"strain_collision:{seq.segment}"
+            seq.qc_passed = False
+            seq.qc_fail_reason = reason
+            qc_report.removed_strain_collisions += 1
+            qc_report.add_removed(seq.accession or seq.id, reason)
+        else:
+            kept.append(seq)
+    click.echo(
+        f"    Action: drop ({len(sequences) - len(kept)} segment(s) removed).",
+        err=True,
+    )
+    return kept
+
+
 def _handle_segmented(sequences, cfg, qc_report):
     virus_cfg = get_virus_config(cfg)
     if not virus_cfg:
         return sequences, None, None
+    sequences = _check_strain_collisions(sequences, cfg, qc_report)
     click.echo("Applying segmented virus completeness filter ...")
     kept, complete_isolates = filter_complete_isolates(sequences, virus_cfg, qc_report)
     segment_lengths = virus_cfg.get("segment_lengths")

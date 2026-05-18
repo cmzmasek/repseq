@@ -70,6 +70,17 @@ class Sequence:
     country: Optional[str] = None
     segment: Optional[str] = None
     isolate_id: Optional[str] = None
+    # Provenance of ``isolate_id``: ``"isolate"`` if the value came from
+    # the GenBank source feature's ``/isolate`` qualifier,
+    # ``"strain"`` if the populator fell back to ``/strain`` (no
+    # ``/isolate`` qualifier was present), ``"regex"`` if the
+    # header-regex fallback fired (``--no-resolve`` / UniProt input /
+    # missing accession). ``None`` when ``isolate_id`` is unset. Strain
+    # provenance is the over-merge risk: a single named strain is often
+    # shared across distinct biological samples, so two accessions can
+    # legitimately share ``isolate_id`` while being different isolates —
+    # see the strain-collision detector for the active check.
+    isolate_id_source: Optional[str] = None
 
     # Quality flags
     is_refseq: bool = False
@@ -178,6 +189,14 @@ class QCReport:
     # Counted in *segments removed*, not isolates, so the units stay
     # consistent with the other ``removed_*`` counters.
     removed_taxonomy_mismatch: int = 0
+    # Segments dropped by the strain-collision detector — accessions
+    # sharing a strain-derived ``isolate_id`` AND a segment, which is
+    # the over-merge signature of the /strain → isolate_id fallback.
+    # Always zero when ``segmented.strain_collision_action`` is
+    # ``"warn"`` (the default); only increments under ``"drop"``.
+    # Counted in segments, consistent with the other ``removed_*``
+    # counters.
+    removed_strain_collisions: int = 0
     # Whole-pool length filter is skipped in segmented mode (the input is a
     # mix of segments of very different lengths; per-segment bounds are
     # applied later via segmented.viruses.<v>.segment_lengths instead).
@@ -242,6 +261,7 @@ class QCReport:
             f"  Removed (proteins)  : {self.removed_proteins}",
             f"  Removed (incomplete): {self.removed_incomplete_isolates}",
             f"  Removed (tax-mismatch): {self.removed_taxonomy_mismatch}",
+            f"  Removed (strain-collision): {self.removed_strain_collisions}",
         ]
         return "\n".join(lines)
 

@@ -69,6 +69,16 @@ segmented:
   taxonomy_consistency:
     enabled: true
     rank: species
+  # What to do when the strain-collision detector finds two or more
+  # distinct accessions sharing the same strain-derived isolate_id
+  # AND the same segment. This is the over-merge signature of the
+  # /strain -> isolate_id fallback (GenBank /isolate absent, /strain
+  # used as the grouping key). "warn" (default) prints one line per
+  # collision to stderr and lets the pipeline continue; "drop" removes
+  # every accession involved in any collision before completeness
+  # filtering and records them in _qc_removed.tsv with reason
+  # "strain_collision:<segment>".
+  strain_collision_action: warn
   # Schema for each virus entry:
   #   <name>:
   #     expected_segments: <int>

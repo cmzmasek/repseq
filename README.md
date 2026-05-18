@@ -343,11 +343,19 @@ spreadsheet you'll usually hand to a collaborator.
 One row per representative **isolate** (not per sequence — segmented
 representatives are whole isolates, not single segments). Columns:
 
-`isolate_id`, `organism`, `strain`, `host`, `collection_date`, `country`,
-`n_segments`, `segments` (comma-joined segment names in concat order),
-`accessions` (comma-joined per-segment GenBank accessions in concat
-order), `total_length_nt`, `is_refseq`, `is_reviewed`, `ncbi_taxon_id`,
-then the nine-rank taxonomic ladder.
+`isolate_id`, `isolate_id_source`, `organism`, `strain`, `host`,
+`collection_date`, `country`, `n_segments`, `segments` (comma-joined
+segment names in concat order), `accessions` (comma-joined per-segment
+GenBank accessions in concat order), `total_length_nt`, `is_refseq`,
+`is_reviewed`, `ncbi_taxon_id`, then the nine-rank taxonomic ladder.
+
+`isolate_id_source` records where the `isolate_id` value came from:
+`isolate` (GenBank `/isolate` qualifier — submitter-asserted unique per
+biological sample), `strain` (`/isolate` was absent and `/strain` was
+used as a fallback grouping key — see [Strain-as-isolate fallback](#strain-as-isolate-fallback-and-collision-detection)),
+or `regex` (the header-regex fallback fired — typically `--no-resolve`,
+UniProt input, or no accession). Blank for synthetic records without an
+upstream provenance.
 
 The per-sequence columns (`accession`, `segment`, `description`,
 `molecule_type`, `length_nt`) are deliberately absent — they have no
@@ -359,10 +367,13 @@ FASTA files) for per-segment / per-CDS detail.
 One row per **CDS** of every isolate that survived QC, whether or not it
 was picked as a representative. Columns:
 
-`protein_id`, `product`, `length_aa`, `isolate_id`, `segment`,
-`segment_length_nt`, `accession`, `representative` (`TRUE` if the isolate
-made it into the final set, `FALSE` otherwise), then the nine-rank
-taxonomic ladder.
+`protein_id`, `product`, `length_aa`, `isolate_id`, `isolate_id_source`,
+`segment`, `segment_length_nt`, `accession`, `representative` (`TRUE` if
+the isolate made it into the final set, `FALSE` otherwise), then the
+nine-rank taxonomic ladder.
+
+`isolate_id_source` has the same meaning as in
+`_representative_isolates.tsv` — see that section for the legend.
 
 Use it for: a full per-protein audit of what made it through QC, and to
 join back from a hit in a downstream analysis to the isolate it came from.
@@ -562,6 +573,13 @@ A few things worth knowing:
   counts), so isolates with sparse taxonomy survive. Configure under
   `segmented.taxonomy_consistency.{enabled, rank}` and set
   `enabled: false` to skip it entirely.
+- **Segmented mode now also flags strain-as-isolate collisions
+  (since v0.9.3).** When the GenBank pre-pass falls back to `/strain` for
+  records without `/isolate`, two distinct accessions can end up sharing
+  the same grouping key. The new detector warns on `(isolate_id, segment)`
+  pairs that collide; set `segmented.strain_collision_action: drop` to
+  remove the colliders instead of just warning. See
+  [Strain-as-isolate fallback](#strain-as-isolate-fallback-and-collision-detection).
 
 ---
 
@@ -619,6 +637,52 @@ segmented:
 > isolate qualifier. If isolate identification fails for those records, it has to
 > match the strain identifier as it appears in *your* headers, and it must capture
 > it either as a group named `isolate` or as the first parenthesised group.
+
+### Strain-as-isolate fallback and collision detection
+
+GenBank source features have two distinct qualifiers: `/isolate` (a
+specific collection event, usually unique to a single biological sample)
+and `/strain` (a named variant, often shared across many samples). When
+a record has `/strain="L99"` but no `/isolate=`, repseq uses the strain
+value as the isolate grouping key — otherwise strain-only records (very
+common in older bunyaviridae / hantaviridae submissions) would drop out
+of segmented mode entirely.
+
+The provenance of every `isolate_id` is written to the new
+`isolate_id_source` column in `_representative_isolates.tsv` and
+`_isolate_proteins.tsv`:
+
+- `isolate` — value came from the `/isolate` qualifier (preferred).
+- `strain` — value came from `/strain` as a fallback (`/isolate` was absent).
+- `regex` — value came from the header-regex fallback (UniProt input,
+  `--no-resolve`, or no accession).
+
+**The risk of `strain`-derived ids is over-merging.** Two submitters
+can deposit independent samples under the same strain name; repseq
+would group them as one isolate and dedup-drop the duplicate segment.
+After the GenBank pre-pass, repseq runs a **strain-collision detector**
+that flags any `(isolate_id, segment)` pair where two or more distinct
+accessions share a strain-derived id. You'll see a stderr block like:
+
+```
+  Strain-collision check: found 2 (isolate, segment) pair(s) where /strain is shared across distinct accessions.
+    isolate 'L99' segment 'S': 3 accessions (ACC1, ACC2, ACC3)
+    isolate 'M77' segment 'L': 2 accessions (ACC4, ACC5)
+    Action: warn (no records dropped). Set segmented.strain_collision_action: drop to remove them.
+```
+
+The default action is `warn` (informational only — the pipeline keeps
+the longest per-segment accession and dedup-drops the rest downstream).
+Switch to `drop` to remove every accession involved in any collision
+before the completeness filter runs:
+
+```yaml
+segmented:
+  strain_collision_action: drop   # warn (default) | drop
+```
+
+Dropped records appear in `_qc_removed.tsv` with reason
+`strain_collision:<segment>` and are counted in `QCReport.removed_strain_collisions`.
 
 ---
 
@@ -798,6 +862,18 @@ per-segment, isolate-level breakdown (`L too short : 257` etc.). If a
 single segment ate most of your input, that's where to widen the
 `segment_lengths` bounds.
 
+**`Strain-collision check: found N (isolate, segment) pair(s)…`** — the
+detector (since v0.9.3) found two or more distinct accessions sharing a
+strain-derived `isolate_id` *and* a segment, which is the over-merge
+signature of the `/strain → isolate_id` fallback. By default the run
+continues (action: `warn`); the colliding records get the longest
+per-segment kept and the rest dedup-dropped. To remove them outright,
+set `segmented.strain_collision_action: drop` — they'll then appear in
+`_qc_removed.tsv` with reason `strain_collision:<segment>`. The
+`isolate_id_source` column in `_representative_isolates.tsv` /
+`_isolate_proteins.tsv` shows which records relied on the fallback in
+the first place.
+
 ---
 
 ## Testing
@@ -814,16 +890,28 @@ to run anywhere and finish in a couple of seconds.
 
 ## Status
 
-Current: **`v0.9.1`**. All 8 selection modes, protein-alphabet clustering
+Current: **`v0.9.3`**. All 8 selection modes, protein-alphabet clustering
 by default (`alphabet: protein`), MMseqs2 and cd-hit backends, optional
 protein-annotation QC, per-isolate taxonomy-consistency QC for segmented
-viruses, segment-name synonyms, rich phyloXML output, and an optional
-UMAP plot of the clustering. **636 offline regression tests pass**; the
+viruses, **strain-as-isolate provenance + collision detection**,
+segment-name synonyms, rich phyloXML output, and an optional UMAP plot
+of the clustering. **646 offline regression tests pass**; the
 NCBI-backed paths have been validated end-to-end against live
 influenza-A, peribunyaviridae, and hantaviridae datasets.
 
 Highlights of recent releases (newest first):
 
+- **`v0.9.3`** — segmented mode now records the **provenance of every
+  `isolate_id`** (new `isolate_id_source` column: `isolate` | `strain` |
+  `regex`) and runs a **strain-collision detector** on the strain-derived
+  ids. Default action is `warn`; set
+  `segmented.strain_collision_action: drop` to remove colliders into
+  `_qc_removed.tsv` with reason `strain_collision:<segment>`. See
+  [Strain-as-isolate fallback](#strain-as-isolate-fallback-and-collision-detection).
+- **`v0.9.2`** — hardened the cd-hit `.clstr` round-trip: the
+  member-line regex used to silently drop seq ids containing internal
+  `...`; now it's greedy + end-anchored, and the round-trip error
+  message names the specific unmatched ids in both directions.
 - **`v0.9.1`** — segmented runs now report a **per-segment, isolate-level
   length-filter breakdown** during the run and in the QC summary
   (`L too short : 257`, `M too long : 6`, …) instead of the misleading

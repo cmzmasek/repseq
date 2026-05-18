@@ -191,8 +191,8 @@ def write_representative_isolates_tsv(
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = [
-        "isolate_id", "organism", "strain", "host", "collection_date",
-        "country", "n_segments", "segments", "accessions",
+        "isolate_id", "isolate_id_source", "organism", "strain", "host",
+        "collection_date", "country", "n_segments", "segments", "accessions",
         "total_length_nt", "is_refseq", "is_reviewed", "ncbi_taxon_id",
         *_TAX_RANKS,
     ]
@@ -210,6 +210,7 @@ def write_representative_isolates_tsv(
             total_nt = sum(s.length for s in segs) if segs else seq.length
             row = [
                 _tsv_safe(seq.isolate_id),
+                _tsv_safe(seq.isolate_id_source),
                 _tsv_safe(seq.organism),
                 _tsv_safe(seq.strain),
                 _tsv_safe(seq.host),
@@ -420,14 +421,24 @@ def write_isolate_proteins_tsv(
 
     path.parent.mkdir(parents=True, exist_ok=True)
     header = (
-        "protein_id\tproduct\tlength_aa\tisolate_id\tsegment\tsegment_length_nt\t"
-        "accession\trepresentative\t"
+        "protein_id\tproduct\tlength_aa\tisolate_id\tisolate_id_source\t"
+        "segment\tsegment_length_nt\taccession\trepresentative\t"
         + "\t".join(_TAX_RANKS) + "\n"
     )
     with open(path, "w") as fh:
         fh.write(header)
         for isolate_id, segs in complete_isolates.items():
             is_rep = _tsv_bool(isolate_id in rep_ids)
+            # All segments share the same isolate_id_source by construction
+            # (it's the provenance of the grouping key, which is the same
+            # value for every segment of the isolate). Take the first
+            # non-empty in case one segment was populated by the regex
+            # fallback while the others weren't tagged yet.
+            iso_source = next(
+                (s.isolate_id_source for s in segs if s.isolate_id_source),
+                None,
+            )
+            iso_source_cell = _tsv_safe(iso_source)
             for seq in segs:
                 if not seq.proteins:
                     continue
@@ -442,6 +453,7 @@ def write_isolate_proteins_tsv(
                         f"{_tsv_safe(prot.get('product'))}\t"
                         f"{_tsv_safe(prot.get('length'))}\t"
                         f"{_tsv_safe(isolate_id)}\t"
+                        f"{iso_source_cell}\t"
                         f"{_tsv_safe(seq.segment)}\t"
                         f"{_tsv_safe(seq.length)}\t"
                         f"{_tsv_safe(seq.accession or seq.id)}\t"

@@ -5,6 +5,7 @@ from repseq.models import QCReport
 from repseq.segmented.completeness import (
     build_concatenated_sequences,
     concatenate_isolate,
+    detect_strain_collisions,
     extract_isolate_id,
     filter_complete_isolates,
     identify_segment,
@@ -555,3 +556,136 @@ def test_build_concat_protein_no_aliases_match_falls_back_to_longest(make_seq):
         cluster_protein={"S": ["does_not_match"]},
     )
     assert out[0].protein_sequence == "N" * 400 + "M" * 2200
+
+
+# ---------------------------------------------------------------------------
+# isolate_id_source provenance + strain-collision detector
+# ---------------------------------------------------------------------------
+
+_ISO_RE_SIMPLE = r"isolate=(?P<isolate>[A-Za-z0-9_-]+)"
+
+
+def test_filter_complete_isolates_tags_regex_source(make_seq):
+    # Headers carry isolate=X / segment=Y — GenBank pre-pass did NOT run,
+    # so the regex fires inside filter_complete_isolates and tags source.
+    a_l = make_seq("a_l", "AAA", header="isolate=I1 segment=L")
+    a_m = make_seq("a_m", "CCC", header="isolate=I1 segment=M")
+    a_s = make_seq("a_s", "GGG", header="isolate=I1 segment=S")
+    virus_cfg = {
+        "segments": ["L", "M", "S"],
+        "isolate_regex": _ISO_RE_SIMPLE,
+        "segment_regex": r"segment=(?P<segment>[LMS])",
+    }
+    report = QCReport()
+    _, complete = filter_complete_isolates([a_l, a_m, a_s], virus_cfg, report)
+    assert "i1" in complete
+    for seg in complete["i1"]:
+        assert seg.isolate_id_source == "regex"
+
+
+def test_filter_complete_isolates_preserves_existing_source(make_seq):
+    # If the GenBank pre-pass already populated isolate_id_source, the
+    # regex stage must not overwrite it.
+    a_l = make_seq("a_l", "AAA", header="isolate=I1 segment=L", isolate_id="I1")
+    a_l.isolate_id_source = "strain"
+    a_m = make_seq("a_m", "CCC", header="isolate=I1 segment=M", isolate_id="I1")
+    a_m.isolate_id_source = "strain"
+    a_s = make_seq("a_s", "GGG", header="isolate=I1 segment=S", isolate_id="I1")
+    a_s.isolate_id_source = "strain"
+    virus_cfg = {
+        "segments": ["L", "M", "S"],
+        "isolate_regex": _ISO_RE_SIMPLE,
+        "segment_regex": r"segment=(?P<segment>[LMS])",
+    }
+    report = QCReport()
+    _, complete = filter_complete_isolates([a_l, a_m, a_s], virus_cfg, report)
+    for seg in complete["i1"]:
+        assert seg.isolate_id_source == "strain"
+
+
+def test_concatenate_isolate_inherits_isolate_id_source(make_seq):
+    segs = [
+        make_seq("a_L", "A", segment="L", isolate_id="I1"),
+        make_seq("a_M", "C", segment="M", isolate_id="I1"),
+    ]
+    for s in segs:
+        s.isolate_id_source = "strain"
+    concat = concatenate_isolate(segs, "I1")
+    assert concat.isolate_id_source == "strain"
+
+
+def test_concatenate_isolate_id_source_none_when_unset(make_seq):
+    segs = [
+        make_seq("a_L", "A", segment="L", isolate_id="I1"),
+        make_seq("a_M", "C", segment="M", isolate_id="I1"),
+    ]
+    concat = concatenate_isolate(segs, "I1")
+    assert concat.isolate_id_source is None
+
+
+def test_detect_strain_collisions_flags_same_strain_same_segment(make_seq):
+    # Two distinct accessions, both with /strain=L99, both on segment S.
+    a = make_seq("acc1", "AAA", segment="S", isolate_id="L99", accession="ACC1")
+    b = make_seq("acc2", "CCC", segment="S", isolate_id="L99", accession="ACC2")
+    a.isolate_id_source = "strain"
+    b.isolate_id_source = "strain"
+    out = detect_strain_collisions([a, b])
+    assert out == {("L99", "S"): ["ACC1", "ACC2"]}
+
+
+def test_detect_strain_collisions_ignores_isolate_source(make_seq):
+    # Two accessions with same id+segment but source=isolate are NOT
+    # flagged — /isolate is submitter-asserted unique.
+    a = make_seq("acc1", "AAA", segment="S", isolate_id="L99", accession="ACC1")
+    b = make_seq("acc2", "CCC", segment="S", isolate_id="L99", accession="ACC2")
+    a.isolate_id_source = "isolate"
+    b.isolate_id_source = "isolate"
+    assert detect_strain_collisions([a, b]) == {}
+
+
+def test_detect_strain_collisions_ignores_different_segments(make_seq):
+    # Two strain-sourced accessions sharing isolate_id but on different
+    # segments — that's the normal segmented-virus pattern, not a
+    # collision.
+    a = make_seq("acc1", "AAA", segment="L", isolate_id="L99", accession="ACC1")
+    b = make_seq("acc2", "CCC", segment="M", isolate_id="L99", accession="ACC2")
+    a.isolate_id_source = "strain"
+    b.isolate_id_source = "strain"
+    assert detect_strain_collisions([a, b]) == {}
+
+
+def test_detect_strain_collisions_skips_unresolved_records(make_seq):
+    # Records missing isolate_id or segment are silently skipped — they
+    # fail completeness for a different reason and shouldn't appear here.
+    a = make_seq("acc1", "AAA", segment="S", isolate_id=None, accession="ACC1")
+    b = make_seq("acc2", "CCC", segment=None, isolate_id="L99", accession="ACC2")
+    a.isolate_id_source = "strain"
+    b.isolate_id_source = "strain"
+    assert detect_strain_collisions([a, b]) == {}
+
+
+def test_detect_strain_collisions_multiple_groups_independent(make_seq):
+    # Two separate collisions on different (isolate, segment) pairs;
+    # detector returns both, sorted accession lists.
+    a1 = make_seq("a1", "A", segment="S", isolate_id="L99", accession="A1")
+    a2 = make_seq("a2", "A", segment="S", isolate_id="L99", accession="A2")
+    b1 = make_seq("b1", "C", segment="L", isolate_id="M77", accession="B2")
+    b2 = make_seq("b2", "C", segment="L", isolate_id="M77", accession="B1")
+    for s in (a1, a2, b1, b2):
+        s.isolate_id_source = "strain"
+    out = detect_strain_collisions([a1, a2, b1, b2])
+    assert out == {
+        ("L99", "S"): ["A1", "A2"],
+        ("M77", "L"): ["B1", "B2"],
+    }
+
+
+def test_detect_strain_collisions_dedups_repeated_accessions(make_seq):
+    # Two records with the same accession (e.g. the same nuc record
+    # cited twice in input) should not be reported as a collision —
+    # the detector dedups by accession before counting.
+    a = make_seq("a", "A", segment="S", isolate_id="L99", accession="DUP")
+    b = make_seq("b", "C", segment="S", isolate_id="L99", accession="DUP")
+    a.isolate_id_source = "strain"
+    b.isolate_id_source = "strain"
+    assert detect_strain_collisions([a, b]) == {}

@@ -78,6 +78,18 @@ DEFAULTS: dict[str, Any] = {
             "enabled": True,
             "rank": "species",
         },
+        # What to do when the strain-collision detector finds two or more
+        # distinct accessions sharing the same strain-derived isolate_id
+        # AND the same segment — the over-merge signature of the
+        # /strain → isolate_id fallback in _populate_genbank_isolate_segment.
+        # "warn" (default) prints one line per collision to stderr and
+        # lets the pipeline continue (the over-merged isolate keeps the
+        # longest sequence per segment, the rest get dedup-dropped
+        # downstream). "drop" removes every accession involved in any
+        # collision before the completeness filter runs, adds them to
+        # _qc_removed.tsv with reason "strain_collision:<segment>", and
+        # increments QCReport.removed_strain_collisions.
+        "strain_collision_action": "warn",
     },
     "clustering": {
         "backend": "mmseqs2",              # "mmseqs2" | "cdhit"
@@ -361,6 +373,13 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         seg["use_genbank_metadata"], bool
     ):
         errors.append("segmented.use_genbank_metadata must be a boolean")
+
+    sca = seg.get("strain_collision_action", "warn")
+    if sca not in ("warn", "drop"):
+        errors.append(
+            f"segmented.strain_collision_action '{sca}' is not supported "
+            "(use 'warn' or 'drop')"
+        )
 
     tc = seg.get("taxonomy_consistency", {}) or {}
     if "enabled" in tc and not isinstance(tc["enabled"], bool):

@@ -159,6 +159,42 @@ def identify_segment(
 # Completeness filter
 # ---------------------------------------------------------------------------
 
+def detect_strain_collisions(
+    sequences: list[Sequence],
+) -> dict[tuple[str, str], list[str]]:
+    """Find isolates whose grouping key came from ``/strain`` *and* have
+    more than one distinct accession for the same segment — the
+    over-merge signature created by the strain-as-isolate-id fallback.
+
+    Returns ``{(isolate_id, segment): [accession, accession, ...]}`` for
+    every colliding (isolate_id, segment) pair, with the accession list
+    de-duplicated and sorted for stable output. An empty dict means
+    nothing to warn about.
+
+    Only sequences with ``isolate_id_source == "strain"`` are considered
+    — ``/isolate``-derived ids are submitter-asserted unique per
+    biological sample and so are not flagged here, and ``regex``-derived
+    ids reflect a header convention the user explicitly chose. Missing
+    ``isolate_id`` or ``segment`` (i.e. unresolvable records) are
+    skipped: they'll fail the completeness filter for an unrelated
+    reason and don't belong in this detector's output.
+    """
+    by_iso_seg: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for seq in sequences:
+        if seq.isolate_id_source != "strain":
+            continue
+        if not seq.isolate_id or not seq.segment:
+            continue
+        by_iso_seg[(seq.isolate_id, seq.segment)].add(
+            seq.accession or seq.id
+        )
+    return {
+        key: sorted(accs)
+        for key, accs in by_iso_seg.items()
+        if len(accs) > 1
+    }
+
+
 def filter_complete_isolates(
     sequences: list[Sequence],
     virus_cfg: dict[str, Any],
@@ -180,11 +216,17 @@ def filter_complete_isolates(
     unresolved: list[Sequence] = []
 
     for seq in sequences:
+        # Remember whether seq.isolate_id was already populated upstream
+        # (GenBank source feature in cli._populate_genbank_isolate_segment)
+        # so we only tag the regex fallback when it actually fires.
+        had_isolate_id = seq.isolate_id is not None
         isolate_raw = extract_isolate_id(seq, isolate_regex)
         if isolate_raw is None:
             unresolved.append(seq)
             continue
         seq.isolate_id = isolate_raw
+        if not had_isolate_id and seq.isolate_id_source is None:
+            seq.isolate_id_source = "regex"
 
         seg = identify_segment(seq, expected_segments, segment_regex, segment_aliases)
         if seg is None:
@@ -303,6 +345,7 @@ def concatenate_isolate(
         collection_date=_first_non_empty(segments, "collection_date"),
         country=_first_non_empty(segments, "country"),
         isolate_id=isolate_id,
+        isolate_id_source=_first_non_empty(segments, "isolate_id_source"),
         is_refseq=all(s.is_refseq for s in segments),
         is_reviewed=all(s.is_reviewed for s in segments),
         taxonomy=taxonomy,
