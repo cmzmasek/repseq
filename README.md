@@ -233,6 +233,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_clustering.png` | only with `--plot` | Diagnostic scatter of the clustering. |
 | `{prefix}_msa.fasta`, `_tree.nwk`, `_tree.xml`, `_tree_id_map.tsv` | only with `--phylo` | Alignment + tree + name mapping. |
 | `{prefix}_iqtree_summary.txt` | only with `--phylo` + IQ-TREE | IQ-TREE ModelFinder report. |
+| `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations). |
 
 "Segmented + GenBank" means: segmented mode is on **and** the GenBank source
 features are reachable (either cached or fetched on demand) so the per-isolate
@@ -899,18 +900,29 @@ to run anywhere and finish in a couple of seconds.
 
 ## Status
 
-Current: **`v0.10.2`**. All 8 selection modes, protein-alphabet clustering
+Current: **`v0.11.0`**. All 8 selection modes, protein-alphabet clustering
 by default (`alphabet_for_clustering: protein`), MMseqs2 and cd-hit
 backends, optional protein-annotation QC, per-isolate
 taxonomy-consistency QC for segmented viruses, **strain-as-isolate
 provenance + collision detection**, segment-name synonyms, rich phyloXML
-output, and an optional UMAP plot of the clustering. **655 offline
+output, an optional UMAP plot of the clustering, and an **auto-generated
+Methods-section starter (`_summary.md`) on every run**. **665 offline
 regression tests pass**; the NCBI-backed paths have been validated
 end-to-end against live influenza-A, peribunyaviridae, and hantaviridae
 datasets.
 
 Highlights of recent releases (newest first):
 
+- **`v0.11.0`** — every successful run now writes `{prefix}_summary.md`,
+  a Markdown Methods-section starter that reads as scientific prose
+  with the live numbers from the run filled in (input count, per-stage
+  QC counts, segmented-completeness counts, clustering input
+  description, mode rationale, phylogenetic inference description if
+  `--phylo` ran). Includes a Software & references table with versions
+  auto-detected from `--version` probes on every external tool repseq
+  could have used (cd-hit, cd-hit-est, MMseqs2, MAFFT, FastTree,
+  IQ-TREE) plus full journal citations. Soft-fails on render error so a
+  bug in the writer never voids a successful selection.
 - **`v0.10.2`** — actual fix for cd-hit-est round-trip mismatches.
   v0.10.1 sanitized IUPAC ambiguity codes but a hantaviridae run still
   hit `91 in, 34 accounted for`. Root cause: the `.clstr` parser regex

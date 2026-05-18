@@ -1,0 +1,168 @@
+"""Tests for the Methods-section summary writer (repseq.output.summary)."""
+from __future__ import annotations
+
+from unittest.mock import patch
+
+import pytest
+
+from repseq.models import Cluster, QCReport, RunResult
+from repseq.output.summary import (
+    detect_tool_versions,
+    render_summary,
+    write_summary,
+)
+
+
+def _base_cfg(tmp_path):
+    return {
+        "output": {"dir": str(tmp_path), "prefix": "test"},
+        "clustering": {"backend": "mmseqs2", "alphabet_for_clustering": "protein"},
+        "qc": {"length_filter": {"mode": "median_percent", "min_percent": 50},
+               "ambiguous_threshold": 0.05},
+        "representative": {"priority": ["refseq", "reviewed_uniprot", "longest"]},
+        "segmented": {"enabled": False},
+    }
+
+
+def _result(make_seq, n_reps=3, n_clusters=3, mode="global"):
+    reps = [make_seq(f"r{i}", "ACGT" * 10) for i in range(n_reps)]
+    clusters = [
+        Cluster(cluster_id=f"c{i}", representative=reps[i], members=[])
+        for i in range(min(n_clusters, n_reps))
+    ]
+    return RunResult(mode=mode, representatives=reps, clusters=clusters)
+
+
+def _qc(total_input=100, passed=92, dedup=4, length=2, ambig=2):
+    r = QCReport()
+    r.total_input = total_input
+    r.passed = passed
+    r.removed_duplicates = dedup
+    r.removed_length = length
+    r.removed_ambiguous = ambig
+    return r
+
+
+# ---------------------------------------------------------------------------
+# detect_tool_versions
+# ---------------------------------------------------------------------------
+
+def test_detect_tool_versions_returns_dict_with_known_keys():
+    versions = detect_tool_versions()
+    # We don't assert which binaries are installed (CI may have none) —
+    # only that every probed tool appears as a key.
+    for binary in ("cd-hit", "cd-hit-est", "mmseqs", "mafft", "FastTree", "iqtree2"):
+        assert binary in versions
+        # Either a string (detected) or None (not on PATH or probe failed).
+        assert versions[binary] is None or isinstance(versions[binary], str)
+
+
+# ---------------------------------------------------------------------------
+# render_summary — top-level shape and conditional sections
+# ---------------------------------------------------------------------------
+
+def test_render_summary_includes_core_sections(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "# Methods — repseq global selection" in md
+    assert "## Input" in md
+    assert "## Quality control" in md
+    assert "## Representative selection" in md
+    assert "## Software and references" in md
+    # Phylogeny and segmented sections must NOT appear in this non-segmented,
+    # phylo-off run.
+    assert "## Phylogenetic inference" not in md
+    assert "## Segmented-virus handling" not in md
+
+
+def test_render_summary_qc_numbers_pulled_from_report(make_seq, tmp_path):
+    qc = _qc(total_input=1234, passed=1200, dedup=10, length=20, ambig=4)
+    md = render_summary(_base_cfg(tmp_path), qc, _result(make_seq), ["a.fasta"])
+    assert "**1,234**" in md           # input count (thousands separator)
+    assert "**10** exact duplicates" in md
+    assert "**20** outside" in md
+    assert "**4** with > 5% ambiguous" in md
+    assert "*1,200* passed basic QC" in md
+
+
+def test_render_summary_segmented_block_appears_only_when_enabled(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["segmented"] = {
+        "enabled": True,
+        "virus": "hantaviridae",
+        "viruses": {
+            "hantaviridae": {"expected_segments": 3, "segments": ["S", "M", "L"]},
+        },
+    }
+    qc = _qc(total_input=500, passed=480)
+    qc.final_survivors = 42
+    qc.final_survivors_unit = "isolates"
+    complete = {f"iso{i}": [None, None, None] for i in range(50)}
+    md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"],
+                        complete_isolates=complete, segment_names=["S", "M", "L"])
+    assert "## Segmented-virus handling" in md
+    assert "**3** expected segments" in md
+    assert "S, M, L" in md
+    assert "**50**" in md  # complete isolates
+    assert "**42**" in md  # final survivors
+
+
+def test_render_summary_phylo_section_appears_when_phylo_ran(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"tool": "fasttree", "rooting": {"method": "taxonomy_guided"}}
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "## Phylogenetic inference" in md
+    assert "MAFFT" in md
+    assert "FastTree" in md
+    # IQ-TREE row should still appear in the software table (chosen-or-not).
+    assert "IQ-TREE" in md
+
+
+def test_render_summary_protein_alphabet_described(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    # protein + non-segmented → "marker-protein sequences"
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "marker-protein sequences" in md
+
+
+def test_render_summary_nucleotide_alphabet_described(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["clustering"]["alphabet_for_clustering"] = "nucleotide"
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "input nucleotide sequences" in md
+    # No protein-only language in the selection paragraph.
+    assert "marker-protein" not in md.split("## Software")[0]
+
+
+def test_render_summary_cdhit_backend_named_in_selection(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["clustering"]["backend"] = "cdhit"
+    cfg["clustering"]["alphabet_for_clustering"] = "nucleotide"
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    # When NT + cdhit, the dispatcher would pick cd-hit-est.
+    assert "cd-hit-est" in md
+
+
+def test_render_summary_software_table_marks_used_and_unused(make_seq, tmp_path):
+    """When backend=mmseqs2, cd-hit row must read '(not used)' and vice versa."""
+    cfg = _base_cfg(tmp_path)
+    with patch("repseq.output.summary.detect_tool_versions",
+               return_value={k: "9.9.9" for k in
+                             ("cd-hit", "cd-hit-est", "mmseqs", "mafft", "FastTree", "iqtree2")}):
+        md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "MMseqs2 | 9.9.9 | Sequence clustering (used)" in md
+    assert "cd-hit | 9.9.9 | Sequence clustering (not used)" in md
+
+
+# ---------------------------------------------------------------------------
+# write_summary — file IO + path return
+# ---------------------------------------------------------------------------
+
+def test_write_summary_creates_file_at_prefix_summary_md(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    path = write_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert path.exists()
+    assert path.name == "test_summary.md"
+    content = path.read_text()
+    assert content.startswith("# Methods — ")
+    assert "Auto-generated" in content

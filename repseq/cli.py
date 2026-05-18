@@ -546,6 +546,21 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
         result, qc_report, cfg, list(input_paths), out_files,
         complete_isolates=complete_isolates,
     )
+    # Methods-section starter — written after every successful run so
+    # a bench scientist can copy it into a paper. Soft-fail (one stderr
+    # line) so a render bug never voids a real selection.
+    try:
+        from .output.summary import write_summary
+        summary_path = write_summary(
+            cfg, qc_report, result, list(input_paths),
+            complete_isolates=complete_isolates,
+            segment_names=segment_names,
+            phylo_ran=phylo,
+            command=" ".join(sys.argv),
+        )
+        out_files.append(summary_path)
+    except Exception as exc:
+        click.echo(f"[summary skipped] {exc}", err=True)
     click.echo(f"\nOutput written to: {cfg['output']['dir']}")
     for f in out_files:
         click.echo(f"  {f.name}")
