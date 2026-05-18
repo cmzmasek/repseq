@@ -295,3 +295,27 @@ def test_run_qc_pipeline(make_seq):
     assert report.removed_duplicates == 1
     assert report.removed_length == 1
     assert report.removed_annotation == 1
+
+
+def test_qc_summary_labels_basic_qc_and_adds_final_survivors():
+    """The summary should say 'Passed basic QC' (not 'Passed QC') and
+    append 'Final survivors' when populated. Both pieces matter:
+    the rename keeps the QC-summary line honest, the final-survivors
+    line is the number that actually reached selection."""
+    from repseq.models import QCReport
+    report = QCReport(total_input=100, passed=80)
+    report.final_survivors = 12
+    report.final_survivors_unit = "isolates"
+    out = report.summary()
+    assert "Passed basic QC     : 80" in out
+    assert "Passed QC           : 80" not in out
+    assert "Final survivors     : 12 isolates" in out
+
+
+def test_qc_summary_omits_final_survivors_when_unset():
+    """A QCReport built without setting final_survivors (e.g. legacy
+    code paths, unit tests) should not show the new line at all."""
+    from repseq.models import QCReport
+    report = QCReport(total_input=100, passed=80)
+    out = report.summary()
+    assert "Final survivors" not in out

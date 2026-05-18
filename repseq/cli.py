@@ -443,6 +443,10 @@ def _check_strain_collisions(sequences, cfg, qc_report):
 def _handle_segmented(sequences, cfg, qc_report):
     virus_cfg = get_virus_config(cfg)
     if not virus_cfg:
+        # Non-segmented mode: the input list IS what feeds the mode,
+        # so this is the final survivor count. Units = "sequences".
+        qc_report.final_survivors = len(sequences)
+        qc_report.final_survivors_unit = "sequences"
         return sequences, None, None
     sequences = _check_strain_collisions(sequences, cfg, qc_report)
     click.echo("Applying segmented virus completeness filter ...")
@@ -519,6 +523,10 @@ def _handle_segmented(sequences, cfg, qc_report):
                 k: v for k, v in complete_isolates.items() if k in survivors
             }
         click.echo(f"  Duplicate isolates: {dropped} removed")
+    # Segmented mode: the mode consumes one CONCAT per surviving
+    # isolate, so the final survivor unit is "isolates", not segments.
+    qc_report.final_survivors = len(concat_seqs)
+    qc_report.final_survivors_unit = "isolates"
     return concat_seqs, complete_isolates, virus_cfg.get("segments")
 
 
@@ -575,10 +583,25 @@ def _final_summary(result, qc_report, cfg) -> None:
         unit = "isolate(s)" if segmented else "representative sequence(s)"
         click.echo(f"\nDone — selected {n_reps} {unit}{cluster_note}.")
         if qc_report is not None and qc_report.total_input:
-            click.echo(
+            msg = (
                 f"  {qc_report.passed} of {qc_report.total_input} input "
-                f"sequences passed QC."
+                f"sequences passed basic QC"
             )
+            # When later stages (protein QC, segmented, taxonomy_consistency,
+            # strain-collision) trimmed further, show the post-everything
+            # count so the user isn't misled into thinking ``passed`` was
+            # the survivor count fed into selection.
+            if (
+                qc_report.final_survivors is not None
+                and qc_report.final_survivors != qc_report.passed
+            ):
+                msg += (
+                    f"; {qc_report.final_survivors} "
+                    f"{qc_report.final_survivors_unit} reached selection."
+                )
+            else:
+                msg += "."
+            click.echo(msg)
         return
 
     # Nothing was selected — diagnose.
@@ -613,7 +636,7 @@ def _final_summary(result, qc_report, cfg) -> None:
         )
     elif segmented and qc_report.removed_incomplete_isolates:
         reasons.append(
-            f"{qc_report.passed} sequences passed QC, but the segmented "
+            f"{qc_report.passed} sequences passed basic QC, but the segmented "
             f"completeness/length filter dropped everything "
             f"({qc_report.removed_incomplete_isolates} removed) — no isolate "
             "had all expected segments. Check isolate_regex, the segment "
@@ -621,7 +644,7 @@ def _final_summary(result, qc_report, cfg) -> None:
         )
     else:
         reasons.append(
-            f"{qc_report.passed} sequences passed QC but selection produced "
+            f"{qc_report.passed} sequences passed basic QC but selection produced "
             "nothing — check that MMseqs2 is on PATH and that the grouping "
             "field actually has values (taxonomic/host/geographic modes fall "
             "back to a single 'Unknown' group without metadata resolution)."

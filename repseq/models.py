@@ -214,6 +214,18 @@ class QCReport:
     # Dedup is instead applied to the concatenated per-isolate sequences
     # after build_concatenated_sequences.
     dedup_skipped: bool = False
+    # Number of records that survived the *entire* QC pipeline (basic
+    # QC plus protein-annotation QC, segmented completeness, taxonomy
+    # consistency, strain-collision, and per-segment length). Set by
+    # the CLI driver at the end of QC, right before mode selection
+    # runs. Units match what the mode actually consumes:
+    # ``"sequences"`` for non-segmented runs (one per input record that
+    # survived) and ``"isolates"`` for segmented runs (one per
+    # concatenated complete isolate). Distinct from ``passed``, which
+    # only counts what made it past the basic-QC stages and is set
+    # inside ``run_qc`` before the segmented/protein steps run.
+    final_survivors: Optional[int] = None
+    final_survivors_unit: str = "sequences"
     details: list[dict] = field(default_factory=list)
 
     def add_removed(self, seq_id: str, reason: str) -> None:
@@ -253,7 +265,7 @@ class QCReport:
         lines = [
             f"QC Summary",
             f"  Input sequences     : {self.total_input}",
-            f"  Passed QC           : {self.passed}",
+            f"  Passed basic QC     : {self.passed}",
             dup_line,
             *length_lines,
             f"  Removed (ambiguous) : {self.removed_ambiguous}",
@@ -263,6 +275,16 @@ class QCReport:
             f"  Removed (tax-mismatch): {self.removed_taxonomy_mismatch}",
             f"  Removed (strain-collision): {self.removed_strain_collisions}",
         ]
+        # Add a Final survivors line when the CLI driver populated it.
+        # Older callers / tests that build a QCReport directly (without
+        # going through _handle_segmented) will see the field as None
+        # and the line is omitted, preserving prior behaviour.
+        if self.final_survivors is not None:
+            lines.append(
+                f"  Final survivors     : {self.final_survivors} "
+                f"{self.final_survivors_unit} "
+                f"(after every QC stage)"
+            )
         return "\n".join(lines)
 
 

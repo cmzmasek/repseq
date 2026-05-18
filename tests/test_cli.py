@@ -31,7 +31,35 @@ def test_final_summary_reports_success(make_seq, capsys):
     _final_summary(result, report, {"segmented": {"enabled": False}})
     out = capsys.readouterr().out
     assert "selected 12 representative sequence(s) across 4 cluster(s)" in out
-    assert "40 of 100 input sequences passed QC" in out
+    assert "40 of 100 input sequences passed basic QC" in out
+
+
+def test_final_summary_appends_final_survivors_when_different(make_seq, capsys):
+    """When later QC stages trimmed past basic-QC pass count, the line
+    must include the final survivor number so the user isn't misled."""
+    result = _result(make_seq, n_reps=2)
+    report = QCReport(total_input=100, passed=40)
+    report.final_survivors = 12
+    report.final_survivors_unit = "isolates"
+    _final_summary(result, report, {"segmented": {"enabled": True}})
+    out = capsys.readouterr().out
+    assert "40 of 100 input sequences passed basic QC" in out
+    assert "12 isolates reached selection" in out
+
+
+def test_final_summary_skips_final_survivors_when_same_as_passed(
+    make_seq, capsys
+):
+    """When no later stage trimmed, don't bother appending — the basic
+    QC count is the final count, so the extra clause would be noise."""
+    result = _result(make_seq, n_reps=12, n_clusters=4)
+    report = QCReport(total_input=100, passed=40)
+    report.final_survivors = 40
+    report.final_survivors_unit = "sequences"
+    _final_summary(result, report, {"segmented": {"enabled": False}})
+    out = capsys.readouterr().out
+    assert "40 of 100 input sequences passed basic QC." in out
+    assert "reached selection" not in out
 
 
 def test_final_summary_success_segmented_uses_isolate_wording(make_seq, capsys):

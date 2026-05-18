@@ -890,17 +890,26 @@ to run anywhere and finish in a couple of seconds.
 
 ## Status
 
-Current: **`v0.9.3`**. All 8 selection modes, protein-alphabet clustering
+Current: **`v0.9.4`**. All 8 selection modes, protein-alphabet clustering
 by default (`alphabet: protein`), MMseqs2 and cd-hit backends, optional
 protein-annotation QC, per-isolate taxonomy-consistency QC for segmented
 viruses, **strain-as-isolate provenance + collision detection**,
 segment-name synonyms, rich phyloXML output, and an optional UMAP plot
-of the clustering. **646 offline regression tests pass**; the
+of the clustering. **650 offline regression tests pass**; the
 NCBI-backed paths have been validated end-to-end against live
 influenza-A, peribunyaviridae, and hantaviridae datasets.
 
 Highlights of recent releases (newest first):
 
+- **`v0.9.4`** — the QC summary's `Passed QC` line was misleading: it
+  only counted what survived the basic-QC stages (duplicates / length /
+  ambiguous / annotation), not protein-QC, segmented completeness,
+  taxonomy-consistency, strain-collision, or per-segment length. It's
+  now relabeled `Passed basic QC`, and a new `Final survivors : N
+  isolates (after every QC stage)` line is appended at the bottom of
+  the QC Summary block (and the success summary in stderr) so the
+  number the user actually cares about — what reached selection — is
+  visible at a glance.
 - **`v0.9.3`** — segmented mode now records the **provenance of every
   `isolate_id`** (new `isolate_id_source` column: `isolate` | `strain` |
   `regex`) and runs a **strain-collision detector** on the strain-derived
