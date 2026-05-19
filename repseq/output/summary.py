@@ -188,11 +188,6 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
             f"**{_fmt_int(qc_report.removed_ambiguous)}** with > {thr:.0%} "
             f"ambiguous characters"
         )
-    if qc_report.removed_proteins:
-        parts.append(
-            f"**{_fmt_int(qc_report.removed_proteins)}** failing the "
-            f"protein-annotation check"
-        )
     basic = (
         f"Initial quality control removed "
         f"{', '.join(parts) if parts else 'no'} sequence(s) "
@@ -200,6 +195,49 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
     )
 
     extra_lines: list[str] = []
+    # The protein-annotation check is sequence-level QC but is segmented-aware:
+    # in segmented mode it compares each record's GenBank CDS count against the
+    # per-segment expected count (and so depends on seq.segment being populated
+    # upstream by _populate_genbank_isolate_segment). It does NOT run during
+    # the segmented-handling stage despite needing segment labels — surfacing
+    # it as its own sentence here (rather than in the "Initial QC" list) keeps
+    # the units honest: per NCBI segment record in segmented mode, per sequence
+    # otherwise.
+    if qc_report.removed_proteins:
+        seg_cfg = cfg.get("segmented", {}) or {}
+        virus_name = seg_cfg.get("virus") or ""
+        virus_cfg = (seg_cfg.get("viruses") or {}).get(virus_name, {}) if virus_name else {}
+        has_per_seg = bool(virus_cfg.get("expected_proteins_per_segment"))
+        pa_cfg = (qc_cfg.get("protein_annotation") or {})
+        min_proteins = pa_cfg.get("min_proteins") if pa_cfg.get("enabled") else None
+        if seg_cfg.get("enabled") and has_per_seg:
+            cfg_path = (
+                f"segmented.viruses.{virus_name}.expected_proteins_per_segment"
+                if virus_name
+                else "segmented.viruses.*.expected_proteins_per_segment"
+            )
+            extra_lines.append(
+                f"**{_fmt_int(qc_report.removed_proteins)}** segment record(s) "
+                f"were dropped by the protein-annotation check — their GenBank "
+                f"CDS count did not match `{cfg_path}` for their segment. "
+                f"Failing records appear in `_qc_removed.tsv` with reason "
+                f"`protein_count_mismatch:segment=<seg>:got=<n>:"
+                f"expected_one_of=[...]`."
+            )
+        elif min_proteins is not None:
+            extra_lines.append(
+                f"**{_fmt_int(qc_report.removed_proteins)}** sequence(s) were "
+                f"dropped by the protein-annotation check "
+                f"(`qc.protein_annotation.min_proteins = {min_proteins}`). "
+                f"Failing records appear in `_qc_removed.tsv` with reason "
+                f"`protein_count_below_min:<n><{min_proteins}`."
+            )
+        else:
+            extra_lines.append(
+                f"**{_fmt_int(qc_report.removed_proteins)}** record(s) were "
+                f"dropped by the protein-annotation check (see `_qc_removed.tsv` "
+                f"for per-record reasons starting with `protein_count_`)."
+            )
     if qc_report.removed_length_by_segment:
         per_seg = qc_report.removed_length_by_segment
         # The per-segment counter is in isolates (one bad segment drops the
@@ -250,6 +288,45 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
             f"were dropped by the strain-collision detector "
             f"(`/strain`-derived `isolate_id`s that collided across "
             f"different submitters)."
+        )
+    if qc_report.removed_extra_segments:
+        extra_lines.append(
+            f"**{_fmt_int(qc_report.removed_extra_segments)}** isolate(s) "
+            f"were dropped by the extra-segments check "
+            f"(`segmented.extra_segments_action: drop`) — their segment "
+            f"set carried names outside the configured `segments` list, "
+            f"and the entire isolate was removed (every segment recorded "
+            f"in `_qc_removed.tsv` with reason `extra_segments:<extras>`)."
+        )
+    if qc_report.removed_hmm_failed:
+        hmm_rt = cfg.get("_hmm_runtime", {}) or {}
+        hmm_cfg = hmm_rt.get("hmm_cfg") or (cfg.get("hmm", {}) or {})
+        breakdown_bits: list[str] = []
+        for key, count in sorted(
+            qc_report.removed_hmm_by_marker.items(),
+            key=lambda kv: -kv[1],
+        )[:5]:
+            breakdown_bits.append(f"`{key}` ({_fmt_int(count)})")
+        breakdown = ", ".join(breakdown_bits) if breakdown_bits else "—"
+        unit = (
+            "isolates" if cfg.get("segmented", {}).get("enabled") else "sequences"
+        )
+        rel = hmm_cfg.get("relative_length_cutoff", 0.5)
+        ev = hmm_cfg.get("default_evalue", 1.0e-5)
+        use_ga = hmm_cfg.get("use_ga_when_available", True)
+        gate_phrase = (
+            f"the Pfam gathering threshold (GA) where available "
+            f"(otherwise E ≤ {ev:g})"
+            if use_ga
+            else f"E ≤ {ev:g}"
+        )
+        extra_lines.append(
+            f"**{_fmt_int(qc_report.removed_hmm_failed)}** {unit} were "
+            f"dropped by the HMM-based identity QC (HMMER hmmscan; "
+            f"{_CITATIONS['hmmer']}) — each marker's configured HMM(s) "
+            f"had to hit a CDS with {gate_phrase} AND the alignment span "
+            f"had to cover ≥ {rel:.0%} of the HMM model length. Top "
+            f"reasons: {breakdown}."
         )
 
     extra_block = ("\n\n" + " ".join(extra_lines)) if extra_lines else ""
@@ -353,29 +430,18 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
             if not user_db
             else f"a user-supplied HMM database (`{user_db}`)"
         )
-        ev = hmm_cfg.get("default_evalue", 1.0e-5)
-        rel = hmm_cfg.get("relative_length_cutoff", 0.5)
-        use_ga = hmm_cfg.get("use_ga_when_available", True)
-        gate_desc = (
-            f"the Pfam gathering threshold (GA) when available, otherwise "
-            f"E ≤ {ev:g}"
-            if use_ga
-            else f"E ≤ {ev:g}"
-        )
-        n_dropped = qc_report.removed_hmm_failed
-        drop_clause = (
-            f"; **{_fmt_int(n_dropped)}** sequence(s)/isolate(s) were "
-            f"dropped because no candidate CDS passed the configured HMM(s)"
-            if n_dropped
-            else ""
-        )
+        # The drop count is already detailed in the Quality control section's
+        # HMM-QC bullet; here we just reference the upstream gate and note
+        # how it shaped the input to clustering.
         hmm_sentence = (
-            f" Marker-protein selection was gated by HMM hits "
+            f" The clustering input was pre-filtered by an HMM-based "
+            f"identity QC step "
             f"(HMMER hmmscan v{detect_tool_versions().get('hmmscan') or '?'}; "
-            f"{_CITATIONS['hmmer']}) against {db_desc}: a CDS was accepted "
-            f"as the marker only when every configured HMM hit it with "
-            f"{gate_desc} AND the alignment span covered ≥ {rel:.0%} of "
-            f"the HMM model length{drop_clause}."
+            f"{_CITATIONS['hmmer']}) against {db_desc} — see the Quality "
+            f"control section above for the per-marker drop breakdown. "
+            f"When `alphabet_for_clustering=protein`, the marker CDS for "
+            f"each surviving sequence/segment is then chosen as the "
+            f"longest CDS satisfying any of the configured HMM tokens."
         )
 
     return (
@@ -385,7 +451,12 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
         f"representative was chosen by the configured priority "
         f"(**{priority}**, with sequence length as the final tiebreaker). "
         f"The final set contains **{_fmt_int(n_reps)} {rep_unit}** "
-        f"across **{_fmt_int(n_clusters)} cluster(s)**.{diversity_sentence}\n"
+        f"across **{_fmt_int(n_clusters)} cluster(s)**.{diversity_sentence} "
+        f"Taxonomic diversity at each rank before and after clustering "
+        f"(distinct species, genera, families, etc., with per-taxon "
+        f"{rep_unit.split()[-1]} counts — the top 20 by member count for "
+        f"high-diversity ranks) is reported in "
+        f"`{{prefix}}_taxonomic_report.txt`.\n"
     )
 
 

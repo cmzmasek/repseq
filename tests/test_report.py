@@ -18,6 +18,7 @@ from repseq.output.report import (
     write_representative_isolates_tsv,
     write_representative_sequences_tsv,
     write_run_log,
+    write_taxonomic_report,
 )
 
 
@@ -259,3 +260,129 @@ def test_write_all_reports_emits_representative_isolate_proteins_subset(
     row = subset_lines[1].split("\t")
     assert row[iso_col] == "ISO_PICKED"
     assert row[rep_col] == "TRUE"
+
+
+# ---------------------------------------------------------------------------
+# write_taxonomic_report
+# ---------------------------------------------------------------------------
+
+def _diversity_rows(text):
+    """Parse Section-1 rows (rank + two integer columns) from the report.
+
+    Skips the Section-2 breakdown headers like ``species (N distinct):``
+    by accepting only lines whose two trailing tokens are both integers.
+    """
+    rows = {}
+    for ln in text.splitlines():
+        parts = ln.split()
+        if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+            rows[parts[0]] = parts[1:]
+    return rows
+
+
+def _tax_seq(seq_id, species=None, genus=None, family=None, subgenus=None):
+    lineage = {}
+    if subgenus:
+        lineage["subgenus"] = subgenus
+    tax = TaxonomyInfo(species=species, genus=genus, family=family, lineage=lineage)
+    return Sequence(
+        id=seq_id, header=f">{seq_id}", sequence="ACGT",
+        seq_type=SequenceType.NUCLEOTIDE, taxonomy=tax,
+    )
+
+
+def test_taxonomic_report_rank_diversity_before_after(tmp_path):
+    """Section 1 counts distinct non-empty taxa per rank before vs after."""
+    before = [
+        _tax_seq("a", species="Sp A", genus="Gen X", family="Fam"),
+        _tax_seq("b", species="Sp B", genus="Gen X", family="Fam"),
+        _tax_seq("c", species="Sp C", genus="Gen Y", family="Fam"),
+    ]
+    after = [
+        _tax_seq("a", species="Sp A", genus="Gen X", family="Fam"),
+        _tax_seq("c", species="Sp C", genus="Gen Y", family="Fam"),
+    ]
+    path = tmp_path / "x_taxonomic_report.txt"
+    write_taxonomic_report(before, after, segmented=False, path=path)
+    text = path.read_text()
+    assert "Counting unit: sequences" in text
+    # 3 species before, 2 after; 2 genera before, 2 after; 1 family both.
+    diversity = _diversity_rows(text)
+    assert diversity["species"] == ["3", "2"]
+    assert diversity["genus"] == ["2", "2"]
+    assert diversity["family"] == ["1", "1"]
+
+
+def test_taxonomic_report_breakdown_lists_low_diversity_ranks(tmp_path):
+    """Ranks with <=15 distinct taxa get a per-taxon before/after table."""
+    before = [
+        _tax_seq("a", species="SpA", genus="GenX"),
+        _tax_seq("b", species="SpB", genus="GenX"),
+        _tax_seq("c", species="SpC", genus="GenY"),
+    ]
+    after = [_tax_seq("a", species="SpA", genus="GenX")]
+    path = tmp_path / "x_taxonomic_report.txt"
+    write_taxonomic_report(before, after, segmented=False, path=path)
+    text = path.read_text()
+    assert "genus (2 distinct):" in text
+    rows = {ln.split()[0]: ln.split()[1:] for ln in text.splitlines()
+            if ln.strip().startswith(("GenX", "GenY"))}
+    # GenX: 2 before, 1 after; GenY: 1 before, 0 after.
+    assert rows["GenX"] == ["2", "1"]
+    assert rows["GenY"] == ["1", "0"]
+
+
+def test_taxonomic_report_truncates_breakdown_above_threshold(tmp_path):
+    """A rank with more than max_breakdown distinct taxa shows the top
+    max_breakdown by member count, with a note in the rank label."""
+    # 20 species with descending member counts: Sp00 has 20 seqs, ... Sp19 has 1.
+    before = []
+    for i in range(20):
+        for j in range(20 - i):
+            before.append(_tax_seq(f"s{i}_{j}", species=f"Sp{i:02d}", genus="GenX"))
+    after = []
+    path = tmp_path / "x_taxonomic_report.txt"
+    write_taxonomic_report(before, after, segmented=False, path=path, max_breakdown=15)
+    text = path.read_text()
+    assert "species (20 distinct, top 15 by member count shown):" in text
+    # Top 15 by member count are Sp00..Sp14; Sp15..Sp19 (smallest) are dropped.
+    assert "Sp00" in text and "Sp14" in text
+    assert "Sp15" not in text and "Sp19" not in text
+    # Genus has 1 distinct so it gets a full (un-noted) breakdown.
+    assert "genus (1 distinct):" in text
+
+
+def test_taxonomic_report_segmented_unit_is_isolates(tmp_path):
+    """In segmented mode the unit label is 'isolates'."""
+    before = [_tax_seq("iso1", species="Sp A"), _tax_seq("iso2", species="Sp B")]
+    after = [_tax_seq("iso1", species="Sp A")]
+    path = tmp_path / "x_taxonomic_report.txt"
+    write_taxonomic_report(before, after, segmented=True, path=path)
+    text = path.read_text()
+    assert "Counting unit: isolates" in text
+
+
+def test_taxonomic_report_excludes_blank_taxa(tmp_path):
+    """Sequences with no taxonomy at a rank are not counted as a taxon."""
+    before = [
+        _tax_seq("a", species="Sp A"),
+        _tax_seq("b", species=None),   # no species
+        _tax_seq("c", species=""),     # empty species
+    ]
+    after = [_tax_seq("a", species="Sp A")]
+    path = tmp_path / "x_taxonomic_report.txt"
+    write_taxonomic_report(before, after, segmented=False, path=path)
+    diversity = _diversity_rows(path.read_text())
+    # Only "Sp A" counts; blanks excluded.
+    assert diversity["species"] == ["1", "1"]
+
+
+def test_taxonomic_report_handles_no_taxonomy(tmp_path):
+    """A run with no taxonomy at any rank still writes a valid report."""
+    before = [
+        Sequence(id="a", header=">a", sequence="ACGT", seq_type=SequenceType.NUCLEOTIDE),
+    ]
+    path = tmp_path / "x_taxonomic_report.txt"
+    write_taxonomic_report(before, [], segmented=False, path=path)
+    text = path.read_text()
+    assert "(no taxonomy available at any rank)" in text

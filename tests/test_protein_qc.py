@@ -351,6 +351,37 @@ def test_filter_per_segment_accepts_list_of_counts(make_seq):
     assert "expected_one_of=[1, 2]" in three_proteins.qc_fail_reason
 
 
+def test_filter_drops_single_char_segment_when_seq_segment_prepopulated(make_seq):
+    """v0.14.1 regression: when ``seq.segment`` is set (e.g. by
+    ``_populate_genbank_isolate_segment`` running first), the per-segment
+    count check must fire on single-character segment names ("L"/"M"/"S")
+    even though ``identify_segment``'s header word-boundary search
+    excludes them. Without this guarantee, CONTIG-style RefSeqs whose
+    GenBank record returns zero CDS features silently pass with empty
+    proteins and break downstream per-protein TSV/FASTA writers.
+    """
+    # No `segment` keyword passed -> the FASTA header carries no segment
+    # cue. Set seq.segment directly to mimic what
+    # _populate_genbank_isolate_segment does in real runs.
+    seq = make_seq("nc_077667", "ACGT", header="Puumala virus CG1820 polymerase")
+    seq.segment = "L"
+    seq.proteins = []  # CONTIG-style RefSeq: source qualifiers loaded, CDS absent
+
+    virus_cfg = {
+        "segments": ["L", "M", "S"],
+        "expected_proteins_per_segment": {"L": [1], "M": [1, 2], "S": [1, 2]},
+    }
+    report = QCReport()
+    kept = filter_by_protein_count(
+        [seq], qc_cfg={}, virus_cfg=virus_cfg, report=report,
+    )
+    assert kept == []
+    assert report.removed_proteins == 1
+    assert seq.qc_fail_reason == (
+        "protein_count_mismatch:segment=L:got=0:expected_one_of=[1]"
+    )
+
+
 def test_filter_passes_through_when_proteins_none(make_seq):
     """Sequences without protein data (e.g. UniProt) shouldn't be filtered."""
     s = make_seq("a", "MEEP")

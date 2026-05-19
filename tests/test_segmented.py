@@ -121,7 +121,7 @@ def test_alias_used_via_completeness_filter(make_seq):
         "segment_aliases": _BUNYA_ALIASES,
     }
     report = QCReport()
-    kept, complete = filter_complete_isolates(seqs, virus_cfg, report)
+    kept, complete, _extras = filter_complete_isolates(seqs, virus_cfg, report)
     assert len(complete) == 1
     [(iso_id, ordered)] = complete.items()
     # Ordering follows cfg["segments"] = [L, M, S]
@@ -168,7 +168,7 @@ def test_filter_complete_isolates_keeps_complete_drops_incomplete(make_seq):
     for s in incomplete:
         s.segment = "HA"
 
-    kept, complete_iso = filter_complete_isolates(
+    kept, complete_iso, _extras = filter_complete_isolates(
         complete + incomplete, cfg, report
     )
 
@@ -190,11 +190,129 @@ def test_filter_complete_isolates_unresolved_marked_incomplete(make_seq):
     # header doesn't match isolate regex
     s = make_seq("u", "A" * 100, header="some unrelated header", segment="HA")
     report = QCReport()
-    kept, complete_iso = filter_complete_isolates([s], cfg, report)
+    kept, complete_iso, _extras = filter_complete_isolates([s], cfg, report)
     assert kept == []
     assert complete_iso == {}
     assert report.removed_incomplete_isolates == 1
     assert s.qc_fail_reason and "could_not_identify" in s.qc_fail_reason
+
+
+# ---------------------------------------------------------------------------
+# extra_segments_action
+# ---------------------------------------------------------------------------
+
+def _extras_cfg() -> dict:
+    return {
+        "expected_segments": 3,
+        "segments": ["L", "M", "S"],
+        "isolate_regex": ISOLATE_RE,
+    }
+
+
+def _build_extras_seqs(make_seq):
+    """L/M/S complete isolate plus a stray fourth segment named 'X'."""
+    seqs = [
+        make_seq("a_l", "A" * 100, header="A/duck/HK/1/1997 segment L"),
+        make_seq("a_m", "A" * 100, header="A/duck/HK/1/1997 segment M"),
+        make_seq("a_s", "A" * 100, header="A/duck/HK/1/1997 segment S"),
+        make_seq("a_x", "A" * 100, header="A/duck/HK/1/1997 segment X"),
+    ]
+    for s, name in zip(seqs, ["L", "M", "S", "X"]):
+        s.segment = name
+    return seqs
+
+
+def test_extra_segments_warn_keeps_isolate_with_expected_segments(make_seq):
+    """warn (default): the isolate passes completeness with just its
+    expected segments. The extra segment is silently pruned from the
+    concat — same behaviour as before v0.14.1 — but the detection IS
+    surfaced via the returned extras_by_isolate dict."""
+    seqs = _build_extras_seqs(make_seq)
+    report = QCReport()
+    kept, complete, extras = filter_complete_isolates(
+        seqs, _extras_cfg(), report, extra_segments_action="warn"
+    )
+    # Isolate kept, only expected segments in the ordered list.
+    assert len(complete) == 1
+    [(iso_id, ordered)] = complete.items()
+    assert [s.segment for s in ordered] == ["L", "M", "S"]
+    # Extras dict surfaces the detection.
+    assert extras == {iso_id: ["X"]}
+    # No counter increment, no record dropped.
+    assert report.removed_extra_segments == 0
+    assert report.removed_incomplete_isolates == 0
+
+
+def test_extra_segments_drop_removes_whole_isolate(make_seq):
+    """drop: the whole isolate is removed. Every segment (expected AND
+    extra) lands in _qc_removed.tsv with reason
+    extra_segments:<extras>, and the counter increments once per
+    isolate (units: isolates)."""
+    seqs = _build_extras_seqs(make_seq)
+    report = QCReport()
+    kept, complete, extras = filter_complete_isolates(
+        seqs, _extras_cfg(), report, extra_segments_action="drop"
+    )
+    assert complete == {}
+    assert kept == []
+    assert len(extras) == 1
+    assert list(extras.values()) == [["X"]]
+    # Counted in isolates.
+    assert report.removed_extra_segments == 1
+    # No incomplete-isolate bookkeeping for this drop path.
+    assert report.removed_incomplete_isolates == 0
+    # Every segment dropped, reason carries the extras list.
+    assert all(s.qc_passed is False for s in seqs)
+    reasons = {s.qc_fail_reason for s in seqs}
+    assert reasons == {"extra_segments:X"}
+    # _qc_removed.tsv entries cover every segment.
+    detail_reasons = {d["reason"] for d in report.details}
+    assert detail_reasons == {"extra_segments:X"}
+
+
+def test_extra_segments_default_is_warn_when_kwarg_omitted(make_seq):
+    """The default action is 'warn' so back-compat is preserved for
+    callers that don't pass the kwarg."""
+    seqs = _build_extras_seqs(make_seq)
+    report = QCReport()
+    _, complete, extras = filter_complete_isolates(seqs, _extras_cfg(), report)
+    assert len(complete) == 1
+    assert extras and report.removed_extra_segments == 0
+
+
+def test_extra_segments_returns_empty_dict_when_no_extras(make_seq):
+    """An L/M/S-only isolate produces an empty extras dict — both
+    actions are no-ops in this case."""
+    seqs = _build_extras_seqs(make_seq)[:3]  # drop the X segment
+    report = QCReport()
+    _, complete, extras = filter_complete_isolates(
+        seqs, _extras_cfg(), report, extra_segments_action="drop"
+    )
+    assert extras == {}
+    assert len(complete) == 1
+    assert report.removed_extra_segments == 0
+
+
+def test_extra_segments_drop_multiple_extras_join_in_reason(make_seq):
+    """When an isolate carries more than one extra segment, the
+    _qc_removed.tsv reason joins the names in sorted order."""
+    seqs = [
+        make_seq("a_l", "A" * 100, header="A/duck/HK/1/1997 segment L"),
+        make_seq("a_m", "A" * 100, header="A/duck/HK/1/1997 segment M"),
+        make_seq("a_s", "A" * 100, header="A/duck/HK/1/1997 segment S"),
+        make_seq("a_x", "A" * 100, header="A/duck/HK/1/1997 segment X"),
+        make_seq("a_y", "A" * 100, header="A/duck/HK/1/1997 segment Y"),
+    ]
+    for s, name in zip(seqs, ["L", "M", "S", "X", "Y"]):
+        s.segment = name
+    report = QCReport()
+    _, _, extras = filter_complete_isolates(
+        seqs, _extras_cfg(), report, extra_segments_action="drop"
+    )
+    [(iso_id, names)] = extras.items()
+    assert names == ["X", "Y"]
+    reasons = {s.qc_fail_reason for s in seqs}
+    assert reasons == {"extra_segments:X,Y"}
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +350,7 @@ def test_filter_complete_isolates_whitespace_in_isolate_id_is_underscored(make_s
                  segment="S"),
     ]
     report = QCReport()
-    kept, complete = filter_complete_isolates(seqs, cfg, report)
+    kept, complete, _extras = filter_complete_isolates(seqs, cfg, report)
     assert len(complete) == 1
     [(iso_id, _segs)] = complete.items()
     assert " " not in iso_id
@@ -577,7 +695,9 @@ def test_filter_complete_isolates_tags_regex_source(make_seq):
         "segment_regex": r"segment=(?P<segment>[LMS])",
     }
     report = QCReport()
-    _, complete = filter_complete_isolates([a_l, a_m, a_s], virus_cfg, report)
+    _, complete, _extras = filter_complete_isolates(
+        [a_l, a_m, a_s], virus_cfg, report
+    )
     assert "i1" in complete
     for seg in complete["i1"]:
         assert seg.isolate_id_source == "regex"
@@ -598,7 +718,9 @@ def test_filter_complete_isolates_preserves_existing_source(make_seq):
         "segment_regex": r"segment=(?P<segment>[LMS])",
     }
     report = QCReport()
-    _, complete = filter_complete_isolates([a_l, a_m, a_s], virus_cfg, report)
+    _, complete, _extras = filter_complete_isolates(
+        [a_l, a_m, a_s], virus_cfg, report
+    )
     for seg in complete["i1"]:
         assert seg.isolate_id_source == "strain"
 

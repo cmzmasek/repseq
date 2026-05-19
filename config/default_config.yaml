@@ -79,6 +79,16 @@ segmented:
   # filtering and records them in _qc_removed.tsv with reason
   # "strain_collision:<segment>".
   strain_collision_action: warn
+  # What to do when an isolate carries segments outside the configured
+  # `segments` list (e.g. an L/M/S virus that ends up with a fourth
+  # segment, or a non-canonical segment identifier that identify_segment
+  # couldn't map). "warn" (default) prints one line per affected isolate
+  # to stderr and lets the isolate through with just its expected
+  # segments (today's silent prune, but now visible). "drop" removes
+  # the entire isolate (every segment lands in _qc_removed.tsv with
+  # reason "extra_segments:<extras>") and increments
+  # QCReport.removed_extra_segments (counted in isolates).
+  extra_segments_action: warn
   # Schema for each virus entry:
   #   <name>:
   #     expected_segments: <int>
@@ -97,24 +107,26 @@ segmented:
   #     cluster_protein:                       # optional; marker protein per segment
   #       <segment_name>:                      #   for protein-alphabet clustering. Each
   #         - <alias>                          #   list entry is an alias string OR a
-  #         - {name: ..., aliases: [...], hmms: [...]}   # dict with optional HMM gate.
+  #         - {name: ..., aliases: [...], hmms: [<token>, <token>]}   # dict form.
   #                                            #   Aliases match case-insensitively
   #                                            #   (substring) against /product;
-  #                                            #   HMMs (when present + hmm.enabled +
-  #                                            #   hmmscan on PATH) override aliases as
-  #                                            #   the authoritative gate. First match
-  #                                            #   wins; if no entry matches a segment's
-  #                                            #   CDSes, the isolate is dropped as
-  #                                            #   incomplete. Omitted: longest CDS.
-  #     segment_markers:                       # optional; HMM-aware alternative to
-  #       <segment_name>:                      #   cluster_protein above. One spec per
-  #         aliases: [<alias>, <alias>]        #   segment; aliases AND/OR hmms. When
-  #         hmms: [<hmm_name>, <hmm_name>]     #   hmms is set, HMM gate is authoritative
-  #                                            #   (a CDS hitting an alias but failing
-  #                                            #   the HMM is dropped). Multi-HMM list
-  #                                            #   is AND (every HMM must hit the same
-  #                                            #   CDS). Wins over cluster_protein when
-  #                                            #   both define the same segment.
+  #                                            #   when `hmms` is present, the HMM gate
+  #                                            #   is authoritative (see segment_markers
+  #                                            #   below for token semantics). First
+  #                                            #   match wins; omitted → longest CDS.
+  #     segment_markers:                       # v0.14.0 recommended form for HMM QC.
+  #       <segment_name>:                      #   One spec per segment, with aliases
+  #         aliases: [<alias>, <alias>]        #   AND/OR hmms. hmms is a list of TOKEN
+  #         hmms: [<token>, <token>]           #   strings: "Name" for single-HMM, or
+  #                                            #   "A--B--C" for multidomain (HMMs in
+  #                                            #   C-to-N order — A is C-terminal, C
+  #                                            #   N-terminal). Each token must be
+  #                                            #   satisfied by at least one CDS in
+  #                                            #   the segment for QC to pass; the
+  #                                            #   marker (longest satisfying CDS) is
+  #                                            #   then chosen if alphabet=protein.
+  #                                            #   See the top-level `hmm:` block for
+  #                                            #   gate behaviour and cutoffs.
   # See config/examples/influenza_a.yaml for a worked example with
   # strain-aware list-valued counts.
   viruses: {}
@@ -178,13 +190,36 @@ clustering:
   #         ["polymerase", "RNA-dependent RNA polymerase"]
   #   • a dict with HMM support (recommended when HMMs are available):
   #         - {name: "RdRp",  aliases: ["polymerase"],  hmms: ["RdRp_4"]}
-  #         - {name: "Spike", aliases: ["spike"],       hmms: ["Corona_S1", "Corona_S2"]}
-  # Mixed lists are allowed. When `hmms` is set AND the top-level `hmm`
-  # block is enabled AND hmmscan is on PATH, the HMM hit becomes the
-  # AUTHORITATIVE gate for that marker — a CDS whose /product matches an
-  # alias but FAILS the HMM check is rejected. Multi-HMM lists are AND
-  # (every HMM must hit the same CDS). When no aliases and no HMMs match
-  # any CDS, the sequence is dropped under removed_proteins.
+  #         - {name: "Spike", aliases: ["spike"],       hmms: ["Corona_S1--Corona_S2"]}
+  #
+  # The `hmms:` field is a list of TOKEN strings (v0.14.0+ semantic):
+  #   • "Name"       — single-HMM token, satisfied by any CDS whose hit
+  #                    to that HMM passes the configured cutoffs.
+  #   • "A--B--C"    — multidomain token, satisfied only when a single
+  #                    CDS has passing hits to all listed HMMs IN C-TO-N
+  #                    ORDER (A most C-terminal, C most N-terminal),
+  #                    with strict non-overlap between named domains.
+  #                    Extra domains anywhere on the CDS are fine.
+  #
+  # IMPORTANT — C-to-N convention: the order in "A--B--C" reads C-to-N
+  # left-to-right. Most molecular-biology notation is N-to-C, so triple-
+  # check the order against the actual domain architecture before running.
+  # The convention exists so multidomain tokens can be checked directly
+  # against the hmmscan `ali_from`/`ali_to` columns without flipping.
+  #
+  # When `hmms` is set AND `hmm.enabled=true` AND `hmmscan` is on PATH,
+  # the HMM gate is AUTHORITATIVE for that marker: an upstream HMM-QC
+  # step (new in v0.14.0) drops sequences/segments where any required
+  # token has no satisfying CDS, regardless of clustering alphabet.
+  # In a non-segmented run with multiple HMM-defining specs in this
+  # list, the sequence must satisfy EVERY such spec (each spec is an
+  # independent marker the user wants verified). Specs that only define
+  # `aliases:` (no `hmms:`) are advisory selection hints; they do not
+  # gate QC.
+  #
+  # HARD CUTOVER from v0.13.0: ``hmms: [A, B]`` no longer means "A AND B
+  # on the same CDS" — that's now two separate single-HMM tokens (loose).
+  # To get the v0.13.0 strict-AND semantic, write ``hmms: ["A--B"]``.
   cluster_protein: []
 
   # Diagnostic "diversity curve" reporting. For each stratum where the
@@ -254,20 +289,34 @@ representative:
     - reviewed_uniprot
     - longest
 
-# HMM-based marker-protein selection (HMMER hmmscan).
+# HMM-based identity QC (v0.14.0).
 #
-# When enabled AND a marker definition carries `hmms: [...]` AND `hmmscan`
-# is on PATH, the HMM hit becomes the AUTHORITATIVE gate for that marker.
-# A CDS whose /product matches an alias but FAILS the HMM check (E-value
-# or coverage cutoff) is REJECTED — the segment (segmented) or sequence
-# (non-segmented) is dropped. This catches misannotated CDSs,
-# pseudogenes, and contamination that alias-matching alone would let
-# through. Markers that do NOT define `hmms` keep the legacy alias →
-# longest behaviour, so you can phase HMMs in one marker at a time.
+# Purpose: verify each segment (segmented mode) or sequence (non-
+# segmented mode) actually carries the expected proteins, by HMM
+# identity rather than GenBank /product strings. /product is inconsistent
+# across viral families and submitters; HMM hits are reproducible.
+# This step:
+#   1. Auto-fetches CDS proteins from GenBank if not already cached.
+#   2. Runs `hmmscan` against the configured HMM database in one batch.
+#   3. For each segment/sequence, checks every configured marker spec
+#      that defines `hmms:`. If any token in a spec has no satisfying
+#      CDS, the segment/sequence fails QC; for segmented runs the whole
+#      isolate is then dropped.
+#   4. Stashes hit data for downstream consumers (marker selection
+#      when alphabet=protein, the `hmmscan` TSV column, the FASTA tag).
+#
+# Runs whenever this block is enabled AND any marker spec carries
+# `hmms: [...]` — REGARDLESS of clustering alphabet. (In v0.13.0 the
+# scan only fired on alphabet=protein runs; v0.14.0 promotes it to a
+# first-class QC stage so nucleotide-clustering users also benefit.)
+#
+# Markers that do NOT define `hmms` keep the legacy alias → longest
+# behaviour and are not gated by HMM-QC. HMMs can be phased in one
+# marker at a time.
 #
 # Soft-fails: missing hmmscan binary, unreadable database, or
-# hmm.enabled=false all fall back to alias/longest selection with a
-# single stderr warning. Use `repseq doctor` to verify install state.
+# hmm.enabled=false all bypass the step with a single stderr warning.
+# Use `repseq doctor` to verify install state.
 hmm:
   enabled: true
   # null → use the bundled viral-core profile set shipped with repseq

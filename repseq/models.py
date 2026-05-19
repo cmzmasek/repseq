@@ -204,6 +204,15 @@ class QCReport:
     # Counted in segments, consistent with the other ``removed_*``
     # counters.
     removed_strain_collisions: int = 0
+    # Isolates dropped because their seg_map carried segment names outside
+    # the configured ``segments`` list (e.g. an extra fourth segment, or
+    # a non-canonical identifier that ``identify_segment`` returned
+    # unchanged). Always zero when ``segmented.extra_segments_action`` is
+    # ``"warn"`` (the default); only increments under ``"drop"``. Counted
+    # in **isolates** (the actionable number for a bench scientist), not
+    # segments — every segment of a dropped isolate still lands in
+    # ``_qc_removed.tsv`` with reason ``extra_segments:<extras>``.
+    removed_extra_segments: int = 0
     # Sequences (non-segmented) or isolates (segmented) dropped because
     # an HMM-gated marker spec had no CDS pass the HMM check (E-value or
     # coverage). Distinct from ``removed_proteins`` /
@@ -293,9 +302,10 @@ class QCReport:
             f"  Removed (incomplete): {self.removed_incomplete_isolates}",
             f"  Removed (tax-mismatch): {self.removed_taxonomy_mismatch}",
             f"  Removed (strain-collision): {self.removed_strain_collisions}",
+            f"  Removed (extra-segments): {self.removed_extra_segments}",
         ]
         if self.removed_hmm_failed or self.removed_hmm_by_marker:
-            hmm_line = f"  Removed (HMM gate)  : {self.removed_hmm_failed}"
+            hmm_line = f"  Removed (HMM QC)    : {self.removed_hmm_failed}"
             if self.removed_hmm_by_marker:
                 parts = [
                     f"{k}={v}"

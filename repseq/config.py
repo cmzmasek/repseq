@@ -90,6 +90,17 @@ DEFAULTS: dict[str, Any] = {
         # _qc_removed.tsv with reason "strain_collision:<segment>", and
         # increments QCReport.removed_strain_collisions.
         "strain_collision_action": "warn",
+        # What to do when an isolate's segments include names outside
+        # the configured ``segments`` list (e.g. an L/M/S virus that
+        # has a fourth segment, or a non-canonical segment identifier
+        # that ``identify_segment`` couldn't map). "warn" (default)
+        # prints one line per affected isolate to stderr and pipes the
+        # isolate through with just its expected segments — today's
+        # silent prune becomes visible without changing analysis.
+        # "drop" removes the entire isolate (every segment lands in
+        # _qc_removed.tsv with reason "extra_segments:<extras>") and
+        # increments QCReport.removed_extra_segments (units: isolates).
+        "extra_segments_action": "warn",
     },
     "clustering": {
         "backend": "mmseqs2",              # "mmseqs2" | "cdhit"
@@ -372,13 +383,46 @@ def load_config(path: Optional[str | Path] = None) -> dict[str, Any]:
     return cfg
 
 
+def _validate_hmm_tokens(hmms: Any, path: str) -> tuple[list[str], list[str]]:
+    """Validate an ``hmms:`` list of token strings.
+
+    Each token is either a single HMM name (``"Name"``) or a multidomain
+    spec joined with ``--`` (``"A--B--C"``, HMMs listed in C-to-N order).
+    Returns ``(errors, validated_tokens)``. Invalid tokens are dropped
+    from ``validated_tokens`` so the caller can still check the
+    "at least one of aliases / hmms" invariant.
+    """
+    from .hmm.runner import parse_hmm_token
+
+    errs: list[str] = []
+    validated: list[str] = []
+    if not isinstance(hmms, list):
+        errs.append(
+            f"{path} must be a list of HMM token strings "
+            "(single 'Name' or multidomain 'A--B--C')"
+        )
+        return errs, validated
+    for i, token in enumerate(hmms):
+        if not isinstance(token, str):
+            errs.append(f"{path}[{i}] must be a string, got {type(token).__name__}")
+            continue
+        try:
+            parse_hmm_token(token)
+        except ValueError as e:
+            errs.append(f"{path}[{i}]: {e}")
+            continue
+        validated.append(token)
+    return errs, validated
+
+
 def _validate_marker_entry(entry: Any, path: str) -> list[str]:
     """Validate one cluster_protein marker entry.
 
     Each entry is either a non-empty alias string (legacy, alias-only)
     or a dict with required ``name`` and at least one of ``aliases``
-    (list of non-empty strings) or ``hmms`` (list of non-empty HMM
-    profile names).
+    (list of non-empty strings) or ``hmms`` (list of HMM token strings,
+    where a token is either a single HMM name like ``"Name"`` or a
+    multidomain spec like ``"A--B"`` in C-to-N order).
     """
     errs: list[str] = []
     if isinstance(entry, str):
@@ -400,12 +444,8 @@ def _validate_marker_entry(entry: Any, path: str) -> list[str]:
     ):
         errs.append(f"{path}: 'aliases' must be a list of non-empty strings")
         aliases = []
-    hmms = entry.get("hmms", [])
-    if not isinstance(hmms, list) or not all(
-        isinstance(h, str) and h.strip() for h in hmms
-    ):
-        errs.append(f"{path}: 'hmms' must be a list of non-empty HMM profile names")
-        hmms = []
+    token_errs, hmms = _validate_hmm_tokens(entry.get("hmms", []), f"{path}.hmms")
+    errs.extend(token_errs)
     if not aliases and not hmms:
         errs.append(
             f"{path}: dict-form entry must define at least one of "
@@ -449,12 +489,8 @@ def _validate_segment_markers(
         ):
             errs.append(f"{prefix}.aliases must be a list of non-empty strings")
             aliases = []
-        hmms = spec.get("hmms", [])
-        if not isinstance(hmms, list) or not all(
-            isinstance(h, str) and h.strip() for h in hmms
-        ):
-            errs.append(f"{prefix}.hmms must be a list of non-empty HMM profile names")
-            hmms = []
+        token_errs, hmms = _validate_hmm_tokens(spec.get("hmms", []), f"{prefix}.hmms")
+        errs.extend(token_errs)
         if not aliases and not hmms:
             errs.append(
                 f"{prefix}: must define at least one of 'aliases' or 'hmms'"
@@ -520,6 +556,13 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     if sca not in ("warn", "drop"):
         errors.append(
             f"segmented.strain_collision_action '{sca}' is not supported "
+            "(use 'warn' or 'drop')"
+        )
+
+    esa = seg.get("extra_segments_action", "warn")
+    if esa not in ("warn", "drop"):
+        errors.append(
+            f"segmented.extra_segments_action '{esa}' is not supported "
             "(use 'warn' or 'drop')"
         )
 

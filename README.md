@@ -797,22 +797,55 @@ You can also set your NCBI email/key via the environment variables
 
 ---
 
-## HMM-based marker selection
+## HMM-based identity QC
 
 Annotation of viral CDSes in GenBank is famously inconsistent
 ("RNA-dependent RNA polymerase" vs "polymerase" vs "L protein" vs
 "RNA polymerase L") and pseudogenes / misannotations can carry plausible-
-looking `/product` strings. Since v0.13.0, repseq can use **HMMER
-hmmscan** against curated profile HMMs as the authoritative test for
-whether a CDS is the marker you wanted.
+looking `/product` strings. Since v0.14.0, repseq's primary use of
+**HMMER hmmscan** is as a **QC step** — it verifies that each
+segment/sequence actually carries the expected proteins by structural
+identity rather than by name, and drops anything that fails the gate.
+Marker selection for protein-alphabet clustering is a downstream
+consumer of the same hit cache.
 
 The HMM tier is **off-by-default at the marker level** — it activates
 only for markers that carry an `hmms:` list — so you can phase HMMs in
 one marker at a time without touching the rest of your pipeline.
 
+**Runs regardless of clustering alphabet.** If you cluster on
+nucleotides, HMM-QC still fires and drops isolates whose segments
+don't carry the expected proteins (this is a change from v0.13.0,
+which only ran HMMs on alphabet=protein runs).
+
+### Token notation (v0.14.0)
+
+Each element of `hmms:` is a **token** string. A token is either:
+
+| Form | Meaning |
+| --- | --- |
+| `"Name"`         | Single HMM. A CDS satisfies the token if it has a passing hit to `Name`. |
+| `"A--B"`         | Multidomain. A CDS satisfies the token only when it has passing hits to **both** `A` and `B`, with `A` lying C-terminal to `B` (strict non-overlap). |
+| `"A--B--C"`      | Same idea, three domains: `A` most C-terminal, `C` most N-terminal. |
+
+**C-to-N order**. The first HMM in a multidomain token is the most
+**C-terminal** domain on the protein. Most molecular-biology notation
+reads N-to-C left-to-right; this is the opposite. Check your token
+order against the actual domain architecture before running. The
+convention exists so multidomain tokens can be compared directly
+against the hmmscan `ali_from`/`ali_to` columns.
+
+**Extra domains are fine.** A CDS annotated as `HMMX--A--B` still
+satisfies the token `"A--B"` because `A` remains C-terminal to `B`.
+
+**Hard cutover from v0.13.0.** In v0.13.0, `hmms: [A, B]` meant "both
+A and B must hit the same CDS." In v0.14.0 that same YAML now means
+"two separate single-HMM tokens" (loose). To get the v0.13.0 strict
+multidomain semantic, write `hmms: ["A--B"]`.
+
 ### How the gate works
 
-For a marker spec that includes `hmms: [...]`:
+For a marker spec that includes `hmms: [<token>, <token>, ...]`:
 
 1. Every CDS in every input sequence is scanned against the configured
    HMM database (once per sequence, batched into a single hmmscan call
@@ -823,19 +856,22 @@ For a marker spec that includes `hmms: [...]`:
    - **Coverage:** the alignment span covers at least
      `hmm.relative_length_cutoff` (default `0.5`) of the HMM model
      length.
-3. A CDS **passes the marker spec** only when *every* HMM in the
-   spec's list has at least one passing hit on that CDS (multi-HMM is
-   AND, useful for multi-domain glycoproteins).
-4. The longest passing CDS wins. **Aliases on the same spec are
-   ignored** — that's the whole point: a misannotated `/product` can't
-   override the HMM verdict.
-5. If no CDS passes the gate, the segment (or non-segmented sequence)
-   is dropped, counted under `removed_hmm_failed` with a per-marker
-   breakdown in `removed_hmm_by_marker`, and a `hmm_failed:<marker>:<hmm>(E=...)`
-   row is added to `_qc_removed.tsv`.
+3. A **segment / sequence passes QC** when, for each token in the
+   spec, at least one CDS in the segment satisfies that token. (Tokens
+   in the same `hmms:` list are AND — every token must be satisfied.
+   Tokens are independent of each other: the same CDS can satisfy
+   multiple tokens, or different CDSes can each satisfy one.)
+4. If any token has no satisfying CDS, the segment fails. In segmented
+   mode the entire isolate is then dropped (one bad segment fails the
+   whole isolate, counted under `removed_hmm_failed` with a per-marker
+   breakdown in `removed_hmm_by_marker`). In non-segmented mode the
+   single sequence is dropped.
+5. For protein-alphabet clustering, the marker CDS of each surviving
+   segment / sequence is then the **longest** CDS that satisfies any
+   token in the spec.
 
 Markers WITHOUT an `hmms:` list keep the legacy alias → longest chain
-unchanged.
+unchanged and are not gated by HMM-QC.
 
 ### Bundled vs user-supplied database
 
@@ -864,27 +900,36 @@ with `name`, optional `aliases`, optional `hmms`:
 ```yaml
 clustering:
   cluster_protein:
-    - "polymerase"                                          # legacy: alias-only
-    - {name: "RdRp", aliases: ["polymerase"], hmms: ["RdRP_4"]}
-    - {name: "Spike", aliases: ["spike"], hmms: ["CoV_S1", "CoV_S2"]}   # multi-domain AND
+    - "polymerase"                                                          # legacy: alias-only
+    - {name: "RdRp",  aliases: ["polymerase"], hmms: ["RdRP_4"]}            # single-HMM token
+    - {name: "Spike", aliases: ["spike"],      hmms: ["CoV_S1--CoV_S2"]}    # multidomain token
 ```
 
-Segmented marker spec (per-virus `segment_markers` — the v0.13
-HMM-aware form, coexists with legacy per-segment `cluster_protein`):
+Segmented marker spec (per-virus `segment_markers` — the recommended
+HMM-aware form). Two flavours of the M-segment spec, illustrating the
+difference between multidomain and separate-token notation:
 
 ```yaml
 segmented:
   enabled: true
-  virus: bunyaviridae
+  virus: peribunyaviridae
   viruses:
-    bunyaviridae:
+    peribunyaviridae:
       expected_segments: 3
       segments: [S, M, L]
       isolate_regex: "..."
       segment_markers:
-        S: {aliases: ["nucleocapsid", "N protein"], hmms: ["Bunya_nucleocap"]}
-        M: {aliases: ["glycoprotein"],              hmms: ["Bunya_G1", "Bunya_G2"]}
-        L: {aliases: ["polymerase", "L protein"],   hmms: ["RdRP_4"]}
+        S: {hmms: ["Bunya_nucleocap"]}            # single HMM
+        # Permissive: passes when the M segment has Bunya_G1 hit AND
+        # Bunya_G2 hit, possibly on different CDSes (handles the
+        # post-cleavage Gn/Gc annotation case).
+        M: {hmms: ["Bunya_G1", "Bunya_G2"]}
+        # OR — strict polyprotein form: a single CDS must carry both
+        # domains in C-to-N order (Bunya_G1 C-terminal, Bunya_G2
+        # N-terminal). Use this when you want to reject post-cleavage
+        # annotations as inconsistent.
+        # M: {hmms: ["Bunya_G1--Bunya_G2"]}
+        L: {hmms: ["RdRP_4"]}
 ```
 
 When both `segment_markers` and the legacy `cluster_protein` define a

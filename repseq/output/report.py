@@ -8,6 +8,7 @@ import platform
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
@@ -583,6 +584,120 @@ def write_group_counts_tsv(result: RunResult, path: Path) -> bool:
 # ---------------------------------------------------------------------------
 # Write all reports
 # ---------------------------------------------------------------------------
+
+def _seq_rank_value(seq: Sequence, rank: str) -> Optional[str]:
+    """Return the taxon name a sequence carries at ``rank``, or ``None``.
+
+    An empty string is treated as absent (not a taxon) so blank lineage
+    cells never inflate a distinct-taxa count or appear in a breakdown.
+    """
+    tax = seq.taxonomy
+    if not tax:
+        return None
+    return tax.get_rank(rank) or None
+
+
+def write_taxonomic_report(
+    before_seqs: list[Sequence],
+    after_seqs: list[Sequence],
+    segmented: bool,
+    path: Path,
+    max_breakdown: int = 20,
+) -> None:
+    """Write ``{prefix}_taxonomic_report.txt``: taxonomic diversity at each
+    of the nine :data:`_TAX_RANKS`, before vs after clustering.
+
+    "Before" is the post-QC pool fed to the clustering step (one synthetic
+    CONCAT isolate per record in segmented mode, one sequence per record
+    otherwise); "after" is the selected representatives. The counting unit
+    is therefore **isolates** in segmented mode and **sequences** otherwise.
+    Empty / missing rank values are not a taxon and are excluded from every
+    count.
+
+    Two sections:
+
+    1. Rank diversity — distinct non-empty taxa before and after, one row
+       per rank.
+    2. Per-rank breakdown — for every rank with at least one distinct
+       taxon, each taxon name with its before / after unit count, sorted
+       by member count (the *before* unit count) descending. Ranks with
+       more than ``max_breakdown`` distinct taxa show only the top
+       ``max_breakdown`` by member count, with a note in the rank label.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    unit = "isolates" if segmented else "sequences"
+
+    before_by_rank: dict[str, Counter] = {}
+    after_by_rank: dict[str, Counter] = {}
+    for rank in _TAX_RANKS:
+        before_by_rank[rank] = Counter(
+            v for s in before_seqs if (v := _seq_rank_value(s, rank))
+        )
+        after_by_rank[rank] = Counter(
+            v for s in after_seqs if (v := _seq_rank_value(s, rank))
+        )
+
+    lines: list[str] = []
+    lines.append("Taxonomic report")
+    lines.append(f"Generated: {datetime.date.today().isoformat()}")
+    lines.append(
+        f"Counting unit: {unit} "
+        f"(before = post-QC pool fed to clustering, {len(before_seqs)} {unit}; "
+        f"after = representatives, {len(after_seqs)} {unit})"
+    )
+    lines.append("")
+    lines.append("== Rank diversity (distinct taxa before vs after clustering) ==")
+    lines.append("")
+
+    rank_w = max(len(r) for r in _TAX_RANKS)
+    header = f"{'rank':<{rank_w}}  {'before':>7}  {'after':>7}"
+    lines.append(header)
+    lines.append("-" * len(header))
+    for rank in _TAX_RANKS:
+        nb = len(before_by_rank[rank])
+        na = len(after_by_rank[rank])
+        lines.append(f"{rank:<{rank_w}}  {nb:>7}  {na:>7}")
+    lines.append("")
+
+    lines.append(
+        f"== Per-rank breakdown (per-taxon member counts, sorted by member "
+        f"count; ranks with > {max_breakdown} distinct taxa show the top "
+        f"{max_breakdown}) =="
+    )
+    lines.append("")
+    printed_any = False
+    for rank in _TAX_RANKS:
+        before_c = before_by_rank[rank]
+        n_distinct = len(before_c)
+        if n_distinct == 0:
+            continue
+        printed_any = True
+        after_c = after_by_rank[rank]
+        names = sorted(before_c, key=lambda n: (-before_c[n], n))
+        if n_distinct > max_breakdown:
+            names = names[:max_breakdown]
+            label = (
+                f"{rank} ({n_distinct} distinct, top {max_breakdown} by "
+                f"member count shown):"
+            )
+        else:
+            label = f"{rank} ({n_distinct} distinct):"
+        lines.append(label)
+        name_w = max(max(len(n) for n in names), len("name"))
+        sub_header = f"  {'name':<{name_w}}  {'before':>7}  {'after':>7}"
+        lines.append(sub_header)
+        lines.append("  " + "-" * (len(sub_header) - 2))
+        for n in names:
+            lines.append(
+                f"  {n:<{name_w}}  {before_c[n]:>7}  {after_c.get(n, 0):>7}"
+            )
+        lines.append("")
+    if not printed_any:
+        lines.append("(no taxonomy available at any rank)")
+        lines.append("")
+
+    path.write_text("\n".join(lines).rstrip() + "\n")
+
 
 def write_all_reports(
     result: RunResult,

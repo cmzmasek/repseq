@@ -27,7 +27,10 @@ def _cds(product, sequence, *, protein_id="P_x", hmm_hits=None):
     return p
 
 
-def _hit(target, passing=True, dom_evalue=1e-30, hmm_len=300, ali_span=280):
+def _hit(target, passing=True, dom_evalue=1e-30, hmm_len=300, ali_span=280,
+         ali_from=1, ali_to=None):
+    if ali_to is None:
+        ali_to = ali_from + ali_span - 1
     return {
         "target": target,
         "passing": passing,
@@ -35,6 +38,8 @@ def _hit(target, passing=True, dom_evalue=1e-30, hmm_len=300, ali_span=280):
         "dom_score": 200.0,
         "hmm_len": hmm_len,
         "ali_span": ali_span,
+        "ali_from": ali_from,
+        "ali_to": ali_to,
     }
 
 
@@ -70,26 +75,54 @@ def test_hmm_gate_rejects_when_no_cds_passes():
     assert marker is None
     assert failure.reason == "hmm_failed"
     assert failure.marker_name == "L"
-    assert "RdRP_4" in failure.failed_hmms
+    assert "RdRP_4" in failure.failed_tokens
 
 
-def test_hmm_gate_requires_all_hmms_for_multi_domain():
-    """Multi-HMM list is AND: every HMM must hit the same CDS."""
+def test_multidomain_token_requires_all_hmms_on_same_cds():
+    """v0.14.0 multidomain token semantic: 'A--B' requires a SINGLE CDS
+    with passing hits to both HMMs in C-to-N order (A C-terminal to B).
+    The partial CDS satisfying only one domain must NOT be picked even
+    though it is longer; only the full polyprotein qualifies."""
     proteins = [
-        # Only one of two required HMMs hits — must be rejected.
+        # Only one of two required HMMs hits — does NOT satisfy "A--B".
         _cds("glycoprotein", "M" * 1000, protein_id="gly_partial",
-             hmm_hits=[_hit("Bunya_G1", passing=True)]),
-        # Both required HMMs hit — should be chosen.
+             hmm_hits=[_hit("Bunya_G1", passing=True, ali_from=500, ali_to=800)]),
+        # Both HMMs hit in correct C-to-N order — does satisfy "A--B".
         _cds("glycoprotein", "M" * 800, protein_id="gly_full",
+             hmm_hits=[
+                 # Bunya_G2 N-terminal (positions 1-300).
+                 _hit("Bunya_G2", passing=True, ali_from=1, ali_to=300),
+                 # Bunya_G1 C-terminal (positions 500-800) → strictly after G2.
+                 _hit("Bunya_G1", passing=True, ali_from=500, ali_to=800),
+             ]),
+    ]
+    spec = [{"name": "M", "aliases": ["glycoprotein"], "hmms": ["Bunya_G1--Bunya_G2"]}]
+    marker, failure = select_marker_protein(proteins, spec, hmm_active=True)
+    assert failure is None
+    assert marker["protein_id"] == "gly_full"
+
+
+def test_separate_hmm_tokens_are_or_semantic_in_marker_selection():
+    """v0.14.0 hard cutover: ``hmms: ['A', 'B']`` is TWO separate tokens,
+    not the v0.13.0 list-AND. For marker selection, the longest CDS
+    satisfying ANY token is chosen — so a CDS hitting only A is still
+    a satisfying CDS for the marker (different intent from the
+    multidomain token form 'A--B')."""
+    proteins = [
+        _cds("glycoprotein", "M" * 1500, protein_id="gly_A_only",
+             hmm_hits=[_hit("Bunya_G1", passing=True)]),
+        _cds("glycoprotein", "M" * 800, protein_id="gly_AB",
              hmm_hits=[
                  _hit("Bunya_G1", passing=True),
                  _hit("Bunya_G2", passing=True),
              ]),
     ]
-    spec = [{"name": "M", "aliases": ["glycoprotein"], "hmms": ["Bunya_G1", "Bunya_G2"]}]
+    spec = [{"name": "M", "hmms": ["Bunya_G1", "Bunya_G2"]}]
     marker, failure = select_marker_protein(proteins, spec, hmm_active=True)
     assert failure is None
-    assert marker["protein_id"] == "gly_full"
+    # gly_A_only satisfies the 'Bunya_G1' token. gly_AB satisfies both.
+    # Longest satisfying CDS wins → gly_A_only (1500 > 800).
+    assert marker["protein_id"] == "gly_A_only"
 
 
 def test_hmm_gate_inactive_falls_back_to_alias():
@@ -152,11 +185,23 @@ def test_mixed_specs_hmm_fails_alias_only_succeeds():
 def test_format_failure_reason_renders_hmm_details():
     f = MarkerFailure(
         reason="hmm_failed", marker_name="L",
-        failed_hmms=["RdRP_4"], best_evalue=0.01,
+        failed_tokens=["RdRP_4"], best_evalue=0.01,
     )
     out = _format_failure_reason(f)
     assert out.startswith("hmm_failed:L:RdRP_4")
     assert "E=" in out
+
+
+def test_format_failure_reason_renders_multidomain_token():
+    """Multidomain tokens are rendered intact (the '--' separator is
+    preserved) so the _qc_removed.tsv reason shows the exact token
+    string the user configured."""
+    f = MarkerFailure(
+        reason="hmm_failed", marker_name="M",
+        failed_tokens=["Bunya_G1--Bunya_G2"], best_evalue=None,
+    )
+    out = _format_failure_reason(f)
+    assert out == "hmm_failed:M:Bunya_G1--Bunya_G2"
 
 
 def test_format_failure_reason_non_hmm_uses_legacy_string():

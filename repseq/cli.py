@@ -14,7 +14,7 @@ from .config import load_config, validate_config, get_virus_config
 from .io.fasta import read_fasta
 from .models import SequenceSource
 from .models import RunResult
-from .output.report import write_all_reports
+from .output.report import write_all_reports, write_taxonomic_report
 from .output.writer import write_results
 from .clustering.marker import populate_protein_sequences
 from .qc.pipeline import remove_duplicates, run_qc
@@ -337,20 +337,278 @@ def _run_hmm_scan(sequences, cfg, ncbi) -> None:
     }
 
 
-def _setup_protein_alphabet(sequences, cfg, qc_report, ncbi):
-    """When clustering.alphabet_for_clustering=protein, ensure CDS proteins
-    are fetched, run the HMM scan (if configured), and set
-    seq.protein_sequence on each non-segmented sequence.
+def _run_hmm_qc(sequences, cfg, qc_report, ncbi):
+    """HMM-based QC step: verify each segment/sequence carries the expected
+    marker proteins by HMM identity, regardless of clustering alphabet.
 
-    Triggers a one-shot GenBank CDS fetch if QC didn't already do it.
-    Runs hmmscan (soft-fail) over every fetched CDS so marker selection
-    has HMM hits to consult. Drops sequences without a viable marker
-    (counted under ``removed_proteins`` for generic failures or
-    ``removed_hmm_failed`` for HMM-gate failures). No-op when
-    alphabet_for_clustering=nucleotide. For segmented input the
-    protein concat is built later by ``_handle_segmented``; this step
-    still triggers the fetch + HMM scan so the marker selection in
-    that step has data to work with.
+    This is the v0.14.0 promotion of the HMM tier from a marker-selection
+    helper (v0.13.0, only ran when ``alphabet=protein``) to a first-class
+    QC stage that fires whenever ``hmm.enabled=true`` AND any configured
+    marker spec carries ``hmms:[…]``. The purpose is identity verification
+    (protein X is actually protein X, structurally) instead of trusting
+    GenBank ``/product`` strings, which are inconsistent across viral
+    families and submitters.
+
+    Pipeline placement: after ``_populate_genbank_isolate_segment`` and
+    ``_filter_taxonomy_consistent``, before ``_setup_protein_alphabet``.
+    Auto-fetches proteins from GenBank if not already attached.
+
+    Semantic: each ``hmms:`` list element is a TOKEN string ("Name" or
+    "A--B--C" multidomain in C-to-N order). A CDS satisfies a token when
+    every named HMM has a passing hit AND those hits appear in C-to-N
+    order along the protein. A segment passes when, for each token in
+    its spec, at least one CDS in the segment satisfies that token.
+
+    Drops:
+        - Segmented: an isolate is dropped when ANY of its segments
+          fails its spec. Counter: ``removed_hmm_failed`` (one bump per
+          dropped isolate); ``removed_hmm_by_marker`` breaks down by
+          "{segment}:{first_failing_token}".
+        - Non-segmented: a sequence is dropped when its spec has no
+          satisfying CDS. Same counter, key = spec name.
+
+    Soft-fails: missing ``hmmscan`` binary, unreadable DB, or
+    ``hmm.enabled=false`` all bypass the step with a single stderr line.
+    Marker-selection downstream falls back to alias/longest.
+    """
+    if not _any_marker_has_hmms(cfg):
+        return sequences
+    if not (cfg.get("hmm", {}) or {}).get("enabled", True):
+        return sequences
+
+    # Auto-fetch CDS proteins if QC didn't already do it.
+    needs_proteins = any(seq.proteins is None for seq in sequences)
+    if needs_proteins:
+        if ncbi is None:
+            click.echo(
+                "[hmm] HMM QC requires GenBank CDS fetch, but --no-resolve "
+                "was set. HMM gate skipped — set hmm.enabled=false to "
+                "silence this warning, or drop --no-resolve.",
+                err=True,
+            )
+            return sequences
+        click.echo("Fetching CDS proteins for HMM-based QC ...")
+        attach_proteins(sequences, ncbi)
+
+    # Run scan + stash runtime context on cfg.
+    _run_hmm_scan(sequences, cfg, ncbi)
+
+    hmm_rt = cfg.get("_hmm_runtime", {}) or {}
+    if not hmm_rt.get("active"):
+        # Scan soft-failed (already printed a warning in _run_hmm_scan).
+        return sequences
+
+    segmented = bool(cfg.get("segmented", {}).get("enabled"))
+    if segmented:
+        return _run_hmm_qc_segmented(sequences, cfg, qc_report)
+    return _run_hmm_qc_non_segmented(sequences, cfg, qc_report)
+
+
+def _resolve_segment_hmms(
+    seg_name: str,
+    segment_markers: dict,
+    cluster_protein_per_seg: dict,
+) -> tuple[Optional[str], list[str]]:
+    """Return ``(spec_name, token_list)`` for the segment's HMM gate.
+
+    Lookup order: ``segment_markers[seg]`` first (the v0.13+ HMM-aware
+    form), then per-segment ``cluster_protein[seg]`` (legacy: any dict-
+    form entry's ``hmms`` are pulled into a flat token list). Returns
+    ``(name, [])`` when no HMM gate is configured for the segment —
+    that segment isn't QC'd by HMMs (alias-only / longest fallback in
+    marker selection).
+    """
+    if seg_name in segment_markers:
+        spec = segment_markers[seg_name] or {}
+        return seg_name, list(spec.get("hmms") or [])
+    if seg_name in cluster_protein_per_seg:
+        entries = cluster_protein_per_seg[seg_name] or []
+        tokens: list[str] = []
+        spec_name: Optional[str] = None
+        for entry in entries:
+            if isinstance(entry, dict):
+                spec_name = spec_name or entry.get("name") or seg_name
+                tokens.extend(entry.get("hmms") or [])
+        return spec_name, tokens
+    return None, []
+
+
+def _segment_fails_hmm_gate(seq, tokens: list[str]) -> Optional[str]:
+    """Return the first token unsatisfied by any CDS in this segment, or None."""
+    from .hmm.runner import cds_satisfies_token, parse_hmm_token
+
+    proteins = seq.proteins or []
+    for token in tokens:
+        try:
+            parsed = parse_hmm_token(token)
+        except ValueError:
+            return token
+        if not any(
+            cds_satisfies_token(p.get("hmm_hits") or [], parsed) is not None
+            for p in proteins
+        ):
+            return token
+    return None
+
+
+def _run_hmm_qc_segmented(sequences, cfg, qc_report):
+    """Per-isolate HMM QC for segmented runs.
+
+    Group by ``isolate_id``; for each isolate, check each segment's spec.
+    If any segment fails its spec, drop the whole isolate (every segment
+    seq is recorded in _qc_removed.tsv — the one that actually failed
+    gets the structured reason, siblings get a sibling-dropped reason
+    referencing the primary failure).
+
+    Sequences without an ``isolate_id`` (UniProt input, missing GenBank
+    qualifier, --no-resolve survivors) are skipped here — the
+    completeness step's regex fallback may still group them, and
+    ``build_concatenated_sequences`` applies the gate again as a
+    backstop for that path.
+    """
+    virus_cfg = get_virus_config(cfg) or {}
+    segment_markers = virus_cfg.get("segment_markers") or {}
+    cluster_protein_per_seg = virus_cfg.get("cluster_protein") or {}
+
+    by_isolate: dict[str, list] = {}
+    for seq in sequences:
+        if seq.isolate_id:
+            by_isolate.setdefault(seq.isolate_id, []).append(seq)
+
+    # Map isolate_id -> list of (segment, failed_token) tuples in input order.
+    failures_by_isolate: dict[str, list[tuple[str, str]]] = {}
+    for isolate_id, segs in by_isolate.items():
+        for seq in segs:
+            seg_name = seq.segment
+            if not seg_name:
+                continue
+            _, tokens = _resolve_segment_hmms(
+                seg_name, segment_markers, cluster_protein_per_seg
+            )
+            if not tokens:
+                continue  # no HMM gate for this segment
+            failed_token = _segment_fails_hmm_gate(seq, tokens)
+            if failed_token is not None:
+                failures_by_isolate.setdefault(isolate_id, []).append(
+                    (seg_name, failed_token)
+                )
+
+    if not failures_by_isolate:
+        return sequences
+
+    failing_ids = set(failures_by_isolate.keys())
+    kept: list = []
+    n_dropped_segs = 0
+    for seq in sequences:
+        if seq.isolate_id and seq.isolate_id in failing_ids:
+            failures = failures_by_isolate[seq.isolate_id]
+            own = next(((s, t) for (s, t) in failures if s == seq.segment), None)
+            if own is not None:
+                reason = f"hmm_failed:{own[0]}:{own[1]}"
+            else:
+                primary = failures[0]
+                reason = (
+                    f"hmm_failed_sibling:{primary[0]}:{primary[1]}"
+                )
+            seq.qc_passed = False
+            seq.qc_fail_reason = reason
+            qc_report.add_removed(seq.id, reason)
+            n_dropped_segs += 1
+        else:
+            kept.append(seq)
+
+    # Counter bumps: one per dropped isolate; per-marker key is
+    # "{segment}:{first_failing_token}" so the breakdown reflects which
+    # combination is responsible (e.g. "L:RdRP_4--Mononeg_RNA_pol").
+    for isolate_id, failures in failures_by_isolate.items():
+        qc_report.removed_hmm_failed += 1
+        first_seg, first_token = failures[0]
+        key = f"{first_seg}:{first_token}"
+        qc_report.removed_hmm_by_marker[key] = (
+            qc_report.removed_hmm_by_marker.get(key, 0) + 1
+        )
+
+    top = ", ".join(
+        f"{k}={v}"
+        for k, v in sorted(
+            qc_report.removed_hmm_by_marker.items(),
+            key=lambda kv: -kv[1],
+        )[:5]
+    )
+    click.echo(
+        f"  HMM QC: dropped {len(failing_ids)} isolate(s) "
+        f"({n_dropped_segs} segment-records). Top reasons: {top}"
+    )
+    return kept
+
+
+def _run_hmm_qc_non_segmented(sequences, cfg, qc_report):
+    """Per-sequence HMM QC for non-segmented runs.
+
+    Each dict-form spec in ``clustering.cluster_protein`` that defines
+    ``hmms:`` becomes a required marker. The sequence passes when every
+    such spec has at least one CDS in the sequence satisfying any of its
+    tokens. Alias-only specs are ignored for QC (no HMM gate to enforce).
+    Specs with no ``hmms`` at all don't trigger this step.
+    """
+    cluster_protein = cfg.get("clustering", {}).get("cluster_protein", []) or []
+    hmm_specs: list[tuple[str, list[str]]] = []
+    for entry in cluster_protein:
+        if not isinstance(entry, dict):
+            continue
+        toks = list(entry.get("hmms") or [])
+        if toks:
+            hmm_specs.append((entry.get("name") or ",".join(toks), toks))
+    if not hmm_specs:
+        return sequences
+
+    kept: list = []
+    for seq in sequences:
+        failed_spec: Optional[tuple[str, str]] = None
+        for spec_name, tokens in hmm_specs:
+            failed_token = _segment_fails_hmm_gate(seq, tokens)
+            if failed_token is not None:
+                failed_spec = (spec_name, failed_token)
+                break
+        if failed_spec is None:
+            kept.append(seq)
+            continue
+        spec_name, failed_token = failed_spec
+        reason = f"hmm_failed:{spec_name}:{failed_token}"
+        seq.qc_passed = False
+        seq.qc_fail_reason = reason
+        qc_report.add_removed(seq.id, reason)
+        qc_report.removed_hmm_failed += 1
+        qc_report.removed_hmm_by_marker[spec_name] = (
+            qc_report.removed_hmm_by_marker.get(spec_name, 0) + 1
+        )
+
+    n_dropped = len(sequences) - len(kept)
+    if n_dropped:
+        top = ", ".join(
+            f"{k}={v}"
+            for k, v in sorted(
+                qc_report.removed_hmm_by_marker.items(),
+                key=lambda kv: -kv[1],
+            )[:5]
+        )
+        click.echo(f"  HMM QC: dropped {n_dropped} sequence(s). Top reasons: {top}")
+    return kept
+
+
+def _setup_protein_alphabet(sequences, cfg, qc_report, ncbi):
+    """When clustering.alphabet_for_clustering=protein, set
+    seq.protein_sequence on each non-segmented sequence to its marker CDS.
+
+    In v0.14.0 the HMM scan + QC drops have already happened upstream in
+    ``_run_hmm_qc``, so this step is now pure marker selection: it picks
+    the longest CDS that satisfies any HMM token in the spec (HMM tier
+    active), or the legacy alias/longest CDS otherwise. No-op when
+    ``alphabet_for_clustering=nucleotide`` — the HMM-QC tier already
+    fired upstream regardless of alphabet.
+
+    Triggers a CDS fetch if QC didn't already do it (only needed when
+    no HMM specs configured, so ``_run_hmm_qc`` didn't pre-fetch).
     """
     alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
     if alphabet == "nucleotide":
@@ -368,12 +626,8 @@ def _setup_protein_alphabet(sequences, cfg, qc_report, ncbi):
             sys.exit(1)
         click.echo("Fetching CDS proteins for protein-alphabet clustering ...")
         attach_proteins(sequences, ncbi)
-    # HMM scan annotates every CDS with hmm_hits and stashes runtime
-    # context for the marker selector to consume.
-    _run_hmm_scan(sequences, cfg, ncbi)
     # Non-segmented: pick the marker per-sequence now. Segmented isolates
-    # get a per-isolate concat in _handle_segmented (each segment contributes
-    # its own marker), so we leave them alone here.
+    # get a per-isolate concat in _handle_segmented.
     if not cfg.get("segmented", {}).get("enabled"):
         cluster_protein = cfg.get("clustering", {}).get("cluster_protein", []) or []
         hmm_rt = cfg.get("_hmm_runtime", {}) or {}
@@ -572,7 +826,35 @@ def _handle_segmented(sequences, cfg, qc_report):
         return sequences, None, None
     sequences = _check_strain_collisions(sequences, cfg, qc_report)
     click.echo("Applying segmented virus completeness filter ...")
-    kept, complete_isolates = filter_complete_isolates(sequences, virus_cfg, qc_report)
+    seg_cfg = cfg.get("segmented", {}) or {}
+    extra_action = seg_cfg.get("extra_segments_action", "warn")
+    kept, complete_isolates, extras_by_isolate = filter_complete_isolates(
+        sequences, virus_cfg, qc_report, extra_segments_action=extra_action
+    )
+    if extras_by_isolate:
+        click.echo(
+            f"  Extra-segments check: found {len(extras_by_isolate)} isolate(s) "
+            f"with segments outside the configured set "
+            f"({', '.join(virus_cfg['segments'])}).",
+            err=True,
+        )
+        for iso, extras in sorted(extras_by_isolate.items()):
+            click.echo(
+                f"    isolate '{iso}': extras = {', '.join(extras)}", err=True
+            )
+        if extra_action == "drop":
+            click.echo(
+                f"    Action: drop ({len(extras_by_isolate)} isolate(s) "
+                f"removed).",
+                err=True,
+            )
+        else:
+            click.echo(
+                "    Action: warn (no isolates dropped; only the expected "
+                "segments enter the concat). Set "
+                "segmented.extra_segments_action: drop to remove them.",
+                err=True,
+            )
     segment_lengths = virus_cfg.get("segment_lengths")
     if segment_lengths:
         complete_isolates = segment_length_filter(
@@ -675,7 +957,7 @@ def _handle_segmented(sequences, cfg, qc_report):
 
 
 def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names,
-                  plot: bool = False, phylo: bool = False):
+                  pre_clustering_sequences=None, plot: bool = False, phylo: bool = False):
     out_files = write_results(result, cfg, complete_isolates, segment_names)
     if plot:
         out_dir = Path(cfg["output"]["dir"])
@@ -709,6 +991,25 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
         result, qc_report, cfg, list(input_paths), out_files,
         complete_isolates=complete_isolates,
     )
+    # Taxonomic diversity report — distinct taxa per rank before/after
+    # clustering, plus a per-taxon breakdown for low-diversity ranks. The
+    # "before" pool is the post-QC sequence list fed to the mode (CONCAT
+    # isolates in segmented mode). Soft-fail so a render bug never voids
+    # a real selection.
+    if pre_clustering_sequences is not None:
+        try:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            tax_path = out_dir / f"{prefix}_taxonomic_report.txt"
+            write_taxonomic_report(
+                pre_clustering_sequences,
+                result.representatives,
+                segmented=bool(complete_isolates),
+                path=tax_path,
+            )
+            out_files.append(tax_path)
+        except Exception as exc:
+            click.echo(f"[taxonomic report skipped] {exc}", err=True)
     # Methods-section starter — written after every successful run so
     # a bench scientist can copy it into a paper. Soft-fail (one stderr
     # line) so a render bug never voids a real selection.
@@ -877,10 +1178,11 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _load_sequences(input_paths, source_override)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
-    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
 
@@ -889,7 +1191,7 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, plot=plot, phylo=phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -916,10 +1218,11 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _load_sequences(input_paths, source_override)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
-    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
 
@@ -928,7 +1231,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, plot=plot, phylo=phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -959,10 +1262,11 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _load_sequences(input_paths, source_override)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
-    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
 
@@ -971,7 +1275,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, plot=plot, phylo=phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -996,10 +1300,11 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _load_sequences(input_paths, source_override)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
-    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
 
@@ -1008,7 +1313,7 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, plot=plot, phylo=phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -1035,10 +1340,11 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _load_sequences(input_paths, source_override)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
-    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
 
@@ -1047,7 +1353,7 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, plot=plot, phylo=phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -1072,10 +1378,11 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _load_sequences(input_paths, source_override)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
-    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
 
@@ -1084,7 +1391,7 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, plot=plot, phylo=phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -1116,10 +1423,11 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _load_sequences(input_paths, source_override)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
-    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
 
@@ -1133,7 +1441,7 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, plot=plot, phylo=phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -1164,10 +1472,11 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _load_sequences(input_paths, source_override)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
-    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
+    sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
 
@@ -1179,7 +1488,7 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, plot=plot, phylo=phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo)
 
 
 # ---------------------------------------------------------------------------

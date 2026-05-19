@@ -654,3 +654,22 @@ def test_validate_config_accepts_user_hmm_database_path():
     cfg = load_config(None)
     cfg["hmm"]["database"] = "/path/to/my.hmm"
     assert validate_config(cfg) == []
+
+
+def test_validate_config_accepts_extra_segments_action_default():
+    cfg = load_config(None)
+    assert validate_config(cfg) == []
+    assert cfg["segmented"]["extra_segments_action"] == "warn"
+
+
+def test_validate_config_accepts_extra_segments_action_drop():
+    cfg = load_config(None)
+    cfg["segmented"]["extra_segments_action"] = "drop"
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_unknown_extra_segments_action():
+    cfg = load_config(None)
+    cfg["segmented"]["extra_segments_action"] = "ignore"
+    errs = validate_config(cfg)
+    assert any("extra_segments_action" in e for e in errs)

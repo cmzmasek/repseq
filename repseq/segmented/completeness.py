@@ -203,12 +203,30 @@ def filter_complete_isolates(
     sequences: list[Sequence],
     virus_cfg: dict[str, Any],
     report: QCReport,
-) -> tuple[list[Sequence], dict[str, list[Sequence]]]:
+    extra_segments_action: str = "warn",
+) -> tuple[list[Sequence], dict[str, list[Sequence]], dict[str, list[str]]]:
     """Keep only sequences from isolates that have all expected segments.
 
+    ``extra_segments_action`` controls what happens when an isolate's
+    seg_map contains segment names *outside* the expected list (e.g. a
+    fourth segment named "X" for an L/M/S virus, or a non-canonical
+    identifier that ``identify_segment`` returned unchanged). On
+    ``"warn"`` (default) the isolate keeps its expected segments and
+    extras are silently pruned from the concat, but the detection is
+    surfaced via the returned ``extras_by_isolate`` dict so the caller
+    can emit a warning. On ``"drop"`` the whole isolate is removed,
+    every segment lands in ``_qc_removed.tsv`` with reason
+    ``extra_segments:<comma-joined extras>``, and
+    ``report.removed_extra_segments`` is bumped (one per dropped
+    isolate; units are isolates, not segments).
+
     Returns:
-        (kept_sequences, isolate_map)
-        where isolate_map maps isolate_id -> [Sequence, ...] in segment order.
+        (kept_sequences, isolate_map, extras_by_isolate)
+        where isolate_map maps isolate_id -> [Sequence, ...] in segment
+        order and ``extras_by_isolate`` maps isolate_id -> sorted list of
+        the extra (non-expected) segment names that were detected. The
+        latter is populated regardless of action so the caller can warn
+        even when no records were dropped.
     """
     expected_segments: list[str] = virus_cfg["segments"]
     isolate_regex: str = virus_cfg["isolate_regex"]
@@ -250,11 +268,37 @@ def filter_complete_isolates(
         else:
             isolate_map[isolate_key][seg] = seq
 
+    # Detect isolates whose seg_map carries names outside the expected
+    # list (e.g. a fourth segment, or a non-canonical identifier that
+    # identify_segment returned unchanged). This runs BEFORE the
+    # completeness check so the "drop" action gets to remove the
+    # isolate before incomplete_isolate accounting kicks in.
+    expected_set = set(expected_segments)
+    extras_by_isolate: dict[str, list[str]] = {}
+    for isolate_key, seg_map in isolate_map.items():
+        extras = sorted(set(seg_map.keys()) - expected_set)
+        if extras:
+            extras_by_isolate[isolate_key] = extras
+
+    dropped_for_extras: set[str] = set()
+    if extras_by_isolate and extra_segments_action == "drop":
+        for isolate_key, extras in extras_by_isolate.items():
+            seg_map = isolate_map[isolate_key]
+            reason = f"extra_segments:{','.join(extras)}"
+            for seq in seg_map.values():
+                seq.qc_passed = False
+                seq.qc_fail_reason = reason
+                report.add_removed(seq.accession or seq.id, reason)
+            report.removed_extra_segments += 1
+            dropped_for_extras.add(isolate_key)
+
     # Keep only complete isolates
     kept_sequences: list[Sequence] = []
     complete_isolates: dict[str, list[Sequence]] = {}
 
     for isolate_key, seg_map in isolate_map.items():
+        if isolate_key in dropped_for_extras:
+            continue
         present = set(seg_map.keys())
         expected = set(expected_segments)
         if expected.issubset(present):
@@ -278,7 +322,7 @@ def filter_complete_isolates(
         report.removed_incomplete_isolates += 1
         report.add_removed(seq.id, reason)
 
-    return kept_sequences, complete_isolates
+    return kept_sequences, complete_isolates, extras_by_isolate
 
 
 # ---------------------------------------------------------------------------

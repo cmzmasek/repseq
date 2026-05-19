@@ -213,14 +213,23 @@ def test_render_summary_omits_diversity_curve_sentence_when_disabled(make_seq, t
 
 
 def test_render_summary_mentions_hmm_tier_when_active(make_seq, tmp_path):
-    """When _hmm_runtime.active is True, the selection section names the
-    database, cites HMMER, and lists the cutoffs in effect. Per the
-    summary-renderer-drift memory."""
+    """When _hmm_runtime.active is True, the selection section references
+    the upstream HMM-QC step and names the database / citation. When
+    HMM drops happened, the QC section has a dedicated bullet listing
+    the cutoffs in effect. Per the summary-renderer-drift memory."""
     cfg = _base_cfg(tmp_path)
     cfg["_hmm_runtime"] = {"active": True, "ga_cutoffs": {}, "hmm_cfg": cfg.get("hmm", {})}
-    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    qc = _qc()
+    qc.removed_hmm_failed = 5
+    qc.removed_hmm_by_marker = {"L:RdRP_4": 3, "M:Bunya_G1--Bunya_G2": 2}
+    md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"])
+    # Selection section references the upstream QC step.
     assert "HMMER hmmscan" in md
     assert "bundled viral-core profile set" in md
+    assert "pre-filtered by an HMM-based identity QC step" in md
+    # QC section's HMM bullet lists drop count + coverage cutoff.
+    assert "**5** isolates were dropped by the HMM-based identity QC" in md or \
+           "**5** sequences were dropped by the HMM-based identity QC" in md
     # Coverage cutoff rendered as a percent (default 0.5 → 50%).
     assert "≥ 50%" in md or "50 %" in md
 
@@ -232,6 +241,83 @@ def test_render_summary_omits_hmm_sentence_when_not_active(make_seq, tmp_path):
     md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
     assert "HMMER hmmscan" not in md
     assert "bundled viral-core" not in md
+
+
+def test_render_summary_mentions_extra_segments_when_dropped(make_seq, tmp_path):
+    """When the extra-segments check drops any isolates, the QC section
+    must surface the count (in isolates) and name the config knob the
+    user can flip back to 'warn'."""
+    cfg = _base_cfg(tmp_path)
+    qc = _qc()
+    qc.removed_extra_segments = 7
+    md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"])
+    assert "**7** isolate(s) were dropped by the extra-segments check" in md
+    assert "segmented.extra_segments_action: drop" in md
+    assert "extra_segments:<extras>" in md
+
+
+def test_render_summary_omits_extra_segments_when_counter_zero(make_seq, tmp_path):
+    """No drops → no sentence. Otherwise every non-segmented run's QC
+    section gains an irrelevant bullet."""
+    cfg = _base_cfg(tmp_path)
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "extra-segments check" not in md
+
+
+def test_render_summary_points_to_taxonomic_report(make_seq, tmp_path):
+    """The selection section must point the reader at the new
+    taxonomic-diversity report file."""
+    cfg = _base_cfg(tmp_path)
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "{prefix}_taxonomic_report.txt" in md
+    assert "Taxonomic diversity at each rank before and after clustering" in md
+
+
+def test_render_summary_protein_annotation_segmented_uses_segment_wording(make_seq, tmp_path):
+    """In segmented mode the protein-annotation drop is per NCBI segment
+    record, compared against expected_proteins_per_segment. It must appear
+    as its own sentence (not lumped into the 'Initial QC' list) and name
+    the per-segment config key."""
+    cfg = _base_cfg(tmp_path)
+    cfg["segmented"] = {
+        "enabled": True,
+        "virus": "hantaviridae",
+        "viruses": {
+            "hantaviridae": {
+                "expected_segments": 3,
+                "segments": ["S", "M", "L"],
+                "expected_proteins_per_segment": {"S": [1, 2], "M": 1, "L": 1},
+            },
+        },
+    }
+    qc = _qc()
+    qc.removed_proteins = 174
+    md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"])
+    assert "**174** segment record(s) were dropped by the protein-annotation check" in md
+    assert "segmented.viruses.hantaviridae.expected_proteins_per_segment" in md
+    assert "protein_count_mismatch:segment=<seg>" in md
+    # Must NOT be in the old "Initial QC" list wording.
+    assert "failing the protein-annotation check" not in md
+
+
+def test_render_summary_protein_annotation_non_segmented_uses_min_proteins(make_seq, tmp_path):
+    """Non-segmented run with a global min_proteins floor names the floor
+    and the matching _qc_removed.tsv reason."""
+    cfg = _base_cfg(tmp_path)
+    cfg["qc"]["protein_annotation"] = {"enabled": True, "min_proteins": 2}
+    qc = _qc()
+    qc.removed_proteins = 9
+    md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"])
+    assert "**9** sequence(s) were dropped by the protein-annotation check" in md
+    assert "qc.protein_annotation.min_proteins = 2" in md
+    assert "protein_count_below_min:<n><2" in md
+
+
+def test_render_summary_omits_protein_annotation_when_counter_zero(make_seq, tmp_path):
+    """No protein drops → no sentence anywhere in the QC section."""
+    cfg = _base_cfg(tmp_path)
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "protein-annotation check" not in md
 
 
 def test_render_summary_hmm_software_row_only_when_active(make_seq, tmp_path):
