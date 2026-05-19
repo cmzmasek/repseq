@@ -238,6 +238,20 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
                 f"dropped by the protein-annotation check (see `_qc_removed.tsv` "
                 f"for per-record reasons starting with `protein_count_`)."
             )
+    if qc_report.removed_protein_quality:
+        pq_cfg = (qc_cfg.get("protein_quality") or {})
+        mbf = pq_cfg.get("max_bad_fraction", 0.05)
+        unit = "isolates" if cfg.get("segmented", {}).get("enabled") else "sequences"
+        extra_lines.append(
+            f"**{_fmt_int(qc_report.removed_protein_quality)}** {unit} were "
+            f"dropped by the protein-quality check — a CDS protein carried "
+            f"more than **{mbf:.0%}** ambiguous residues (X/B/Z/J; the "
+            f"amino-acid analogue of the nucleotide ambiguity filter), which "
+            f"fails its segment and drops the whole "
+            f"{'isolate' if unit == 'isolates' else 'sequence'}. Dropped "
+            f"records appear in `_qc_removed.tsv` with reason "
+            f"`protein_quality:...`."
+        )
     if qc_report.removed_length_by_segment:
         per_seg = qc_report.removed_length_by_segment
         # The per-segment counter is in isolates (one bad segment drops the

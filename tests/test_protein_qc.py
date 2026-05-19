@@ -816,3 +816,115 @@ def test_write_isolate_proteins_tsv_skips_when_no_proteins(tmp_path: Path, make_
     wrote = write_isolate_proteins_tsv({"iso1": [s]}, path)
     assert wrote is False
     assert not path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Protein-quality QC (qc.protein_quality) — cli._run_protein_quality_qc
+# ---------------------------------------------------------------------------
+
+from repseq.cli import _protein_bad_fraction, _run_protein_quality_qc
+
+
+def _with_proteins(seq, *aa_strings):
+    seq.proteins = [
+        {"protein_id": f"p{i}", "product": "x",
+         "length": len(a) if a else None, "sequence": a}
+        for i, a in enumerate(aa_strings)
+    ]
+    return seq
+
+
+def _pq_cfg(segmented=False, enabled=True, max_bad_fraction=0.05):
+    return {
+        "qc": {"protein_quality": {"enabled": enabled,
+                                   "max_bad_fraction": max_bad_fraction}},
+        "segmented": {"enabled": segmented},
+    }
+
+
+def test_protein_bad_fraction_counts_xbzj():
+    assert _protein_bad_fraction("MEEPMEEP") == 0.0
+    assert _protein_bad_fraction("XXXXMEEP") == 0.5
+    # U and O are valid residues, not ambiguity codes.
+    assert _protein_bad_fraction("MUEOMEEP") == 0.0
+
+
+def test_protein_bad_fraction_empty_is_fully_bad():
+    assert _protein_bad_fraction(None) == 1.0
+    assert _protein_bad_fraction("") == 1.0
+
+
+def test_protein_quality_non_segmented_drops_noisy_sequence(make_seq):
+    clean = _with_proteins(make_seq("a", "ACGT"), "MEEPMEEPMEEP")
+    bad = _with_proteins(make_seq("b", "ACGT"), "XXXXXXMEEPME")  # 6/12 = 0.5
+    report = QCReport()
+    kept = _run_protein_quality_qc([clean, bad], _pq_cfg(), report, ncbi=object())
+    assert [s.id for s in kept] == ["a"]
+    assert report.removed_protein_quality == 1
+    assert bad.qc_fail_reason.startswith("protein_quality:bad_fraction=")
+
+
+def test_protein_quality_non_segmented_keeps_below_threshold(make_seq):
+    # 1 X in 100 residues = 0.01 < 0.05.
+    seq = _with_proteins(make_seq("a", "ACGT"), "X" + "M" * 99)
+    report = QCReport()
+    kept = _run_protein_quality_qc([seq], _pq_cfg(), report, ncbi=object())
+    assert [s.id for s in kept] == ["a"]
+    assert report.removed_protein_quality == 0
+
+
+def test_protein_quality_empty_translation_drops(make_seq):
+    seq = _with_proteins(make_seq("a", "ACGT"), None)
+    report = QCReport()
+    kept = _run_protein_quality_qc([seq], _pq_cfg(), report, ncbi=object())
+    assert kept == []
+    assert report.removed_protein_quality == 1
+
+
+def test_protein_quality_segmented_drops_whole_isolate(make_seq):
+    # ISO1: clean L, noisy M -> whole isolate dropped.
+    l1 = _with_proteins(make_seq("l1", "ACGT", segment="L", isolate_id="ISO1"), "MEEPMEEP")
+    m1 = _with_proteins(make_seq("m1", "ACGT", segment="M", isolate_id="ISO1"), "ZZZZMEEP")
+    # ISO2: both clean -> kept.
+    l2 = _with_proteins(make_seq("l2", "ACGT", segment="L", isolate_id="ISO2"), "MEEPMEEP")
+    m2 = _with_proteins(make_seq("m2", "ACGT", segment="M", isolate_id="ISO2"), "MEEPMEEP")
+    report = QCReport()
+    kept = _run_protein_quality_qc(
+        [l1, m1, l2, m2], _pq_cfg(segmented=True), report, ncbi=object()
+    )
+    assert sorted(s.id for s in kept) == ["l2", "m2"]
+    assert report.removed_protein_quality == 1  # one isolate
+    # The actually-noisy M gets the own reason; the clean L gets a sibling reason.
+    assert m1.qc_fail_reason.startswith("protein_quality:M:bad_fraction=")
+    assert l1.qc_fail_reason.startswith("protein_quality_sibling:M:")
+
+
+def test_protein_quality_disabled_is_noop(make_seq):
+    bad = _with_proteins(make_seq("b", "ACGT"), "XXXXXXMEEPME")
+    report = QCReport()
+    kept = _run_protein_quality_qc(
+        [bad], _pq_cfg(enabled=False), report, ncbi=object()
+    )
+    assert [s.id for s in kept] == ["b"]
+    assert report.removed_protein_quality == 0
+
+
+def test_protein_quality_skips_when_no_resolve(make_seq):
+    # proteins not fetched (None) + accession + NCBI source -> needs fetch,
+    # but ncbi is None (--no-resolve) -> soft-skip, nothing dropped.
+    seq = make_seq("a", "ACGT", accession="NC_1.1", source=SequenceSource.NCBI)
+    seq.proteins = None
+    report = QCReport()
+    kept = _run_protein_quality_qc([seq], _pq_cfg(), report, ncbi=None)
+    assert [s.id for s in kept] == ["a"]
+    assert report.removed_protein_quality == 0
+
+
+def test_protein_quality_uniprot_not_assessed(make_seq):
+    # UniProt seq has proteins=None and is not gated (no CDS to assess).
+    up = make_seq("u", "MEEP", source=SequenceSource.UNIPROT, accession="P1")
+    up.proteins = None
+    report = QCReport()
+    kept = _run_protein_quality_qc([up], _pq_cfg(), report, ncbi=object())
+    assert [s.id for s in kept] == ["u"]
+    assert report.removed_protein_quality == 0

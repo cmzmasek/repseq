@@ -596,6 +596,184 @@ def _run_hmm_qc_non_segmented(sequences, cfg, qc_report):
     return kept
 
 
+_PROTEIN_BAD_CHARS = frozenset("XBZJ")
+
+
+def _protein_bad_fraction(aa: Optional[str]) -> float:
+    """Fraction of ambiguous residues (X/B/Z/J) in a protein translation.
+
+    Uses the same protein-ambiguity set as ``Sequence.ambiguous_fraction``
+    (U/O are definite residues, not ambiguity codes). An empty or missing
+    translation returns 1.0 — a CDS feature with no usable ``/translation``
+    is not a real protein and should be treated as fully bad.
+    """
+    if not aa:
+        return 1.0
+    s = aa.upper()
+    return sum(1 for c in s if c in _PROTEIN_BAD_CHARS) / len(s)
+
+
+def _segment_worst_bad_protein(seq, threshold: float) -> Optional[float]:
+    """Return the worst (highest) over-threshold bad-fraction among the
+    segment's CDS proteins, or ``None`` if every protein is clean.
+
+    Sequences whose ``proteins`` is ``None`` (never fetched — UniProt
+    input, no accession, --no-resolve) are not assessable and return
+    ``None`` (treated as clean here; they fall through to later steps).
+    """
+    if seq.proteins is None:
+        return None
+    worst: Optional[float] = None
+    for prot in seq.proteins:
+        frac = _protein_bad_fraction(prot.get("sequence"))
+        if frac > threshold:
+            worst = frac if worst is None else max(worst, frac)
+    return worst
+
+
+def _run_protein_quality_qc(sequences, cfg, qc_report, ncbi):
+    """Protein-quality QC: drop proteins whose translation is too noisy.
+
+    The amino-acid analogue of the nucleotide ambiguous-character filter.
+    The presence-only ``protein_annotation`` count check (and segmented
+    completeness) verify that the *expected number* of proteins exists,
+    but never inspect the residues — a segment carrying a translation
+    filled with ambiguous residues (X/B/Z/J) would pass. This step closes
+    that gap: a CDS protein whose ambiguous-residue fraction exceeds
+    ``qc.protein_quality.max_bad_fraction`` is considered missing, which
+    fails its segment and drops the whole isolate (segmented) or the
+    sequence (non-segmented).
+
+    Pipeline placement: after ``_filter_taxonomy_consistent``, immediately
+    before ``_run_hmm_qc`` (so a noisy translation is gone before the HMM
+    scan, which may not be enabled). When enabled it force-fetches GenBank
+    CDS translations if no earlier step did; soft-skips with a stderr line
+    under ``--no-resolve``.
+    """
+    pq_cfg = (cfg.get("qc", {}) or {}).get("protein_quality", {}) or {}
+    if not pq_cfg.get("enabled", False):
+        return sequences
+    threshold = pq_cfg.get("max_bad_fraction", 0.05)
+
+    needs_proteins = any(
+        seq.proteins is None
+        and seq.accession
+        and seq.source != SequenceSource.UNIPROT
+        for seq in sequences
+    )
+    if needs_proteins:
+        if ncbi is None:
+            click.echo(
+                "[protein-quality] requires GenBank CDS translations, but "
+                "--no-resolve was set. Protein-quality QC skipped — set "
+                "qc.protein_quality.enabled=false to silence this warning, "
+                "or drop --no-resolve.",
+                err=True,
+            )
+            return sequences
+        click.echo("Fetching CDS proteins for protein-quality QC ...")
+        attach_proteins(sequences, ncbi)
+
+    segmented = bool(cfg.get("segmented", {}).get("enabled"))
+    if segmented:
+        return _run_protein_quality_qc_segmented(
+            sequences, qc_report, threshold
+        )
+    return _run_protein_quality_qc_non_segmented(
+        sequences, qc_report, threshold
+    )
+
+
+def _run_protein_quality_qc_segmented(sequences, qc_report, threshold):
+    """Per-isolate protein-quality QC for segmented runs.
+
+    Group by ``isolate_id``; if any segment carries an over-threshold
+    protein, drop the whole isolate. The failing segment(s) get a
+    structured ``protein_quality:<seg>:bad_fraction=<f>>thr`` reason; the
+    isolate's other segments get a ``protein_quality_sibling:<seg>:...``
+    reason referencing the primary failure. Sequences without an
+    ``isolate_id`` are skipped (the completeness regex fallback may still
+    group them).
+    """
+    by_isolate: dict[str, list] = {}
+    for seq in sequences:
+        if seq.isolate_id:
+            by_isolate.setdefault(seq.isolate_id, []).append(seq)
+
+    failures_by_isolate: dict[str, list[tuple[str, float]]] = {}
+    for isolate_id, segs in by_isolate.items():
+        for seq in segs:
+            if not seq.segment:
+                continue
+            worst = _segment_worst_bad_protein(seq, threshold)
+            if worst is not None:
+                failures_by_isolate.setdefault(isolate_id, []).append(
+                    (seq.segment, worst)
+                )
+
+    if not failures_by_isolate:
+        return sequences
+
+    failing_ids = set(failures_by_isolate)
+    kept: list = []
+    n_dropped_segs = 0
+    for seq in sequences:
+        if seq.isolate_id and seq.isolate_id in failing_ids:
+            failures = failures_by_isolate[seq.isolate_id]
+            own = next(((s, f) for (s, f) in failures if s == seq.segment), None)
+            if own is not None:
+                reason = (
+                    f"protein_quality:{own[0]}:bad_fraction={own[1]:.3f}>{threshold}"
+                )
+            else:
+                primary = failures[0]
+                reason = (
+                    f"protein_quality_sibling:{primary[0]}:"
+                    f"bad_fraction={primary[1]:.3f}>{threshold}"
+                )
+            seq.qc_passed = False
+            seq.qc_fail_reason = reason
+            qc_report.add_removed(seq.id, reason)
+            n_dropped_segs += 1
+        else:
+            kept.append(seq)
+
+    qc_report.removed_protein_quality += len(failing_ids)
+    click.echo(
+        f"  Protein-quality QC: dropped {len(failing_ids)} isolate(s) "
+        f"({n_dropped_segs} segment-records) carrying a protein with "
+        f"> {threshold:.0%} ambiguous residues."
+    )
+    return kept
+
+
+def _run_protein_quality_qc_non_segmented(sequences, qc_report, threshold):
+    """Per-sequence protein-quality QC for non-segmented runs.
+
+    A sequence is dropped when any of its CDS proteins exceeds the
+    ambiguous-residue threshold.
+    """
+    kept: list = []
+    for seq in sequences:
+        worst = _segment_worst_bad_protein(seq, threshold)
+        if worst is None:
+            kept.append(seq)
+            continue
+        reason = f"protein_quality:bad_fraction={worst:.3f}>{threshold}"
+        seq.qc_passed = False
+        seq.qc_fail_reason = reason
+        qc_report.add_removed(seq.id, reason)
+        qc_report.removed_protein_quality += 1
+
+    n_dropped = len(sequences) - len(kept)
+    if n_dropped:
+        click.echo(
+            f"  Protein-quality QC: dropped {n_dropped} sequence(s) "
+            f"carrying a protein with > {threshold:.0%} ambiguous residues."
+        )
+    return kept
+
+
 def _setup_protein_alphabet(sequences, cfg, qc_report, ncbi):
     """When clustering.alphabet_for_clustering=protein, set
     seq.protein_sequence on each non-segmented sequence to its marker CDS.
@@ -1181,6 +1359,7 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
@@ -1221,6 +1400,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
@@ -1265,6 +1445,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
@@ -1303,6 +1484,7 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
@@ -1343,6 +1525,7 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
@@ -1381,6 +1564,7 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
@@ -1426,6 +1610,7 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
@@ -1475,6 +1660,7 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
+    sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)

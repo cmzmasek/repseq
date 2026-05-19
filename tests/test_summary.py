@@ -264,6 +264,27 @@ def test_render_summary_omits_extra_segments_when_counter_zero(make_seq, tmp_pat
     assert "extra-segments check" not in md
 
 
+def test_render_summary_mentions_protein_quality_when_dropped(make_seq, tmp_path):
+    """When the protein-quality check drops records, the QC section names
+    the count, the threshold, the X/B/Z/J residue set, and the reason
+    prefix."""
+    cfg = _base_cfg(tmp_path)
+    cfg["qc"]["protein_quality"] = {"enabled": True, "max_bad_fraction": 0.05}
+    qc = _qc()
+    qc.removed_protein_quality = 11
+    md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"])
+    assert "**11** sequences were dropped by the protein-quality check" in md
+    assert "5%" in md
+    assert "X/B/Z/J" in md
+    assert "protein_quality:" in md
+
+
+def test_render_summary_omits_protein_quality_when_zero(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "protein-quality check" not in md
+
+
 def test_render_summary_points_to_taxonomic_report(make_seq, tmp_path):
     """The selection section must point the reader at the new
     taxonomic-diversity report file."""

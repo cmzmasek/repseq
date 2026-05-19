@@ -213,6 +213,16 @@ class QCReport:
     # segments — every segment of a dropped isolate still lands in
     # ``_qc_removed.tsv`` with reason ``extra_segments:<extras>``.
     removed_extra_segments: int = 0
+    # Sequences (non-segmented) or isolates (segmented) dropped because a
+    # CDS protein translation carried too high a fraction of ambiguous
+    # residues (X/B/Z/J) — the protein-quality QC step, the amino-acid
+    # analogue of the nucleotide ambiguous-character filter. A bad protein
+    # fails its segment, which drops the whole isolate (segmented) or the
+    # sequence (non-segmented). Counted in **isolates** (segmented) /
+    # **sequences** (non-segmented) — the unit a bench scientist acts on —
+    # while each dropped segment still lands in ``_qc_removed.tsv``. Always
+    # zero unless ``qc.protein_quality.enabled`` is set.
+    removed_protein_quality: int = 0
     # Sequences (non-segmented) or isolates (segmented) dropped because
     # an HMM-gated marker spec had no CDS pass the HMM check (E-value or
     # coverage). Distinct from ``removed_proteins`` /
@@ -299,6 +309,7 @@ class QCReport:
             f"  Removed (ambiguous) : {self.removed_ambiguous}",
             f"  Removed (annotation): {self.removed_annotation}",
             f"  Removed (proteins)  : {self.removed_proteins}",
+            f"  Removed (protein-quality): {self.removed_protein_quality}",
             f"  Removed (incomplete): {self.removed_incomplete_isolates}",
             f"  Removed (tax-mismatch): {self.removed_taxonomy_mismatch}",
             f"  Removed (strain-collision): {self.removed_strain_collisions}",

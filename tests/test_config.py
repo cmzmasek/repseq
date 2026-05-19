@@ -67,6 +67,28 @@ def test_validate_config_rejects_out_of_range_ambiguous():
     assert any("ambiguous_threshold" in e for e in errors)
 
 
+def test_validate_config_rejects_out_of_range_protein_quality():
+    cfg = load_config(None)
+    cfg["qc"]["protein_quality"]["enabled"] = True
+    cfg["qc"]["protein_quality"]["max_bad_fraction"] = 1.5
+    errors = validate_config(cfg)
+    assert any("protein_quality.max_bad_fraction" in e for e in errors)
+
+
+def test_validate_config_accepts_valid_protein_quality():
+    cfg = load_config(None)
+    cfg["qc"]["protein_quality"]["enabled"] = True
+    cfg["qc"]["protein_quality"]["max_bad_fraction"] = 0.1
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_ignores_protein_quality_when_disabled():
+    cfg = load_config(None)
+    cfg["qc"]["protein_quality"]["enabled"] = False
+    cfg["qc"]["protein_quality"]["max_bad_fraction"] = 9.0  # invalid but unused
+    assert validate_config(cfg) == []
+
+
 def test_validate_config_accepts_cdhit_backend():
     cfg = load_config(None)
     cfg["clustering"]["backend"] = "cdhit"

@@ -34,6 +34,19 @@ qc:
     enabled: false
     min_proteins: 1
 
+  # Optional: amino-acid analogue of ambiguous_threshold. Drop a CDS protein
+  # when the fraction of ambiguous residues (X/B/Z/J) in its translation
+  # exceeds max_bad_fraction (an empty/absent translation counts as fully
+  # bad). A bad protein fails its segment, which drops the whole isolate
+  # (segmented mode) or the sequence (non-segmented). The presence-only
+  # protein_annotation count check does not look at residues, so a segment
+  # filled with garbage residues would otherwise pass. Runs immediately
+  # before the HMM QC step. Requires network (force-fetches CDS translations
+  # when enabled; skipped under --no-resolve).
+  protein_quality:
+    enabled: false
+    max_bad_fraction: 0.05
+
   annotation_filter:
     enabled: true
     keywords:

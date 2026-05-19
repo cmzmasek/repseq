@@ -36,6 +36,18 @@ DEFAULTS: dict[str, Any] = {
             "enabled": False,
             "min_proteins": 1,
         },
+        "protein_quality": {
+            # Amino-acid analogue of ambiguous_threshold. Drop a CDS
+            # protein when the fraction of ambiguous residues (X/B/Z/J) in
+            # its translation exceeds max_bad_fraction; a bad protein fails
+            # its segment, which drops the whole isolate (segmented mode) or
+            # the sequence (non-segmented). An empty/absent translation
+            # counts as fully bad. Network-dependent: when enabled it
+            # force-fetches GenBank CDS translations if no earlier step
+            # already did. Skipped under --no-resolve.
+            "enabled": False,
+            "max_bad_fraction": 0.05,
+        },
         "annotation_filter": {
             "enabled": True,
             "keywords": [
@@ -544,6 +556,15 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         mp = pa.get("min_proteins")
         if not isinstance(mp, int) or mp < 0:
             errors.append("qc.protein_annotation.min_proteins must be a non-negative integer")
+
+    # Protein quality QC
+    pq = cfg.get("qc", {}).get("protein_quality", {})
+    if pq.get("enabled"):
+        mbf = pq.get("max_bad_fraction")
+        if not isinstance(mbf, (int, float)) or not (0 <= mbf <= 1):
+            errors.append(
+                "qc.protein_quality.max_bad_fraction must be a number between 0 and 1"
+            )
 
     # Segmented virus
     seg = cfg.get("segmented", {})
