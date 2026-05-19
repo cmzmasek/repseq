@@ -35,6 +35,13 @@ htmlcov/
 CLAUDE.md
 CLAUDE.md~
 
+# hmmpress binary indexes (auto-regenerated from the .hmm source on
+# first run — no need to bloat the repo with ~4MB of derivable bytes).
+repseq/data/hmms/*.h3f
+repseq/data/hmms/*.h3i
+repseq/data/hmms/*.h3m
+repseq/data/hmms/*.h3p
+
 # macOS
 .DS_Store
 

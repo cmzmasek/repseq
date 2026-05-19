@@ -217,16 +217,140 @@ def _run_protein_qc(sequences, cfg, qc_report, ncbi):
     return kept
 
 
+def _any_marker_has_hmms(cfg: dict) -> bool:
+    """True iff any configured marker spec carries an ``hmms`` list.
+
+    Used to skip the hmmscan step entirely when no marker would consume
+    the hits (the scan is purely diagnostic without configured HMMs).
+    """
+    for entry in (cfg.get("clustering", {}).get("cluster_protein", []) or []):
+        if isinstance(entry, dict) and (entry.get("hmms") or []):
+            return True
+    virus_cfg = get_virus_config(cfg)
+    if virus_cfg:
+        for entries in (virus_cfg.get("cluster_protein") or {}).values():
+            for entry in (entries or []):
+                if isinstance(entry, dict) and (entry.get("hmms") or []):
+                    return True
+        for spec in (virus_cfg.get("segment_markers") or {}).values():
+            if isinstance(spec, dict) and (spec.get("hmms") or []):
+                return True
+    return False
+
+
+def _run_hmm_scan(sequences, cfg, ncbi) -> None:
+    """Run hmmscan over every CDS protein and stash results on cfg.
+
+    Soft-fails: any error (binary missing, DB unreadable, hmmscan
+    nonzero exit) emits one stderr line and leaves
+    ``cfg["_hmm_runtime"]["active"]`` False so downstream marker
+    selection falls back to alias/longest.
+
+    Annotates ``seq.proteins[*]["hmm_hits"]`` with the raw hit list per
+    CDS; the marker selector applies the configured E-value / coverage
+    cutoffs at selection time.
+    """
+    cfg.setdefault("_hmm_runtime", {})["active"] = False
+    hmm_cfg = cfg.get("hmm", {}) or {}
+    if not hmm_cfg.get("enabled", True):
+        return
+    if not _any_marker_has_hmms(cfg):
+        return
+
+    from . import hmm as hmm_pkg
+
+    if not hmm_pkg.is_available():
+        click.echo(
+            "[hmm] hmmscan not on PATH — HMM tier skipped; marker "
+            "selection will fall back to alias/longest.",
+            err=True,
+        )
+        return
+
+    proteins_to_scan: dict[str, str] = {}
+    sid_to_loc: dict[str, tuple[int, int]] = {}
+    for si, seq in enumerate(sequences):
+        if not seq.proteins:
+            continue
+        for pi, p in enumerate(seq.proteins):
+            aa = p.get("sequence")
+            if not aa:
+                continue
+            sid = f"S{si:06d}P{pi:03d}"
+            proteins_to_scan[sid] = aa
+            sid_to_loc[sid] = (si, pi)
+
+    if not proteins_to_scan:
+        return
+
+    import time
+    cache = ncbi._cache if ncbi is not None else None
+    t0 = time.time()
+    try:
+        results = hmm_pkg.scan_proteins(proteins_to_scan, cfg, cache=cache)
+        ga_cutoffs = hmm_pkg.get_ga_cutoffs(cfg)
+    except hmm_pkg.HMMDatabaseError as e:
+        click.echo(
+            f"[hmm] database error: {e}; HMM tier skipped (falling back "
+            "to alias/longest marker selection).",
+            err=True,
+        )
+        return
+    except hmm_pkg.HMMScanError as e:
+        click.echo(
+            f"[hmm] hmmscan failed: {e}; HMM tier skipped (falling back "
+            "to alias/longest marker selection).",
+            err=True,
+        )
+        return
+
+    # Annotate each hit with a `passing: bool` once here so downstream
+    # consumers (marker selector, isolate_proteins TSV/FASTA writers,
+    # summary renderer) don't each re-apply the cutoffs in slightly
+    # different ways.
+    from .hmm.runner import passes_cutoffs as _pc
+    use_ga = hmm_cfg.get("use_ga_when_available", True)
+    default_ev = hmm_cfg.get("default_evalue", 1.0e-5)
+    rel_len = hmm_cfg.get("relative_length_cutoff", 0.5)
+    n_with_hits = 0
+    n_with_passing = 0
+    for sid, (si, pi) in sid_to_loc.items():
+        hits = results.get(sid, [])
+        for hit in hits:
+            hit["passing"] = _pc(hit, ga_cutoffs, default_ev, rel_len, use_ga)
+        sequences[si].proteins[pi]["hmm_hits"] = hits
+        if hits:
+            n_with_hits += 1
+        if any(h.get("passing") for h in hits):
+            n_with_passing += 1
+
+    click.echo(
+        f"[hmm] scanned {len(proteins_to_scan)} CDS across {len(sequences)} "
+        f"sequences against {len(ga_cutoffs)} profiles "
+        f"({n_with_passing} CDS with ≥1 passing hit, "
+        f"{n_with_hits} with ≥1 raw hit) in {time.time() - t0:.1f}s"
+    )
+    cfg["_hmm_runtime"] = {
+        "active": True,
+        "ga_cutoffs": ga_cutoffs,
+        "hmm_cfg": hmm_cfg,
+    }
+
+
 def _setup_protein_alphabet(sequences, cfg, qc_report, ncbi):
     """When clustering.alphabet_for_clustering=protein, ensure CDS proteins
-    are fetched and set seq.protein_sequence on each non-segmented sequence.
+    are fetched, run the HMM scan (if configured), and set
+    seq.protein_sequence on each non-segmented sequence.
 
-    Triggers a one-shot GenBank CDS fetch if QC didn't already do it. Drops
-    sequences without a viable marker (incremented under removed_proteins).
-    No-op when alphabet_for_clustering=nucleotide. For segmented input the
-    protein concat is built later by ``_handle_segmented``; this step still
-    triggers the fetch so the marker selection in that step has data to
-    work with.
+    Triggers a one-shot GenBank CDS fetch if QC didn't already do it.
+    Runs hmmscan (soft-fail) over every fetched CDS so marker selection
+    has HMM hits to consult. Drops sequences without a viable marker
+    (counted under ``removed_proteins`` for generic failures or
+    ``removed_hmm_failed`` for HMM-gate failures). No-op when
+    alphabet_for_clustering=nucleotide. For segmented input the
+    protein concat is built later by ``_handle_segmented``; this step
+    still triggers the fetch + HMM scan so the marker selection in
+    that step has data to work with.
     """
     alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
     if alphabet == "nucleotide":
@@ -244,19 +368,36 @@ def _setup_protein_alphabet(sequences, cfg, qc_report, ncbi):
             sys.exit(1)
         click.echo("Fetching CDS proteins for protein-alphabet clustering ...")
         attach_proteins(sequences, ncbi)
+    # HMM scan annotates every CDS with hmm_hits and stashes runtime
+    # context for the marker selector to consume.
+    _run_hmm_scan(sequences, cfg, ncbi)
     # Non-segmented: pick the marker per-sequence now. Segmented isolates
     # get a per-isolate concat in _handle_segmented (each segment contributes
     # its own marker), so we leave them alone here.
     if not cfg.get("segmented", {}).get("enabled"):
-        aliases = cfg.get("clustering", {}).get("cluster_protein", []) or []
+        cluster_protein = cfg.get("clustering", {}).get("cluster_protein", []) or []
+        hmm_rt = cfg.get("_hmm_runtime", {}) or {}
         before = len(sequences)
-        sequences = populate_protein_sequences(sequences, aliases, qc_report)
+        hmm_before = qc_report.removed_hmm_failed
+        sequences = populate_protein_sequences(
+            sequences,
+            cluster_protein,
+            qc_report,
+            hmm_active=hmm_rt.get("active", False),
+            ga_cutoffs=hmm_rt.get("ga_cutoffs"),
+            hmm_cfg=hmm_rt.get("hmm_cfg"),
+        )
         dropped = before - len(sequences)
+        hmm_dropped = qc_report.removed_hmm_failed - hmm_before
         if dropped:
-            click.echo(
-                f"  Dropped {dropped} sequence(s) with no marker protein "
-                f"for clustering."
-            )
+            base = f"  Dropped {dropped} sequence(s) with no marker protein"
+            if hmm_dropped:
+                breakdown = ", ".join(
+                    f"{k}={v}"
+                    for k, v in sorted(qc_report.removed_hmm_by_marker.items())
+                )
+                base += f" ({hmm_dropped} via HMM gate: {breakdown})"
+            click.echo(base + ".")
     return sequences
 
 
@@ -464,12 +605,20 @@ def _handle_segmented(sequences, cfg, qc_report):
     alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
     require_protein = alphabet == "protein"
     cluster_protein = virus_cfg.get("cluster_protein")
+    segment_markers = virus_cfg.get("segment_markers")
+    hmm_rt = cfg.get("_hmm_runtime", {}) or {}
+    hmm_before = qc_report.removed_hmm_failed
+    hmm_before_by_marker = dict(qc_report.removed_hmm_by_marker)
     concat_seqs = build_concatenated_sequences(
         complete_isolates,
         segment_names=virus_cfg["segments"],
         cluster_protein=cluster_protein,
         require_protein=require_protein,
         report=qc_report,
+        segment_markers=segment_markers,
+        hmm_active=hmm_rt.get("active", False),
+        ga_cutoffs=hmm_rt.get("ga_cutoffs"),
+        hmm_cfg=hmm_rt.get("hmm_cfg"),
     )
     # Drop isolates that lost a marker on any segment from complete_isolates
     # too, so the per-segment FASTA writer and isolate_proteins.tsv don't
@@ -481,11 +630,25 @@ def _handle_segmented(sequences, cfg, qc_report):
             k: v for k, v in complete_isolates.items() if k in survivors
         }
         dropped = before - len(complete_isolates)
+        hmm_dropped = qc_report.removed_hmm_failed - hmm_before
         if dropped:
-            click.echo(
+            base = (
                 f"  Dropped {dropped} isolate(s) with no marker protein "
-                f"on one or more segments."
+                f"on one or more segments"
             )
+            if hmm_dropped:
+                # Per-marker delta since the call started
+                delta = {
+                    k: qc_report.removed_hmm_by_marker[k]
+                    - hmm_before_by_marker.get(k, 0)
+                    for k in qc_report.removed_hmm_by_marker
+                }
+                delta = {k: v for k, v in delta.items() if v}
+                breakdown = ", ".join(
+                    f"{k}={v}" for k, v in sorted(delta.items())
+                )
+                base += f" ({hmm_dropped} via HMM gate: {breakdown})"
+            click.echo(base + ".")
 
     # Exact-duplicate removal was skipped on the segment pool (a conserved
     # segment shared between distinct isolates must not knock either isolate

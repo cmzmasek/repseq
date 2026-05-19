@@ -294,6 +294,11 @@ def _write_protein_fasta_record(
         ("country", parent_seq.country),
         ("collection_date", parent_seq.collection_date),
         ("length", prot.get("length")),
+        # Matches the TSV ``hmmscan`` column exactly — same
+        # ``Name(E=val,cov=val);...`` format, passing hits only,
+        # best-E first. Empty (and thus skipped) when no HMM hits or
+        # none passed.
+        ("hmmscan", _format_hmmscan_cell(prot) or None),
         ("parent", parent_acc),
     ])
     tags = [
@@ -385,6 +390,29 @@ _TAX_RANKS = (
 )
 
 
+def _format_hmmscan_cell(prot: dict) -> str:
+    """Render passing HMM hits as ``Name(E=val,cov=val);Name(E=val,cov=val)``.
+
+    Sorted by domain E-value (best first). Hits not flagged ``passing``
+    are excluded (the v0.13 design choice — show only what passed both
+    cutoffs in the output, the raw hit list is internal). Returns ``""``
+    when there are no passing hits or no ``hmm_hits`` field.
+    """
+    hits = prot.get("hmm_hits") or []
+    passing = [h for h in hits if h.get("passing")]
+    if not passing:
+        return ""
+    passing.sort(key=lambda h: h.get("dom_evalue", float("inf")))
+    parts: list[str] = []
+    for h in passing:
+        name = h.get("target", "?")
+        ev = h.get("dom_evalue")
+        hmm_len = max(int(h.get("hmm_len", 0)), 1)
+        cov = min(1.0, h.get("ali_span", 0) / hmm_len)
+        parts.append(f"{name}(E={ev:.2g},cov={cov:.2f})")
+    return ";".join(parts)
+
+
 def write_isolate_proteins_tsv(
     complete_isolates: dict[str, list[Sequence]],
     path: Path,
@@ -422,7 +450,7 @@ def write_isolate_proteins_tsv(
     path.parent.mkdir(parents=True, exist_ok=True)
     header = (
         "protein_id\tproduct\tlength_aa\tisolate_id\tisolate_id_source\t"
-        "segment\tsegment_length_nt\taccession\trepresentative\t"
+        "segment\tsegment_length_nt\taccession\trepresentative\thmmscan\t"
         + "\t".join(_TAX_RANKS) + "\n"
     )
     with open(path, "w") as fh:
@@ -458,6 +486,7 @@ def write_isolate_proteins_tsv(
                         f"{_tsv_safe(seq.length)}\t"
                         f"{_tsv_safe(seq.accession or seq.id)}\t"
                         f"{is_rep}\t"
+                        f"{_format_hmmscan_cell(prot)}\t"
                         f"{tax_cells}\n"
                     )
     return True

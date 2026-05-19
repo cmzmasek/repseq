@@ -204,6 +204,18 @@ class QCReport:
     # Counted in segments, consistent with the other ``removed_*``
     # counters.
     removed_strain_collisions: int = 0
+    # Sequences (non-segmented) or isolates (segmented) dropped because
+    # an HMM-gated marker spec had no CDS pass the HMM check (E-value or
+    # coverage). Distinct from ``removed_proteins`` /
+    # ``removed_incomplete_isolates`` so the actionable HMM failures
+    # don't blur into generic "marker missing" drops — bench scientists
+    # need to see "12 isolates lost their L because RdRp_4 failed" as a
+    # separate signal from "12 isolates were missing an L segment".
+    removed_hmm_failed: int = 0
+    # Per-marker breakdown of the same drops, keyed by the marker spec's
+    # ``name`` (e.g. ``{"L": 8, "M": 4}``). Used by the live stderr
+    # line and the QC Summary breakdown.
+    removed_hmm_by_marker: dict = field(default_factory=dict)
     # Whole-pool length filter is skipped in segmented mode (the input is a
     # mix of segments of very different lengths; per-segment bounds are
     # applied later via segmented.viruses.<v>.segment_lengths instead).
@@ -282,6 +294,15 @@ class QCReport:
             f"  Removed (tax-mismatch): {self.removed_taxonomy_mismatch}",
             f"  Removed (strain-collision): {self.removed_strain_collisions}",
         ]
+        if self.removed_hmm_failed or self.removed_hmm_by_marker:
+            hmm_line = f"  Removed (HMM gate)  : {self.removed_hmm_failed}"
+            if self.removed_hmm_by_marker:
+                parts = [
+                    f"{k}={v}"
+                    for k, v in sorted(self.removed_hmm_by_marker.items())
+                ]
+                hmm_line += f" ({', '.join(parts)})"
+            lines.append(hmm_line)
         # Add a Final survivors line when the CLI driver populated it.
         # Older callers / tests that build a QCReport directly (without
         # going through _handle_segmented) will see the field as None

@@ -40,6 +40,8 @@ _TOOL_PROBES: tuple[tuple[str, list[str], Optional[str]], ...] = (
     ("FastTree",   [],              r"FastTree\s+(?:Version\s+)?(\d[\d.]*)"),
     # iqtree2 --version: "IQ-TREE multicore version 2.2.5 ..."
     ("iqtree2",    ["--version"],   r"IQ-TREE.+version\s+(\S+)"),
+    # hmmscan -h prints "# HMMER 3.3.2 (Nov 2020); http://hmmer.org/" on stdout.
+    ("hmmscan",    ["-h"],          r"HMMER\s+(\S+)"),
 )
 
 
@@ -116,6 +118,8 @@ _CITATIONS: dict[str, str] = {
     "iqtree2":     "Minh et al. 2020, *Mol. Biol. Evol.* 37(5):1530-1534",
     "ncbi":        "Sayers et al. 2022, *Nucleic Acids Res.* 50(D1):D20-D26",
     "uniprot":     "UniProt Consortium 2023, *Nucleic Acids Res.* 51(D1):D523-D531",
+    "hmmer":       "Eddy 2011, *PLoS Comput. Biol.* 7(10):e1002195",
+    "pfam":        "Mistry et al. 2021, *Nucleic Acids Res.* 49(D1):D412-D419",
 }
 
 
@@ -310,10 +314,46 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
     else:
         diversity_sentence = ""
 
+    hmm_sentence = ""
+    hmm_rt = cfg.get("_hmm_runtime", {}) or {}
+    if hmm_rt.get("active"):
+        hmm_cfg = cfg.get("hmm", {}) or {}
+        user_db = hmm_cfg.get("database")
+        db_desc = (
+            "the bundled viral-core profile set (Pfam-A subset; "
+            f"{_CITATIONS['pfam']})"
+            if not user_db
+            else f"a user-supplied HMM database (`{user_db}`)"
+        )
+        ev = hmm_cfg.get("default_evalue", 1.0e-5)
+        rel = hmm_cfg.get("relative_length_cutoff", 0.5)
+        use_ga = hmm_cfg.get("use_ga_when_available", True)
+        gate_desc = (
+            f"the Pfam gathering threshold (GA) when available, otherwise "
+            f"E ≤ {ev:g}"
+            if use_ga
+            else f"E ≤ {ev:g}"
+        )
+        n_dropped = qc_report.removed_hmm_failed
+        drop_clause = (
+            f"; **{_fmt_int(n_dropped)}** sequence(s)/isolate(s) were "
+            f"dropped because no candidate CDS passed the configured HMM(s)"
+            if n_dropped
+            else ""
+        )
+        hmm_sentence = (
+            f" Marker-protein selection was gated by HMM hits "
+            f"(HMMER hmmscan v{detect_tool_versions().get('hmmscan') or '?'}; "
+            f"{_CITATIONS['hmmer']}) against {db_desc}: a CDS was accepted "
+            f"as the marker only when every configured HMM hit it with "
+            f"{gate_desc} AND the alignment span covered ≥ {rel:.0%} of "
+            f"the HMM model length{drop_clause}."
+        )
+
     return (
         f"## Representative selection\n\n"
         f"Clustering was performed on {input_desc} using **{tool_name}** "
-        f"({tool_cite}). {mode_desc} Within each cluster the "
+        f"({tool_cite}). {mode_desc}{hmm_sentence} Within each cluster the "
         f"representative was chosen by the configured priority "
         f"(**{priority}**, with sequence length as the final tiebreaker). "
         f"The final set contains **{_fmt_int(n_reps)} {rep_unit}** "
@@ -398,6 +438,7 @@ def _render_software(cfg: dict, versions: dict, phylo_ran: bool) -> str:
     backend = cfg.get("clustering", {}).get("backend", "mmseqs2")
     alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
     cdhit_binary = "cd-hit" if alphabet == "protein" else "cd-hit-est"
+    hmm_active = bool((cfg.get("_hmm_runtime", {}) or {}).get("active"))
 
     def _row(name: str, version: Optional[str], role: str, cite: str) -> str:
         v = version if version else "—"
@@ -414,6 +455,9 @@ def _render_software(cfg: dict, versions: dict, phylo_ran: bool) -> str:
     else:
         rows.append(_row(cdhit_binary, versions.get(cdhit_binary), "Sequence clustering (used)", _CITATIONS["cd-hit"]))
         rows.append(_row("MMseqs2",    versions.get("mmseqs"),     "Sequence clustering (not used)", _CITATIONS["mmseqs"]))
+    if hmm_active:
+        rows.append(_row("HMMER hmmscan", versions.get("hmmscan"), "HMM-based marker selection (used)", _CITATIONS["hmmer"]))
+        rows.append(_row("Pfam-A", "—", "HMM profile source (bundled subset)", _CITATIONS["pfam"]))
     if phylo_ran:
         rows.append(_row("MAFFT",    versions.get("mafft"),    "Multiple sequence alignment", _CITATIONS["mafft"]))
         rows.append(_row("IQ-TREE",  versions.get("iqtree2"),  "Maximum-likelihood tree (when chosen)", _CITATIONS["iqtree2"]))

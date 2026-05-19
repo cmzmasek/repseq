@@ -6,7 +6,11 @@ import re
 from collections import defaultdict
 from typing import Any, Optional
 
-from ..clustering.marker import select_marker_protein
+from ..clustering.marker import (
+    MarkerFailure,
+    _format_failure_reason,
+    select_marker_protein,
+)
 from ..models import QCReport, Sequence
 
 
@@ -408,25 +412,40 @@ def segment_length_filter(
 def build_concatenated_sequences(
     complete_isolates: dict[str, list[Sequence]],
     segment_names: Optional[list[str]] = None,
-    cluster_protein: Optional[dict[str, list[str]]] = None,
+    cluster_protein: Optional[dict[str, Any]] = None,
     require_protein: bool = False,
     report: Optional[QCReport] = None,
+    *,
+    segment_markers: Optional[dict[str, dict]] = None,
+    hmm_active: bool = False,
+    ga_cutoffs: Optional[dict[str, Optional[float]]] = None,
+    hmm_cfg: Optional[dict[str, Any]] = None,
 ) -> list[Sequence]:
     """Return one concatenated Sequence per complete isolate.
 
     When ``require_protein`` is True (protein-alphabet clustering), the
     marker protein for each segment is selected via
     ``select_marker_protein`` and concatenated in ``segment_names`` order
-    onto the result's ``protein_sequence``. Isolates whose any segment
-    has no qualifying marker are dropped and counted under
-    ``report.removed_incomplete_isolates`` with reason
-    ``incomplete_isolate:missing_marker_protein:<segment>``.
+    onto the result's ``protein_sequence``.
 
-    ``cluster_protein`` maps segment_name → alias list; absent / empty
-    entries fall through to "longest CDS" selection.
+    Per-segment marker specs are looked up in this priority order:
+        1. ``segment_markers[seg_name]`` (new HMM-aware form: a dict
+           ``{aliases?, hmms?}``) — wins when present.
+        2. ``cluster_protein[seg_name]`` (legacy: list of alias strings,
+           or with v0.13+ a mixed list including ``{name, aliases?,
+           hmms?}`` dicts).
+        3. Empty → longest-CDS fallback inside ``select_marker_protein``.
+
+    Isolates whose any segment fails marker selection are dropped.
+    HMM-tier failures (configured ``hmms`` had no passing CDS) are
+    counted under ``report.removed_hmm_failed`` with per-marker
+    breakdown in ``report.removed_hmm_by_marker``; non-HMM failures
+    (no aliases matched / no proteins / no translation) keep the
+    legacy ``removed_incomplete_isolates`` counter.
     """
     out: list[Sequence] = []
     cp = cluster_protein or {}
+    sm = segment_markers or {}
     for isolate_id, segs in complete_isolates.items():
         protein_concat: Optional[str] = None
         marker_ids: Optional[list[str]] = None
@@ -436,29 +455,70 @@ def build_concatenated_sequences(
             seg_by_name = {s.segment: s for s in segs if s.segment}
             parts: list[str] = []
             ids: list[str] = []
-            missing_marker: Optional[str] = None
+            failed_segment: Optional[str] = None
+            failure_info: Optional[MarkerFailure] = None
             for seg_name in segment_names:
                 seg = seg_by_name.get(seg_name)
                 if seg is None:
-                    missing_marker = seg_name
+                    failed_segment = seg_name
+                    failure_info = MarkerFailure(
+                        reason="no_proteins", marker_name=seg_name
+                    )
                     break
-                aliases = cp.get(seg_name) or []
-                marker = select_marker_protein(seg.proteins, aliases)
+                # segment_markers wins over cluster_protein for the same segment.
+                if seg_name in sm:
+                    spec = sm[seg_name]
+                    # Wrap as a one-element marker_specs list keyed by segment.
+                    marker_specs = [{
+                        "name": seg_name,
+                        "aliases": list(spec.get("aliases") or []),
+                        "hmms": list(spec.get("hmms") or []),
+                    }]
+                else:
+                    marker_specs = cp.get(seg_name) or []
+                marker, failure = select_marker_protein(
+                    seg.proteins,
+                    marker_specs,
+                    hmm_active=hmm_active,
+                    ga_cutoffs=ga_cutoffs,
+                    hmm_cfg=hmm_cfg,
+                )
                 if marker is None:
-                    missing_marker = seg_name
+                    failed_segment = seg_name
+                    failure_info = failure
                     break
                 parts.append(marker["sequence"])
                 if marker.get("protein_id"):
                     ids.append(marker["protein_id"])
-            if missing_marker is not None:
+            if failed_segment is not None:
                 if report is not None:
-                    reason = (
-                        f"incomplete_isolate:missing_marker_protein:{missing_marker}"
+                    is_hmm = (
+                        failure_info is not None
+                        and failure_info.reason == "hmm_failed"
                     )
+                    if is_hmm:
+                        sub = _format_failure_reason(failure_info)
+                        reason = f"incomplete_isolate:{sub}:{failed_segment}"
+                        marker_key = (
+                            failure_info.marker_name or failed_segment
+                        )
+                        # Count once per isolate (not per segment) so the
+                        # per-marker breakdown matches user expectation
+                        # ("12 isolates lost their L because RdRp_4 failed").
+                        report.removed_hmm_failed += 1
+                        report.removed_hmm_by_marker[marker_key] = (
+                            report.removed_hmm_by_marker.get(marker_key, 0) + 1
+                        )
+                    else:
+                        reason = (
+                            f"incomplete_isolate:missing_marker_protein:"
+                            f"{failed_segment}"
+                        )
                     for seq in segs:
                         seq.qc_passed = False
                         seq.qc_fail_reason = reason
-                        report.removed_incomplete_isolates += 1
+                        if not is_hmm:
+                            report.removed_incomplete_isolates += 1
                         report.add_removed(seq.id, reason)
                 continue
             protein_concat = "".join(parts)

@@ -437,7 +437,7 @@ def test_write_isolate_proteins_tsv(tmp_path: Path, make_seq):
     lines = path.read_text().strip().splitlines()
     assert lines[0] == (
         "protein_id\tproduct\tlength_aa\tisolate_id\tisolate_id_source\t"
-        "segment\tsegment_length_nt\taccession\trepresentative\t"
+        "segment\tsegment_length_nt\taccession\trepresentative\thmmscan\t"
         "species\tsubgenus\tgenus\tsubfamily\tfamily\tsuborder\torder\t"
         "subclass\tclass"
     )
@@ -453,21 +453,23 @@ def test_write_isolate_proteins_tsv(tmp_path: Path, make_seq):
     assert row1[6] == "1600"            # len("ACGT" * 400)
     assert row1[7] == "NC_001.1"
     assert row1[8] == "TRUE"            # representative
-    assert row1[9] == "Influenza A virus"
-    assert row1[10] == ""               # subgenus (absent)
-    assert row1[11] == "Alphainfluenzavirus"
-    assert row1[12] == ""               # subfamily (absent)
-    assert row1[13] == "Orthomyxoviridae"
-    assert row1[14] == ""               # suborder (absent)
-    assert row1[15] == "Articulavirales"
-    assert row1[16] == ""               # subclass (absent)
-    assert row1[17] == "Insthoviricetes"
+    assert row1[9] == ""                # hmmscan (no HMM hits)
+    assert row1[10] == "Influenza A virus"
+    assert row1[11] == ""               # subgenus (absent)
+    assert row1[12] == "Alphainfluenzavirus"
+    assert row1[13] == ""               # subfamily (absent)
+    assert row1[14] == "Orthomyxoviridae"
+    assert row1[15] == ""               # suborder (absent)
+    assert row1[16] == "Articulavirales"
+    assert row1[17] == ""               # subclass (absent)
+    assert row1[18] == "Insthoviricetes"
 
     row2 = lines[2].split("\t")
     assert row2[0] == "NA_P1"
     assert row2[5] == "NA"
     assert row2[6] == "1400"            # len("ACGT" * 350)
     assert row2[8] == "TRUE"            # representative
+    assert row2[9] == ""                # hmmscan
 
 
 def test_write_isolate_proteins_tsv_emits_sub_ranks_from_lineage(
@@ -501,10 +503,11 @@ def test_write_isolate_proteins_tsv_emits_sub_ranks_from_lineage(
     assert write_isolate_proteins_tsv({"ISO1": [s]}, path) is True
     row = path.read_text().strip().splitlines()[1].split("\t")
     assert row[8] == "FALSE"                     # representative (no set passed)
-    assert row[10] == "Simbu serogroup"          # subgenus
-    assert row[12] == "Bunyavirinae"             # subfamily
-    assert row[14] == "Bunyavirales-suborder"    # suborder
-    assert row[16] == "Some-subclass"            # subclass
+    assert row[9] == ""                          # hmmscan (no HMM hits)
+    assert row[11] == "Simbu serogroup"          # subgenus
+    assert row[13] == "Bunyavirinae"             # subfamily
+    assert row[15] == "Bunyavirales-suborder"    # suborder
+    assert row[17] == "Some-subclass"            # subclass
 
 
 def test_write_isolate_proteins_tsv_no_taxonomy_leaves_rank_cells_blank(
@@ -521,8 +524,9 @@ def test_write_isolate_proteins_tsv_no_taxonomy_leaves_rank_cells_blank(
     assert row[0] == "P1"
     assert row[6] == "4"   # segment_length_nt
     assert row[8] == "FALSE"             # representative column
-    # All 9 taxonomy cells (indices 9..17) are blank
-    assert row[9:] == [""] * 9
+    assert row[9] == ""                  # hmmscan (no HMM hits)
+    # All 9 taxonomy cells (indices 10..18) are blank
+    assert row[10:] == [""] * 9
 
 
 def test_write_isolate_proteins_tsv_representative_column(

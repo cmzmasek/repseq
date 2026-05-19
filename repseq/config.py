@@ -155,6 +155,36 @@ DEFAULTS: dict[str, Any] = {
             "extra_args": [],
         },
     },
+    "hmm": {
+        # HMM-based marker-protein selection. When enabled AND a marker
+        # has `hmms: [...]` configured AND hmmscan (HMMER) is on PATH,
+        # HMM hits become the AUTHORITATIVE gate for that marker — a CDS
+        # whose /product matches an alias but FAILS the HMM check is
+        # rejected, and the segment / sequence is dropped. Markers
+        # without `hmms` fall through to the legacy alias → longest
+        # chain. Soft-fails (warns and falls back) when hmmscan is
+        # missing or the database is unavailable.
+        "enabled": True,
+        # null = use the bundled viral-core set (`repseq/data/hmms/
+        # repseq_viral_core.hmm`, ~18 Pfam-A profiles for RdRp,
+        # nucleocapsid, glycoprotein, etc.). Absolute path = user-
+        # supplied .hmm file; auto-`hmmpress`-ed on first use if the
+        # .h3* index files are missing.
+        "database": None,
+        # E-value cutoff used when a profile has no curated Pfam GA
+        # (gathering threshold). Hits with E ≤ this value pass.
+        "default_evalue": 1.0e-5,
+        # When true, use each profile's GA cutoff when available; fall
+        # back to default_evalue otherwise. When false, always use
+        # default_evalue regardless of GA availability.
+        "use_ga_when_available": True,
+        # Length cutoff: ali_span / hmm_model_length must be ≥ this.
+        # Guards against tiny single-domain hits being accepted as full
+        # marker matches. Range (0, 1].
+        "relative_length_cutoff": 0.5,
+        # null = use cfg.threads.
+        "threads": None,
+    },
     "representative": {
         "priority": ["refseq", "reviewed_uniprot", "longest"],
     },
@@ -342,6 +372,96 @@ def load_config(path: Optional[str | Path] = None) -> dict[str, Any]:
     return cfg
 
 
+def _validate_marker_entry(entry: Any, path: str) -> list[str]:
+    """Validate one cluster_protein marker entry.
+
+    Each entry is either a non-empty alias string (legacy, alias-only)
+    or a dict with required ``name`` and at least one of ``aliases``
+    (list of non-empty strings) or ``hmms`` (list of non-empty HMM
+    profile names).
+    """
+    errs: list[str] = []
+    if isinstance(entry, str):
+        if not entry.strip():
+            errs.append(f"{path}: alias string must be non-empty")
+        return errs
+    if not isinstance(entry, dict):
+        errs.append(
+            f"{path} must be an alias string or a dict "
+            "{name, aliases?, hmms?}"
+        )
+        return errs
+    name = entry.get("name")
+    if not isinstance(name, str) or not name.strip():
+        errs.append(f"{path}: dict-form entry must include a non-empty 'name'")
+    aliases = entry.get("aliases", [])
+    if not isinstance(aliases, list) or not all(
+        isinstance(a, str) and a.strip() for a in aliases
+    ):
+        errs.append(f"{path}: 'aliases' must be a list of non-empty strings")
+        aliases = []
+    hmms = entry.get("hmms", [])
+    if not isinstance(hmms, list) or not all(
+        isinstance(h, str) and h.strip() for h in hmms
+    ):
+        errs.append(f"{path}: 'hmms' must be a list of non-empty HMM profile names")
+        hmms = []
+    if not aliases and not hmms:
+        errs.append(
+            f"{path}: dict-form entry must define at least one of "
+            "'aliases' or 'hmms' (otherwise the marker can't be matched)"
+        )
+    return errs
+
+
+def _validate_segment_markers(
+    sm: Any, virus_name: str, seg_names: set[str]
+) -> list[str]:
+    """Validate per-virus segment_markers block.
+
+    Shape: ``{segment_name: {aliases: [...], hmms: [...]}}``. Each
+    segment-spec must define at least one of aliases / hmms. Coexists
+    with the legacy per-segment ``cluster_protein`` block; when both
+    define a marker for the same segment, ``segment_markers`` wins.
+    """
+    errs: list[str] = []
+    if not isinstance(sm, dict):
+        errs.append(
+            f"segmented.viruses.{virus_name}.segment_markers must be a "
+            "mapping of segment-name → {aliases: [...], hmms: [...]}"
+        )
+        return errs
+    for seg_name, spec in sm.items():
+        prefix = f"segmented.viruses.{virus_name}.segment_markers.{seg_name}"
+        if seg_name not in seg_names:
+            errs.append(
+                f"segmented.viruses.{virus_name}.segment_markers: "
+                f"unknown segment '{seg_name}'"
+            )
+        if not isinstance(spec, dict):
+            errs.append(
+                f"{prefix} must be a dict with 'aliases' and/or 'hmms' keys"
+            )
+            continue
+        aliases = spec.get("aliases", [])
+        if not isinstance(aliases, list) or not all(
+            isinstance(a, str) and a.strip() for a in aliases
+        ):
+            errs.append(f"{prefix}.aliases must be a list of non-empty strings")
+            aliases = []
+        hmms = spec.get("hmms", [])
+        if not isinstance(hmms, list) or not all(
+            isinstance(h, str) and h.strip() for h in hmms
+        ):
+            errs.append(f"{prefix}.hmms must be a list of non-empty HMM profile names")
+            hmms = []
+        if not aliases and not hmms:
+            errs.append(
+                f"{prefix}: must define at least one of 'aliases' or 'hmms'"
+            )
+    return errs
+
+
 def validate_config(cfg: dict[str, Any]) -> list[str]:
     """Return a list of validation error messages (empty = valid)."""
     errors: list[str] = []
@@ -469,24 +589,37 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                     if not isinstance(cp, dict):
                         errors.append(
                             f"segmented.viruses.{virus_name}.cluster_protein "
-                            f"must be a mapping of segment-name → list of strings"
+                            f"must be a mapping of segment-name → list of "
+                            f"alias strings and/or {{name, aliases?, hmms?}} dicts"
                         )
                     else:
                         seg_names = set(vdef.get("segments", []))
-                        for seg_name, aliases in cp.items():
+                        for seg_name, entries in cp.items():
                             if seg_name not in seg_names:
                                 errors.append(
                                     f"segmented.viruses.{virus_name}."
                                     f"cluster_protein: unknown segment '{seg_name}'"
                                 )
-                            if not isinstance(aliases, list) or not all(
-                                isinstance(s, str) and s.strip() for s in aliases
-                            ):
+                            if not isinstance(entries, list):
                                 errors.append(
                                     f"segmented.viruses.{virus_name}."
                                     f"cluster_protein.{seg_name} "
-                                    f"must be a list of non-empty strings"
+                                    f"must be a list of alias strings and/or "
+                                    f"{{name, aliases?, hmms?}} dicts"
                                 )
+                            else:
+                                for j, entry in enumerate(entries):
+                                    errors.extend(_validate_marker_entry(
+                                        entry,
+                                        f"segmented.viruses.{virus_name}."
+                                        f"cluster_protein.{seg_name}[{j}]",
+                                    ))
+
+                sm = vdef.get("segment_markers")
+                if sm is not None:
+                    errors.extend(_validate_segment_markers(
+                        sm, virus_name, set(vdef.get("segments", []))
+                    ))
 
                 epps = vdef.get("expected_proteins_per_segment")
                 if epps is not None:
@@ -593,13 +726,16 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         )
 
     cluster_protein_global = cfg.get("clustering", {}).get("cluster_protein", [])
-    if not isinstance(cluster_protein_global, list) or not all(
-        isinstance(s, str) and s.strip() for s in cluster_protein_global
-    ):
+    if not isinstance(cluster_protein_global, list):
         errors.append(
-            "clustering.cluster_protein must be a list of non-empty strings "
-            "(case-insensitive substring aliases for /product)"
+            "clustering.cluster_protein must be a list of alias strings "
+            "and/or {name, aliases?, hmms?} dicts"
         )
+    else:
+        for i, entry in enumerate(cluster_protein_global):
+            errors.extend(
+                _validate_marker_entry(entry, f"clustering.cluster_protein[{i}]")
+            )
 
     diversity_cutoffs = cfg.get("clustering", {}).get("diversity_curve_cutoffs", [])
     if not isinstance(diversity_cutoffs, list):
@@ -720,6 +856,38 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     if not isinstance(ctv, (int, float)) or isinstance(ctv, bool) or not (0 <= ctv <= 1):
         errors.append(
             "phylo.lca.coverage_threshold must be a number between 0 and 1"
+        )
+
+    # HMM block
+    hmm = cfg.get("hmm", {}) or {}
+    if "enabled" in hmm and not isinstance(hmm["enabled"], bool):
+        errors.append("hmm.enabled must be a boolean")
+    if "use_ga_when_available" in hmm and not isinstance(
+        hmm["use_ga_when_available"], bool
+    ):
+        errors.append("hmm.use_ga_when_available must be a boolean")
+    db = hmm.get("database")
+    if db is not None and not isinstance(db, str):
+        errors.append(
+            "hmm.database must be null (use bundled set) or a path string"
+        )
+    ev = hmm.get("default_evalue", 1.0e-5)
+    if not isinstance(ev, (int, float)) or isinstance(ev, bool) or ev <= 0:
+        errors.append(
+            "hmm.default_evalue must be a positive number (e.g. 1.0e-5)"
+        )
+    rc = hmm.get("relative_length_cutoff", 0.5)
+    if not isinstance(rc, (int, float)) or isinstance(rc, bool) or not (0 < rc <= 1):
+        errors.append(
+            "hmm.relative_length_cutoff must be a number in (0, 1] "
+            "(fraction of HMM model length the alignment must span)"
+        )
+    ht = hmm.get("threads")
+    if ht is not None and (
+        not isinstance(ht, int) or isinstance(ht, bool) or ht < 1
+    ):
+        errors.append(
+            "hmm.threads must be null (use cfg.threads) or a positive integer"
         )
 
     # Representative priority

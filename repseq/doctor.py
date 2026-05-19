@@ -135,6 +135,8 @@ _EXTERNAL_BINARIES: tuple[tuple[str, str], ...] = (
     ("mafft",      "MSA, --phylo only"),
     ("FastTree",   "phylogeny, --phylo only on nucleotide (also accepts 'fasttree')"),
     ("iqtree2",    "phylogeny, --phylo only on protein (also accepts 'iqtree')"),
+    ("hmmscan",    "HMM-based marker selection (HMMER, hmm.enabled only)"),
+    ("hmmpress",   "HMM database indexing (HMMER, first-use auto-press)"),
 )
 
 
@@ -221,6 +223,64 @@ def check_cache_dir(cfg: dict[str, Any]) -> CheckResult:
             "set cache_dir: in your config to a writable path",
         )
     return CheckResult(OK, "cache directory", str(cache))
+
+
+def check_hmm_database(cfg: dict[str, Any]) -> list[CheckResult]:
+    """Report HMM database status: path, profile count, indexed Y/N,
+    GA-cutoff coverage. Skipped when hmm.enabled is false.
+    """
+    results: list[CheckResult] = []
+    hmm_cfg = cfg.get("hmm", {}) or {}
+    if not hmm_cfg.get("enabled", True):
+        results.append(CheckResult(
+            OK, "hmm.enabled", "false — HMM tier disabled (alias/longest only)",
+        ))
+        return results
+    try:
+        from .hmm import (
+            BUNDLED_DB_PATH,
+            has_press_index,
+            parse_ga_cutoffs,
+            profile_count,
+            resolve_database_path,
+        )
+    except ImportError as exc:
+        results.append(CheckResult(
+            WARN, "hmm package", f"import failed: {exc}",
+        ))
+        return results
+    user_db = hmm_cfg.get("database")
+    try:
+        db_path = resolve_database_path(user_db)
+    except Exception as exc:
+        results.append(CheckResult(
+            WARN, "hmm.database",
+            f"{user_db or BUNDLED_DB_PATH}: {exc}",
+        ))
+        return results
+    origin = "bundled" if user_db is None else "user-supplied"
+    n_profiles = profile_count(db_path)
+    results.append(CheckResult(
+        OK, "hmm.database", f"{db_path} ({origin}, {n_profiles} profile(s))",
+    ))
+    if has_press_index(db_path):
+        results.append(CheckResult(OK, "hmm.index", ".h3* present"))
+    else:
+        results.append(CheckResult(
+            WARN, "hmm.index",
+            ".h3* missing — will auto-run hmmpress on first scan",
+        ))
+    try:
+        ga = parse_ga_cutoffs(db_path)
+        with_ga = sum(1 for v in ga.values() if v is not None)
+        results.append(CheckResult(
+            OK, "hmm.GA cutoffs",
+            f"{with_ga} of {len(ga)} profile(s) have curated GA "
+            f"(others use hmm.default_evalue={hmm_cfg.get('default_evalue', 1e-5):g})",
+        ))
+    except Exception as exc:
+        results.append(CheckResult(WARN, "hmm.GA cutoffs", str(exc)))
+    return results
 
 
 def check_config(cfg: dict[str, Any], config_path: Optional[str]) -> list[CheckResult]:
@@ -318,4 +378,5 @@ def run_doctor(
     else:
         groups.append(("Network / databases", check_network()))
     groups.append(("Configuration", [check_cache_dir(cfg), *check_config(cfg, config_path)]))
+    groups.append(("HMM database", check_hmm_database(cfg)))
     return DoctorReport(groups=groups)

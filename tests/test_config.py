@@ -567,3 +567,90 @@ def test_get_virus_config_returns_named_block():
     }
     v = get_virus_config(cfg)
     assert v["segments"] == ["HA", "NA"]
+
+
+# ---------------------------------------------------------------------------
+# v0.13: dict-form cluster_protein + segment_markers + hmm block
+# ---------------------------------------------------------------------------
+
+def test_validate_config_accepts_dict_form_cluster_protein():
+    cfg = load_config(None)
+    cfg["clustering"]["cluster_protein"] = [
+        "polymerase",                                          # legacy string
+        {"name": "Spike", "aliases": ["spike"], "hmms": ["Corona_S1", "Corona_S2"]},
+        {"name": "N", "hmms": ["CoV_nucleocap"]},              # hmms only
+        {"name": "M", "aliases": ["membrane"]},                # aliases only
+    ]
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_dict_form_with_no_aliases_or_hmms():
+    cfg = load_config(None)
+    cfg["clustering"]["cluster_protein"] = [{"name": "empty"}]
+    errs = validate_config(cfg)
+    assert any("at least one of 'aliases' or 'hmms'" in e for e in errs)
+
+
+def test_validate_config_rejects_dict_form_missing_name():
+    cfg = load_config(None)
+    cfg["clustering"]["cluster_protein"] = [{"aliases": ["x"]}]
+    errs = validate_config(cfg)
+    assert any("non-empty 'name'" in e for e in errs)
+
+
+def test_validate_config_accepts_segment_markers():
+    cfg = load_config(None)
+    cfg["segmented"] = {
+        "enabled": True, "virus": "fluA",
+        "viruses": {"fluA": {
+            "expected_segments": 1, "segments": ["HA"],
+            "isolate_regex": r"(?P<isolate>X)",
+            "segment_markers": {
+                "HA": {"aliases": ["hemagglutinin"], "hmms": ["Hemagglutinin"]},
+            },
+        }},
+    }
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_segment_markers_unknown_segment():
+    cfg = load_config(None)
+    cfg["segmented"] = {
+        "enabled": True, "virus": "fluA",
+        "viruses": {"fluA": {
+            "expected_segments": 1, "segments": ["HA"],
+            "isolate_regex": r"(?P<isolate>X)",
+            "segment_markers": {"NOPE": {"hmms": ["X"]}},
+        }},
+    }
+    errs = validate_config(cfg)
+    assert any("unknown segment 'NOPE'" in e for e in errs)
+
+
+def test_validate_config_hmm_block_defaults_validate():
+    cfg = load_config(None)
+    assert validate_config(cfg) == []
+    assert cfg["hmm"]["enabled"] is True
+
+
+def test_validate_config_rejects_hmm_default_evalue_zero():
+    cfg = load_config(None)
+    cfg["hmm"]["default_evalue"] = 0
+    assert any(
+        "hmm.default_evalue" in e for e in validate_config(cfg)
+    )
+
+
+def test_validate_config_rejects_hmm_relative_length_out_of_range():
+    cfg = load_config(None)
+    cfg["hmm"]["relative_length_cutoff"] = 1.5
+    assert any(
+        "hmm.relative_length_cutoff" in e for e in validate_config(cfg)
+    )
+
+
+def test_validate_config_accepts_user_hmm_database_path():
+    """validate_config does NOT check the path exists — that's runtime."""
+    cfg = load_config(None)
+    cfg["hmm"]["database"] = "/path/to/my.hmm"
+    assert validate_config(cfg) == []

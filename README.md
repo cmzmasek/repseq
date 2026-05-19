@@ -797,6 +797,120 @@ You can also set your NCBI email/key via the environment variables
 
 ---
 
+## HMM-based marker selection
+
+Annotation of viral CDSes in GenBank is famously inconsistent
+("RNA-dependent RNA polymerase" vs "polymerase" vs "L protein" vs
+"RNA polymerase L") and pseudogenes / misannotations can carry plausible-
+looking `/product` strings. Since v0.13.0, repseq can use **HMMER
+hmmscan** against curated profile HMMs as the authoritative test for
+whether a CDS is the marker you wanted.
+
+The HMM tier is **off-by-default at the marker level** — it activates
+only for markers that carry an `hmms:` list — so you can phase HMMs in
+one marker at a time without touching the rest of your pipeline.
+
+### How the gate works
+
+For a marker spec that includes `hmms: [...]`:
+
+1. Every CDS in every input sequence is scanned against the configured
+   HMM database (once per sequence, batched into a single hmmscan call
+   per run, cached on AA sequence so re-runs are free).
+2. A hit **passes** when both gates clear:
+   - **Similarity:** the curated Pfam GA threshold (when the profile
+     carries one) OR `hmm.default_evalue` (default `1e-5`).
+   - **Coverage:** the alignment span covers at least
+     `hmm.relative_length_cutoff` (default `0.5`) of the HMM model
+     length.
+3. A CDS **passes the marker spec** only when *every* HMM in the
+   spec's list has at least one passing hit on that CDS (multi-HMM is
+   AND, useful for multi-domain glycoproteins).
+4. The longest passing CDS wins. **Aliases on the same spec are
+   ignored** — that's the whole point: a misannotated `/product` can't
+   override the HMM verdict.
+5. If no CDS passes the gate, the segment (or non-segmented sequence)
+   is dropped, counted under `removed_hmm_failed` with a per-marker
+   breakdown in `removed_hmm_by_marker`, and a `hmm_failed:<marker>:<hmm>(E=...)`
+   row is added to `_qc_removed.tsv`.
+
+Markers WITHOUT an `hmms:` list keep the legacy alias → longest chain
+unchanged.
+
+### Bundled vs user-supplied database
+
+`hmm.database: null` (default) uses the bundled set at
+`repseq/data/hmms/repseq_viral_core.hmm` — 17 hand-picked Pfam-A
+profiles covering the most common viral marker proteins (RdRp,
+nucleocapsid, glycoprotein, helicase, protease) across the main
+families. Pfam-A is licensed CC0 so redistribution is unrestricted.
+The bundled set was assembled from Pfam-A via
+`scripts/build_bundled_hmms.sh`; you can re-run that script to refresh
+it against a newer Pfam release.
+
+To use your own profiles (e.g. VOGdb, a custom curated set, or the
+full Pfam-A.hmm), set `hmm.database` to an absolute path. The first
+run auto-`hmmpress`-es the file if the `.h3*` index files are missing.
+
+`repseq doctor` reports the DB status (path, profile count, indexed
+Y/N, GA-cutoff coverage).
+
+### Configuration examples
+
+Non-segmented marker spec (top-level `clustering.cluster_protein`).
+Each entry is either an alias string (legacy, alias-only) or a dict
+with `name`, optional `aliases`, optional `hmms`:
+
+```yaml
+clustering:
+  cluster_protein:
+    - "polymerase"                                          # legacy: alias-only
+    - {name: "RdRp", aliases: ["polymerase"], hmms: ["RdRP_4"]}
+    - {name: "Spike", aliases: ["spike"], hmms: ["CoV_S1", "CoV_S2"]}   # multi-domain AND
+```
+
+Segmented marker spec (per-virus `segment_markers` — the v0.13
+HMM-aware form, coexists with legacy per-segment `cluster_protein`):
+
+```yaml
+segmented:
+  enabled: true
+  virus: bunyaviridae
+  viruses:
+    bunyaviridae:
+      expected_segments: 3
+      segments: [S, M, L]
+      isolate_regex: "..."
+      segment_markers:
+        S: {aliases: ["nucleocapsid", "N protein"], hmms: ["Bunya_nucleocap"]}
+        M: {aliases: ["glycoprotein"],              hmms: ["Bunya_G1", "Bunya_G2"]}
+        L: {aliases: ["polymerase", "L protein"],   hmms: ["RdRP_4"]}
+```
+
+When both `segment_markers` and the legacy `cluster_protein` define a
+marker for the same segment, `segment_markers` wins.
+
+### HMM-related config keys
+
+```yaml
+hmm:
+  enabled: true                  # master switch
+  database: null                 # null → bundled; abs path → user-supplied
+  default_evalue: 1.0e-5         # used when a profile has no curated GA
+  use_ga_when_available: true    # prefer curated GA over default_evalue
+  relative_length_cutoff: 0.5    # ali_span / hmm_len ≥ this
+  threads: null                  # null → falls through to cfg.threads
+```
+
+### Soft-fail posture
+
+The HMM tier never aborts a run on its own. If `hmmscan` is missing,
+the database is unreadable, or hmmscan returns non-zero, repseq emits
+one stderr warning and falls through to the alias / longest-CDS
+chain. To check that everything is wired up, run `repseq doctor`.
+
+---
+
 ## The local cache
 
 Every NCBI/UniProt lookup is saved to a small database (`~/.repseq/cache/` by
@@ -911,19 +1025,42 @@ to run anywhere and finish in a couple of seconds.
 
 ## Status
 
-Current: **`v0.12.0`**. All 8 selection modes, protein-alphabet clustering
+Current: **`v0.13.0`**. All 8 selection modes, protein-alphabet clustering
 by default (`alphabet_for_clustering: protein`), MMseqs2 and cd-hit
 backends, optional protein-annotation QC, per-isolate
-taxonomy-consistency QC for segmented viruses, **strain-as-isolate
-provenance + collision detection**, segment-name synonyms, rich phyloXML
+taxonomy-consistency QC for segmented viruses, **HMM-based marker
+selection (HMMER hmmscan + bundled Pfam-A subset)**, strain-as-isolate
+provenance + collision detection, segment-name synonyms, rich phyloXML
 output, an optional UMAP plot of the clustering, an auto-generated
-Methods-section starter (`_summary.md`) on every run, and a **per-
-stratum diversity curve in `_group_counts.tsv`** (cluster counts at
-fixed identity thresholds). **678 offline regression tests pass**; the
-NCBI-backed paths have been validated end-to-end against live
-influenza-A, peribunyaviridae, and hantaviridae datasets.
+Methods-section starter (`_summary.md`) on every run, and a per-stratum
+diversity curve in `_group_counts.tsv`. **741 offline regression tests
+pass**; the NCBI-backed paths have been validated end-to-end against
+live influenza-A, peribunyaviridae, and hantaviridae datasets.
 
 Highlights of recent releases (newest first):
+
+- **`v0.13.0`** — HMM-based marker selection. When `hmm.enabled` is
+  true (default) and a marker definition carries `hmms: [...]` (in
+  `clustering.cluster_protein` or per-segment `segment_markers`),
+  HMMER hmmscan is used as the AUTHORITATIVE gate — a CDS whose
+  `/product` matches an alias but FAILS the HMM check (E-value or
+  coverage) is rejected, and the segment / sequence is dropped.
+  Multi-HMM lists are AND (every HMM must hit the same CDS). Bundled
+  set of 17 viral Pfam-A profiles in `repseq/data/hmms/`; auto-
+  `hmmpress`-ed on first run. User-supplied DB via `hmm.database`.
+  Soft-fails (warns + falls back to alias/longest) when hmmscan is
+  missing or the database is unavailable. Two new QC counters
+  (`removed_hmm_failed`, `removed_hmm_by_marker`); new `hmmscan`
+  column right of `representative` in `_isolate_proteins.tsv` and
+  `_representative_isolate_proteins.tsv` showing passing hits
+  (`Bunya_Gn(E=1e-30,cov=0.85);Bunya_Gc(E=3e-25,cov=0.78)` format,
+  best-E first); same string emitted as `[hmmscan=...]` tag on
+  proteins-FASTA headers. `repseq doctor` reports DB status (path,
+  profile count, indexed Y/N, GA-cutoff coverage). The Methods-
+  section summary names HMMER + the cutoffs when the tier fired. 63
+  new tests bring the suite from 678 → 741. See the new
+  "HMM-based marker selection" section above for configuration and
+  examples.
 
 - **`v0.12.0`** — `_group_counts.tsv` gains a per-stratum diversity
   curve. For each stratum where the binary-search clustering ran, the

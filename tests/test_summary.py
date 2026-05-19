@@ -164,6 +164,39 @@ def test_render_summary_omits_diversity_curve_sentence_when_disabled(make_seq, t
     assert "diagnostic of within-stratum" not in md
 
 
+def test_render_summary_mentions_hmm_tier_when_active(make_seq, tmp_path):
+    """When _hmm_runtime.active is True, the selection section names the
+    database, cites HMMER, and lists the cutoffs in effect. Per the
+    summary-renderer-drift memory."""
+    cfg = _base_cfg(tmp_path)
+    cfg["_hmm_runtime"] = {"active": True, "ga_cutoffs": {}, "hmm_cfg": cfg.get("hmm", {})}
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "HMMER hmmscan" in md
+    assert "bundled viral-core profile set" in md
+    # Coverage cutoff rendered as a percent (default 0.5 → 50%).
+    assert "≥ 50%" in md or "50 %" in md
+
+
+def test_render_summary_omits_hmm_sentence_when_not_active(make_seq, tmp_path):
+    """No _hmm_runtime → no HMM sentence (don't add false claims to the
+    Methods section if the HMM tier never ran)."""
+    cfg = _base_cfg(tmp_path)
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "HMMER hmmscan" not in md
+    assert "bundled viral-core" not in md
+
+
+def test_render_summary_hmm_software_row_only_when_active(make_seq, tmp_path):
+    """Software table gains an HMMER row only when the HMM tier fired —
+    otherwise it'd clutter every run's Methods section."""
+    cfg = _base_cfg(tmp_path)
+    md_off = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "HMMER hmmscan" not in md_off
+    cfg["_hmm_runtime"] = {"active": True}
+    md_on = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "HMMER hmmscan" in md_on
+
+
 def test_render_summary_software_table_marks_used_and_unused(make_seq, tmp_path):
     """When backend=mmseqs2, cd-hit row must read '(not used)' and vice versa."""
     cfg = _base_cfg(tmp_path)

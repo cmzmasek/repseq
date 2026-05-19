@@ -18,8 +18,10 @@ def _cds(product: str, sequence: str, protein_id: str = "P_x"):
 
 
 def test_select_marker_returns_none_for_empty_proteins():
-    assert select_marker_protein(None) is None
-    assert select_marker_protein([]) is None
+    marker, failure = select_marker_protein(None)
+    assert marker is None and failure.reason == "no_proteins"
+    marker, failure = select_marker_protein([])
+    assert marker is None and failure.reason == "no_proteins"
 
 
 def test_select_marker_returns_longest_when_no_aliases():
@@ -28,7 +30,8 @@ def test_select_marker_returns_longest_when_no_aliases():
         _cds("RNA-dependent RNA polymerase", "M" * 2200),
         _cds("glycoprotein", "M" * 500),
     ]
-    chosen = select_marker_protein(proteins)
+    chosen, failure = select_marker_protein(proteins)
+    assert failure is None
     assert chosen["product"] == "RNA-dependent RNA polymerase"
 
 
@@ -38,7 +41,7 @@ def test_select_marker_alias_order_encodes_preference():
         _cds("RNA-dependent RNA polymerase", "M" * 2200),
     ]
     # Even though polymerase is longer, alias order picks nucleoprotein first.
-    chosen = select_marker_protein(proteins, ["nucleoprotein", "polymerase"])
+    chosen, _ = select_marker_protein(proteins, ["nucleoprotein", "polymerase"])
     assert chosen["product"] == "nucleoprotein"
 
 
@@ -47,17 +50,20 @@ def test_select_marker_alias_case_insensitive_substring():
         _cds("hypothetical protein", "M" * 100),
         _cds("Hemagglutinin precursor", "M" * 500),
     ]
-    chosen = select_marker_protein(proteins, ["HEMAGGLUTININ"])
+    chosen, _ = select_marker_protein(proteins, ["HEMAGGLUTININ"])
     assert chosen["product"] == "Hemagglutinin precursor"
 
 
 def test_select_marker_falls_back_to_longest_when_no_alias_matches():
+    """Legacy behaviour: alias-only specs are advisory. When no alias
+    matches, fall through to longest CDS (HMM-tier failures, in
+    contrast, are strict drops — covered in test_marker_hmm.py)."""
     proteins = [
         _cds("nucleoprotein", "M" * 400),
         _cds("polymerase", "M" * 2200),
     ]
-    chosen = select_marker_protein(proteins, ["glycoprotein"])
-    # No alias matched, fall back to longest.
+    chosen, failure = select_marker_protein(proteins, ["glycoprotein"])
+    assert failure is None
     assert chosen["product"] == "polymerase"
 
 
@@ -66,7 +72,7 @@ def test_select_marker_skips_proteins_without_sequence():
         {"protein_id": "p1", "product": "polymerase", "length": 2200, "sequence": None},
         _cds("nucleoprotein", "M" * 400),
     ]
-    chosen = select_marker_protein(proteins)
+    chosen, _ = select_marker_protein(proteins)
     # The polymerase has no translation; the nucleoprotein is the only viable
     # marker, not the longest among "all CDSes".
     assert chosen["product"] == "nucleoprotein"
@@ -76,7 +82,8 @@ def test_select_marker_returns_none_if_no_cds_has_translation():
     proteins = [
         {"protein_id": "p1", "product": "polymerase", "length": 2200, "sequence": None},
     ]
-    assert select_marker_protein(proteins) is None
+    marker, failure = select_marker_protein(proteins)
+    assert marker is None and failure.reason == "no_translated"
 
 
 def test_select_marker_breaks_alias_ties_by_length():
@@ -85,7 +92,7 @@ def test_select_marker_breaks_alias_ties_by_length():
         _cds("polymerase short", "M" * 100),
         _cds("polymerase full", "M" * 2000),
     ]
-    chosen = select_marker_protein(proteins, ["polymerase"])
+    chosen, _ = select_marker_protein(proteins, ["polymerase"])
     assert chosen["product"] == "polymerase full"
 
 
@@ -114,7 +121,7 @@ def test_populate_honours_alias_list(make_seq):
         _cds("polymerase", "M" * 2000),
         _cds("nucleoprotein", "N" * 400),
     ]
-    populate_protein_sequences([a], aliases=["nucleoprotein"])
+    populate_protein_sequences([a], marker_specs=["nucleoprotein"])
     assert a.protein_sequence == "N" * 400
 
 

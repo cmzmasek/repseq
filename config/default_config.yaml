@@ -96,12 +96,25 @@ segmented:
   #         max: <int>                         #   (either bound is optional)
   #     cluster_protein:                       # optional; marker protein per segment
   #       <segment_name>:                      #   for protein-alphabet clustering. Each
-  #         - <alias>                          #   value is an alias list matched case-
-  #         - <alias>                          #   insensitively (substring) against
-  #                                            #   /product. First match wins; if no
-  #                                            #   alias matches a segment's CDSes,
-  #                                            #   the isolate is dropped as incomplete.
-  #                                            #   Omitted: longest CDS per segment.
+  #         - <alias>                          #   list entry is an alias string OR a
+  #         - {name: ..., aliases: [...], hmms: [...]}   # dict with optional HMM gate.
+  #                                            #   Aliases match case-insensitively
+  #                                            #   (substring) against /product;
+  #                                            #   HMMs (when present + hmm.enabled +
+  #                                            #   hmmscan on PATH) override aliases as
+  #                                            #   the authoritative gate. First match
+  #                                            #   wins; if no entry matches a segment's
+  #                                            #   CDSes, the isolate is dropped as
+  #                                            #   incomplete. Omitted: longest CDS.
+  #     segment_markers:                       # optional; HMM-aware alternative to
+  #       <segment_name>:                      #   cluster_protein above. One spec per
+  #         aliases: [<alias>, <alias>]        #   segment; aliases AND/OR hmms. When
+  #         hmms: [<hmm_name>, <hmm_name>]     #   hmms is set, HMM gate is authoritative
+  #                                            #   (a CDS hitting an alias but failing
+  #                                            #   the HMM is dropped). Multi-HMM list
+  #                                            #   is AND (every HMM must hit the same
+  #                                            #   CDS). Wins over cluster_protein when
+  #                                            #   both define the same segment.
   # See config/examples/influenza_a.yaml for a worked example with
   # strain-aware list-valued counts.
   viruses: {}
@@ -160,10 +173,18 @@ clustering:
   # this value when passed.
   alphabet_for_clustering: protein
 
-  # Non-segmented marker-protein override. Alias list matched case-
-  # insensitively (substring) against /product. First alias that matches
-  # wins; if no aliases match or the list is empty, the longest CDS is
-  # used. Examples: ["polymerase"], ["RNA-dependent RNA polymerase", "L"].
+  # Non-segmented marker-protein override. Each entry is EITHER:
+  #   • a plain alias string (legacy form, alias-only):
+  #         ["polymerase", "RNA-dependent RNA polymerase"]
+  #   • a dict with HMM support (recommended when HMMs are available):
+  #         - {name: "RdRp",  aliases: ["polymerase"],  hmms: ["RdRp_4"]}
+  #         - {name: "Spike", aliases: ["spike"],       hmms: ["Corona_S1", "Corona_S2"]}
+  # Mixed lists are allowed. When `hmms` is set AND the top-level `hmm`
+  # block is enabled AND hmmscan is on PATH, the HMM hit becomes the
+  # AUTHORITATIVE gate for that marker — a CDS whose /product matches an
+  # alias but FAILS the HMM check is rejected. Multi-HMM lists are AND
+  # (every HMM must hit the same CDS). When no aliases and no HMMs match
+  # any CDS, the sequence is dropped under removed_proteins.
   cluster_protein: []
 
   # Diagnostic "diversity curve" reporting. For each stratum where the
@@ -232,6 +253,43 @@ representative:
     - refseq
     - reviewed_uniprot
     - longest
+
+# HMM-based marker-protein selection (HMMER hmmscan).
+#
+# When enabled AND a marker definition carries `hmms: [...]` AND `hmmscan`
+# is on PATH, the HMM hit becomes the AUTHORITATIVE gate for that marker.
+# A CDS whose /product matches an alias but FAILS the HMM check (E-value
+# or coverage cutoff) is REJECTED — the segment (segmented) or sequence
+# (non-segmented) is dropped. This catches misannotated CDSs,
+# pseudogenes, and contamination that alias-matching alone would let
+# through. Markers that do NOT define `hmms` keep the legacy alias →
+# longest behaviour, so you can phase HMMs in one marker at a time.
+#
+# Soft-fails: missing hmmscan binary, unreadable database, or
+# hmm.enabled=false all fall back to alias/longest selection with a
+# single stderr warning. Use `repseq doctor` to verify install state.
+hmm:
+  enabled: true
+  # null → use the bundled viral-core profile set shipped with repseq
+  # (repseq/data/hmms/repseq_viral_core.hmm — ~18 Pfam-A profiles for
+  # RdRp, nucleocapsid, glycoprotein, helicase, protease across the
+  # main viral families). Absolute path → user-supplied .hmm file;
+  # auto-`hmmpress`-ed on first use if the .h3* index files are missing.
+  database: null
+  # E-value cutoff used for profiles that lack a curated Pfam GA
+  # (gathering threshold). Hits with domain E-value ≤ this value pass.
+  default_evalue: 1.0e-5
+  # When true (recommended), use each profile's GA cutoff when the
+  # profile carries one — much more sensitive/specific than a generic
+  # E-value threshold. Falls back to default_evalue when GA is absent.
+  use_ga_when_available: true
+  # Length cutoff: the HMM-to-CDS alignment must span at least this
+  # fraction of the HMM model length. Guards against tiny domain hits
+  # being accepted as full marker matches. Both cutoffs (E-value AND
+  # coverage) must pass for an HMM hit to be considered passing.
+  relative_length_cutoff: 0.5
+  # null → use top-level cfg.threads.
+  threads: null
 
 # Optional MSA + phylogeny step (triggered with --phylo on any mode command).
 # Skipped automatically if fewer than 3 representatives survive selection.
