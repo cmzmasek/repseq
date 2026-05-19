@@ -85,6 +85,54 @@ def test_render_summary_qc_numbers_pulled_from_report(make_seq, tmp_path):
     assert "*1,200* passed basic QC" in md
 
 
+def test_render_summary_segmented_length_filter_uses_per_segment_wording(make_seq, tmp_path):
+    """When the segmented per-segment length filter fired, the QC section
+    must describe the per-segment drops in isolate units — NOT the
+    global ±median-percent window (which never ran in segmented mode).
+    Regression guard for the v0.13.x bug where summary.md mislabelled the
+    per-segment counter as the global filter."""
+    cfg = _base_cfg(tmp_path)
+    cfg["segmented"] = {
+        "enabled": True,
+        "virus": "peribunyaviridae",
+        "viruses": {
+            "peribunyaviridae": {"expected_segments": 3, "segments": ["S", "M", "L"]},
+        },
+    }
+    qc = _qc(total_input=2000, passed=1900, dedup=0, length=0, ambig=0)
+    # Mirror what run_qc + segment_length_filter would set in segmented mode:
+    qc.length_filter_skipped = True
+    qc.removed_length = 942  # in segments — must NOT appear as the global count
+    qc.removed_length_by_segment = {
+        "S": {"too_short": 200, "too_long": 0},
+        "M": {"too_short": 0,   "too_long": 100},
+        "L": {"too_short": 14,  "too_long": 0},
+    }
+    md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"])
+    # The misleading global-filter wording must NOT appear.
+    assert "outside the configured length window" not in md
+    assert "outside ±50% of the per-rank median length" not in md
+    # The actionable per-segment sentence MUST appear, in isolate units
+    # (sum of the per-segment counters), with the breakdown spelled out.
+    assert "**314** isolate(s) were dropped by the per-segment length filter" in md
+    assert "S too short: 200" in md
+    assert "M too long: 100" in md
+    assert "L too short: 14" in md
+
+
+def test_render_summary_non_segmented_keeps_global_length_wording(make_seq, tmp_path):
+    """Regression guard for the inverse: a non-segmented run with a
+    global-filter drop still gets the ±median-percent wording."""
+    cfg = _base_cfg(tmp_path)
+    qc = _qc(total_input=1000, passed=970, dedup=0, length=30, ambig=0)
+    # Non-segmented: length_filter_skipped stays False (default).
+    md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"])
+    assert "**30** outside the configured length window" in md
+    assert "outside ±50% of the per-rank median length" in md
+    # And the per-segment sentence must NOT appear when removed_length_by_segment is empty.
+    assert "per-segment length filter" not in md
+
+
 def test_render_summary_segmented_block_appears_only_when_enabled(make_seq, tmp_path):
     cfg = _base_cfg(tmp_path)
     cfg["segmented"] = {

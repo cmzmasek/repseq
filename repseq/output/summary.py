@@ -166,7 +166,11 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
     parts: list[str] = []
     if qc_report.removed_duplicates:
         parts.append(f"**{_fmt_int(qc_report.removed_duplicates)}** exact duplicates")
-    if qc_report.removed_length:
+    # Only describe the global ±median length window when it actually ran.
+    # In segmented mode the global filter is skipped (length_filter_skipped)
+    # and removed_length is overloaded by the per-segment filter in
+    # segmented/completeness.py; that case is described separately below.
+    if qc_report.removed_length and not qc_report.length_filter_skipped:
         lf = qc_cfg.get("length_filter", {}) or {}
         mode_str = lf.get("mode", "median_percent")
         if mode_str == "median_percent":
@@ -196,6 +200,30 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
     )
 
     extra_lines: list[str] = []
+    if qc_report.removed_length_by_segment:
+        per_seg = qc_report.removed_length_by_segment
+        # The per-segment counter is in isolates (one bad segment drops the
+        # whole isolate), so summing too_short + too_long gives the total
+        # isolates lost — the actionable number for a bench scientist. The
+        # raw qc_report.removed_length counter is in segments and would
+        # mislead the reader, so we deliberately do not surface it here.
+        total_isolates = sum(
+            c.get("too_short", 0) + c.get("too_long", 0)
+            for c in per_seg.values()
+        )
+        breakdown_bits: list[str] = []
+        for seg_name in sorted(per_seg.keys()):
+            counts = per_seg[seg_name]
+            if counts.get("too_short"):
+                breakdown_bits.append(f"{seg_name} too short: {counts['too_short']}")
+            if counts.get("too_long"):
+                breakdown_bits.append(f"{seg_name} too long: {counts['too_long']}")
+        breakdown = "; ".join(breakdown_bits)
+        extra_lines.append(
+            f"**{_fmt_int(total_isolates)}** isolate(s) were dropped by the "
+            f"per-segment length filter (configured bounds in "
+            f"`segmented.viruses.*.segment_lengths`): {breakdown}."
+        )
     if qc_report.removed_incomplete_isolates:
         extra_lines.append(
             f"**{_fmt_int(qc_report.removed_incomplete_isolates)}** isolates "
