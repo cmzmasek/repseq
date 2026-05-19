@@ -5,7 +5,7 @@ from repseq.models import QCReport, SequenceType
 from repseq.qc.pipeline import (
     ambiguous_filter,
     annotation_filter,
-    length_filter,
+    genome_length_filter,
     remove_duplicates,
     run_qc,
 )
@@ -54,76 +54,72 @@ def test_remove_duplicates_prefers_reviewed_then_first_seen(make_seq):
 # length_filter
 # ---------------------------------------------------------------------------
 
-def test_length_filter_median_percent_drops_short(make_seq):
-    # Median of [100,100,100,10] = 100; with 50% cutoff => min_len=50
+def test_genome_length_filter_drops_short(make_seq):
     seqs = [
-        make_seq("s1", "A" * 100),
-        make_seq("s2", "A" * 100),
-        make_seq("s3", "A" * 100),
+        make_seq("ok1", "A" * 100),
+        make_seq("ok2", "A" * 100),
         make_seq("short", "A" * 10),
     ]
     report = QCReport()
-    kept = length_filter(seqs, {"mode": "median_percent", "min_percent": 50}, report)
-    assert {s.id for s in kept} == {"s1", "s2", "s3"}
+    kept = genome_length_filter(seqs, {"min": 50}, report)
+    assert {s.id for s in kept} == {"ok1", "ok2"}
     assert report.removed_length == 1
+    assert "length_too_short:10<50" in {s.qc_fail_reason for s in seqs if not s.qc_passed}
 
 
-def test_length_filter_min_max(make_seq):
+def test_genome_length_filter_min_and_max(make_seq):
     seqs = [
         make_seq("tiny", "A" * 5),
         make_seq("ok", "A" * 50),
         make_seq("huge", "A" * 1000),
     ]
     report = QCReport()
-    kept = length_filter(
-        seqs, {"mode": "min_max", "min_length": 10, "max_length": 500}, report
-    )
+    kept = genome_length_filter(seqs, {"min": 10, "max": 500}, report)
     assert [s.id for s in kept] == ["ok"]
     assert report.removed_length == 2
 
 
-def test_length_filter_empty_input_no_crash():
+def test_genome_length_filter_empty_input_no_crash():
     report = QCReport()
-    assert length_filter([], {"mode": "median_percent", "min_percent": 50}, report) == []
+    assert genome_length_filter([], {"min": 50}, report) == []
 
 
-def test_length_filter_median_percent_caps_long(make_seq):
-    # max_percent should also drop oversized records (median = 100).
-    seqs = [
-        make_seq("s1", "A" * 100),
-        make_seq("s2", "A" * 100),
-        make_seq("s3", "A" * 100),
-        make_seq("big", "A" * 500),
-    ]
-    report = QCReport()
-    cfg = {"mode": "median_percent", "min_percent": 50, "max_percent": 150}
-    kept = length_filter(seqs, cfg, report)
-    assert {s.id for s in kept} == {"s1", "s2", "s3"}
-    assert report.removed_length == 1
-
-
-def test_length_filter_min_percent_zero_disables_lower_bound(make_seq):
+def test_genome_length_filter_no_bounds_is_noop(make_seq):
+    # The function-level no-op (config validation separately forbids
+    # enabling with no bounds): with neither min nor max, nothing drops.
     seqs = [make_seq("s1", "A" * 100), make_seq("tiny", "A" * 2)]
     report = QCReport()
-    kept = length_filter(seqs, {"mode": "median_percent", "min_percent": 0}, report)
+    kept = genome_length_filter(seqs, {}, report)
     assert {s.id for s in kept} == {"s1", "tiny"}
     assert report.removed_length == 0
 
 
-def test_run_qc_skips_length_filter_in_segmented_mode(make_seq):
+def test_run_qc_skips_genome_length_filter_in_segmented_mode(make_seq):
     # Regression: in segmented mode the input is a mix of long and short
-    # segments. A whole-pool median would drop the short segments, leaving
-    # every isolate incomplete. run_qc must skip the global length filter so
-    # per-segment segment_lengths bounds can do the job downstream.
+    # segments, so the whole-genome length filter must never run there
+    # (per-segment segment_lengths bounds do the job downstream). Even with
+    # the filter "enabled" the segmented branch wins and skips it.
     seqs = [
         make_seq("L1", "A" * 6000),
         make_seq("M1", "A" * 4000),
-        make_seq("S1", "A" * 900),   # < 50% of median — would be dropped
+        make_seq("S1", "A" * 900),
     ]
-    cfg = {"qc": {"length_filter": {"mode": "median_percent", "min_percent": 50}},
+    cfg = {"qc": {"genome_length_filter": {"enabled": True, "min": 5000}},
            "segmented": {"enabled": True}}
     kept, report = run_qc(seqs, cfg)
     assert {s.id for s in kept} == {"L1", "M1", "S1"}
+    assert report.removed_length == 0
+    assert report.length_filter_skipped is True
+
+
+def test_run_qc_skips_genome_length_filter_when_disabled(make_seq):
+    # Non-segmented but the filter is disabled (the default): no drops,
+    # length_filter_skipped recorded.
+    seqs = [make_seq("L1", "A" * 6000), make_seq("S1", "A" * 50)]
+    cfg = {"qc": {"genome_length_filter": {"enabled": False, "min": 5000}},
+           "segmented": {"enabled": False}}
+    kept, report = run_qc(seqs, cfg)
+    assert {s.id for s in kept} == {"L1", "S1"}
     assert report.removed_length == 0
     assert report.length_filter_skipped is True
 
@@ -160,13 +156,13 @@ def test_run_qc_applies_dedup_when_not_segmented(make_seq):
     assert report.dedup_skipped is False
 
 
-def test_run_qc_applies_length_filter_when_not_segmented(make_seq):
+def test_run_qc_applies_genome_length_filter_when_enabled(make_seq):
     seqs = [
         make_seq("L1", "A" * 6000),
         make_seq("M1", "A" * 4000),
         make_seq("S1", "A" * 900),
     ]
-    cfg = {"qc": {"length_filter": {"mode": "median_percent", "min_percent": 50}},
+    cfg = {"qc": {"genome_length_filter": {"enabled": True, "min": 2000}},
            "segmented": {"enabled": False}}
     kept, report = run_qc(seqs, cfg)
     assert "S1" not in {s.id for s in kept}
@@ -283,7 +279,7 @@ def test_run_qc_pipeline(make_seq):
     cfg = {
         "qc": {
             "remove_duplicates": True,
-            "length_filter": {"mode": "min_max", "min_length": 50},
+            "genome_length_filter": {"enabled": True, "min": 50},
             "ambiguous_threshold": 0.05,
             "annotation_filter": {"enabled": True, "keywords": ["hypothetical"]},
         }

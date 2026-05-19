@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import statistics
 from typing import Any
 
 from ..models import QCReport, Sequence, SequenceType
@@ -54,39 +53,35 @@ def remove_duplicates(sequences: list[Sequence], report: QCReport) -> list[Seque
 # Step 2 – Length filter
 # ---------------------------------------------------------------------------
 
-def length_filter(sequences: list[Sequence], cfg: dict[str, Any], report: QCReport) -> list[Sequence]:
-    """Filter sequences by length (median-percent or min/max)."""
+def genome_length_filter(
+    sequences: list[Sequence], cfg: dict[str, Any], report: QCReport
+) -> list[Sequence]:
+    """Drop whole sequences outside absolute nucleotide-length bounds.
+
+    ``cfg`` is the ``qc.genome_length_filter`` block: ``{min, max}`` (either
+    optional). Non-segmented mode only — the caller (:func:`run_qc`) is
+    responsible for not invoking this in segmented mode, where per-segment
+    bounds apply instead. There is no median/relative mode: the bounds are
+    absolute, so the user must know roughly how long the genome is. With
+    neither bound set this is a no-op.
+    """
     if not sequences:
         return sequences
 
-    mode = cfg.get("mode", "median_percent")
+    min_len = cfg.get("min")
+    max_len = cfg.get("max")
+    if min_len is None and max_len is None:
+        return sequences
+
     kept: list[Sequence] = []
-
-    if mode == "median_percent":
-        lengths = [s.length for s in sequences]
-        median = statistics.median(lengths)
-        # min_percent == 0 (or absent) disables the lower bound; max_percent
-        # is an optional upper cap so grossly oversized records (mis-joined
-        # genomes, contaminants) can also be dropped.
-        min_pct = cfg.get("min_percent", 50)
-        max_pct = cfg.get("max_percent")
-        min_len = int(median * min_pct / 100.0) if min_pct else None
-        max_len = int(median * max_pct / 100.0) if max_pct else None
-    else:  # min_max
-        min_len = cfg.get("min_length")
-        max_len = cfg.get("max_length")
-
     for seq in sequences:
-        fail = False
         reason = None
         if min_len is not None and seq.length < min_len:
-            fail = True
             reason = f"length_too_short:{seq.length}<{min_len}"
         elif max_len is not None and seq.length > max_len:
-            fail = True
             reason = f"length_too_long:{seq.length}>{max_len}"
 
-        if fail:
+        if reason:
             seq.qc_passed = False
             seq.qc_fail_reason = reason
             report.removed_length += 1
@@ -205,16 +200,18 @@ def run_qc(sequences: list[Sequence], cfg: dict[str, Any]) -> tuple[list[Sequenc
         else:
             sequences = remove_duplicates(sequences, report)
 
-    # In segmented mode the input is a mixed pool of individual segments with
-    # wildly different lengths (e.g. influenza PB2 ~2300 nt vs NS ~890 nt). A
-    # whole-pool median — or any single absolute bound — is not meaningful and
-    # would wrongly drop the short segments, leaving every isolate "incomplete"
-    # at the completeness step. Per-segment bounds are applied later via
-    # segmented.viruses.<v>.segment_lengths instead, so skip the global filter.
-    if segmented:
+    # The whole-genome length filter is non-segmented-only and opt-in. In
+    # segmented mode the input is a mixed pool of segments with very
+    # different lengths (e.g. influenza PB2 ~2300 nt vs NS ~890 nt), so a
+    # single whole-sequence bound is meaningless — per-segment bounds apply
+    # later via segmented.viruses.<v>.segment_lengths instead. When the
+    # filter is disabled (the default) it likewise doesn't run. Either way
+    # length_filter_skipped records that the genome filter did not fire.
+    glf = qc_cfg.get("genome_length_filter", {}) or {}
+    if segmented or not glf.get("enabled", False):
         report.length_filter_skipped = True
     else:
-        sequences = length_filter(sequences, qc_cfg.get("length_filter", {}), report)
+        sequences = genome_length_filter(sequences, glf, report)
 
     thresh = qc_cfg.get("ambiguous_threshold", 0.05)
     sequences = ambiguous_filter(sequences, thresh, report)

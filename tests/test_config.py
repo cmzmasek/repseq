@@ -11,7 +11,7 @@ from repseq.config import DEFAULTS, get_virus_config, load_config, validate_conf
 def test_load_config_returns_defaults_when_no_file():
     cfg = load_config(None)
     assert cfg["threads"] == DEFAULTS["threads"]
-    assert cfg["qc"]["length_filter"]["mode"] == "median_percent"
+    assert cfg["qc"]["genome_length_filter"]["enabled"] is False
 
 
 def test_load_config_merges_user_overrides(tmp_path: Path):
@@ -24,7 +24,7 @@ def test_load_config_merges_user_overrides(tmp_path: Path):
     # Overridden inside a nested dict
     assert cfg["qc"]["ambiguous_threshold"] == 0.1
     # Untouched defaults survive the merge
-    assert cfg["qc"]["length_filter"]["mode"] == "median_percent"
+    assert cfg["qc"]["genome_length_filter"]["enabled"] is False
 
 
 def test_load_config_env_var_override(tmp_path: Path, monkeypatch):
@@ -38,26 +38,48 @@ def test_validate_config_accepts_defaults():
     assert errors == []
 
 
-def test_validate_config_rejects_bad_length_mode():
+def test_validate_config_rejects_legacy_length_filter_key():
+    """The renamed qc.length_filter must be rejected so configs migrate
+    consciously instead of silently losing length filtering."""
     cfg = load_config(None)
-    cfg["qc"]["length_filter"]["mode"] = "bogus"
+    cfg["qc"]["length_filter"] = {"mode": "median_percent", "min_percent": 50}
     errors = validate_config(cfg)
-    assert any("length_filter.mode" in e for e in errors)
+    assert any("qc.length_filter was renamed" in e for e in errors)
 
 
-def test_validate_config_accepts_min_percent_zero_and_max_percent():
+def test_validate_config_accepts_genome_length_filter_bounds():
     cfg = load_config(None)
-    cfg["qc"]["length_filter"]["min_percent"] = 0    # disables lower bound
-    cfg["qc"]["length_filter"]["max_percent"] = 200  # optional upper cap
+    cfg["qc"]["genome_length_filter"] = {"enabled": True, "min": 9000, "max": 13000}
     assert validate_config(cfg) == []
 
 
-def test_validate_config_rejects_max_percent_not_above_min():
+def test_validate_config_genome_length_filter_disabled_ignores_bounds():
     cfg = load_config(None)
-    cfg["qc"]["length_filter"]["min_percent"] = 80
-    cfg["qc"]["length_filter"]["max_percent"] = 50
+    # Disabled → invalid bounds are not checked (the filter won't run).
+    cfg["qc"]["genome_length_filter"] = {"enabled": False, "min": 13000, "max": 9000}
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_genome_length_filter_with_segmented():
+    cfg = load_config(None)
+    cfg["qc"]["genome_length_filter"] = {"enabled": True, "min": 9000}
+    cfg["segmented"]["enabled"] = True
     errors = validate_config(cfg)
-    assert any("max_percent" in e for e in errors)
+    assert any("cannot be true when" in e for e in errors)
+
+
+def test_validate_config_rejects_genome_length_filter_enabled_without_bounds():
+    cfg = load_config(None)
+    cfg["qc"]["genome_length_filter"] = {"enabled": True, "min": None, "max": None}
+    errors = validate_config(cfg)
+    assert any("neither min nor max" in e for e in errors)
+
+
+def test_validate_config_rejects_genome_length_filter_min_above_max():
+    cfg = load_config(None)
+    cfg["qc"]["genome_length_filter"] = {"enabled": True, "min": 13000, "max": 9000}
+    errors = validate_config(cfg)
+    assert any("min must be <=" in e for e in errors)
 
 
 def test_validate_config_rejects_out_of_range_ambiguous():

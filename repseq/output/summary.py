@@ -166,21 +166,24 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
     parts: list[str] = []
     if qc_report.removed_duplicates:
         parts.append(f"**{_fmt_int(qc_report.removed_duplicates)}** exact duplicates")
-    # Only describe the global ±median length window when it actually ran.
-    # In segmented mode the global filter is skipped (length_filter_skipped)
-    # and removed_length is overloaded by the per-segment filter in
-    # segmented/completeness.py; that case is described separately below.
+    # Describe the whole-genome length filter only when it actually ran
+    # (non-segmented + enabled). In segmented mode it's skipped
+    # (length_filter_skipped) and removed_length is overloaded by the
+    # per-segment filter in segmented/completeness.py; that case is
+    # described separately below.
     if qc_report.removed_length and not qc_report.length_filter_skipped:
-        lf = qc_cfg.get("length_filter", {}) or {}
-        mode_str = lf.get("mode", "median_percent")
-        if mode_str == "median_percent":
-            mp = lf.get("min_percent", 50)
-            length_note = f" (outside ±{mp}% of the per-rank median length)"
-        else:
-            length_note = ""
+        glf = qc_cfg.get("genome_length_filter", {}) or {}
+        mn = glf.get("min")
+        mx = glf.get("max")
+        bound_bits: list[str] = []
+        if mn is not None:
+            bound_bits.append(f"shorter than {_fmt_int(mn)} nt")
+        if mx is not None:
+            bound_bits.append(f"longer than {_fmt_int(mx)} nt")
+        length_note = f" ({' or '.join(bound_bits)})" if bound_bits else ""
         parts.append(
             f"**{_fmt_int(qc_report.removed_length)}** outside the configured "
-            f"length window{length_note}"
+            f"whole-genome length bounds{length_note}"
         )
     if qc_report.removed_ambiguous:
         thr = qc_cfg.get("ambiguous_threshold", 0.05)

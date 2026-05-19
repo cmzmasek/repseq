@@ -122,26 +122,38 @@ def passes_cutoffs(
           GA bit-score, require ``dom_score >= GA``.
         - Otherwise require ``dom_evalue <= default_evalue``.
     Coverage gate:
-        - ``ali_span / hmm_len >= relative_length_cutoff``. The HMM
-          model length is the denominator (per design): short HMM on
-          long CDS is a valid domain hit; long HMM with short alignment
-          is the reject case.
+        - ``hmm_span / hmm_len >= relative_length_cutoff`` where
+          ``hmm_span = hmm_to - hmm_from + 1`` is the span on the HMM
+          MODEL (domtblout hmm-from/hmm-to), not the alignment span on
+          the protein (ali-from/ali-to). Coverage asks "how much of the
+          profile did this hit match", so both numerator and denominator
+          live in HMM-model coordinates. Using the protein span as the
+          numerator diverges whenever the CDS carries insertions or
+          deletions relative to the model (insertions inflate it, indels
+          deflate it). Per design: a short HMM matching part of a long
+          CDS is a valid hit; a long HMM that aligns only a short stretch
+          of its model is the reject case.
     """
     ga = ga_cutoffs.get(hit["target"]) if use_ga_when_available else None
     if ga is not None:
         similarity_pass = hit["dom_score"] >= ga
     else:
         similarity_pass = hit["dom_evalue"] <= default_evalue
-    hmm_len = max(int(hit.get("hmm_len", 0)), 1)
-    coverage = hit["ali_span"] / hmm_len
-    length_pass = coverage >= relative_length_cutoff
+    length_pass = coverage_of(hit) >= relative_length_cutoff
     return similarity_pass and length_pass
 
 
 def coverage_of(hit: dict) -> float:
-    """Convenience: ali_span / hmm_len, clipped to [0, 1]."""
+    """HMM-model coverage: ``(hmm_to - hmm_from + 1) / hmm_len``, clipped to [0, 1].
+
+    The numerator is the span on the HMM MODEL, not the alignment span on
+    the protein (``ali_span``, which stays in protein coordinates and is
+    used for domain-ordering checks). The model span is the correct
+    measure of "how much of the profile this hit covered".
+    """
     hmm_len = max(int(hit.get("hmm_len", 0)), 1)
-    return min(1.0, hit["ali_span"] / hmm_len)
+    hmm_span = max(0, int(hit.get("hmm_to", 0)) - int(hit.get("hmm_from", 0)) + 1)
+    return min(1.0, hmm_span / hmm_len)
 
 
 # ---------------------------------------------------------------------------

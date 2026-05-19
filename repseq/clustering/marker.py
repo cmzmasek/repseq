@@ -47,7 +47,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from ..hmm.runner import cds_satisfies_token, parse_hmm_token
+from ..hmm.runner import cds_satisfies_token, coverage_of, parse_hmm_token
 from ..models import QCReport, Sequence
 
 
@@ -236,10 +236,7 @@ def _ensure_passing_annotation(
                 similarity_pass = hit["dom_score"] >= ga
             else:
                 similarity_pass = hit["dom_evalue"] <= default_evalue
-            hmm_len = max(int(hit.get("hmm_len", 0)), 1)
-            hit["passing"] = similarity_pass and (
-                hit["ali_span"] / hmm_len >= rel_len
-            )
+            hit["passing"] = similarity_pass and (coverage_of(hit) >= rel_len)
 
 
 def _best_evalue_across_token_hmms(

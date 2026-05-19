@@ -44,7 +44,7 @@ def _binary_search_threshold(
     hi: float = 1.0,
     max_iter: int = 12,
     label: str = "",
-) -> tuple[list[Sequence], float]:
+) -> tuple[list[Cluster], float]:
     """Binary-search for the clustering threshold that yields ~n_target clusters.
 
     Identity-threshold semantics (same direction for both supported
@@ -65,7 +65,10 @@ def _binary_search_threshold(
     rejects ``-c`` below 0.40 (protein) or 0.80 (nucleotide); mmseqs2's
     floor is 0.0, so this is a no-op there.
 
-    Returns (representatives, threshold_used).
+    Returns ``(clusters, threshold_used)`` — the full ``Cluster`` objects
+    with their members intact (representative accessible via
+    ``c.representative``), so callers can report accurate cluster sizes
+    instead of treating every representative as a singleton.
     """
     floor = min_threshold(cfg, sequences)
     if floor > lo:
@@ -77,10 +80,10 @@ def _binary_search_threshold(
             f"backend's threshold floor or switch backends."
         )
 
-    best_reps: list[Sequence] = []
+    best_clusters: list[Cluster] = []
     best_count = -1
     best_threshold = hi
-    fallback_reps: list[Sequence] = []
+    fallback_clusters: list[Cluster] = []
     fallback_count: Optional[int] = None  # smallest count seen that exceeds n_target
 
     tag = f"[{label}] " if label else ""
@@ -106,25 +109,33 @@ def _binary_search_threshold(
             # that is still <= n_target), then raise the threshold to
             # split further.
             if n_reps > best_count:
-                best_reps = [c.representative for c in clusters]
+                best_clusters = clusters
                 best_count = n_reps
                 best_threshold = mid
             lo = mid
         else:
             # Too many clusters — lower the threshold to merge more.
             if fallback_count is None or n_reps < fallback_count:
-                fallback_reps = [c.representative for c in clusters]
+                fallback_clusters = clusters
                 fallback_count = n_reps
             hi = mid
 
         if n_reps == n_target or abs(hi - lo) < 0.005:
             break
 
-    if not best_reps:
+    if not best_clusters:
         # No threshold reached at-or-below the target; return the closest
         # result from above (overflow="trim" will pare it down exactly).
-        best_reps = fallback_reps or list(sequences)
-        best_count = fallback_count if fallback_count is not None else len(sequences)
+        if fallback_clusters:
+            best_clusters = fallback_clusters
+            best_count = fallback_count if fallback_count is not None else len(fallback_clusters)
+        else:
+            # Nothing clustered at all — every sequence is its own singleton.
+            best_clusters = [
+                Cluster(cluster_id=f"cluster_{i + 1:06d}", representative=s)
+                for i, s in enumerate(sequences)
+            ]
+            best_count = len(best_clusters)
         best_threshold = hi
 
     where = f" for '{label}'" if label else ""
@@ -150,12 +161,17 @@ def _binary_search_threshold(
             where, best_count, best_threshold,
         )
 
-    # If overflow == "trim", diversity-select exactly n_target from best_reps.
-    if overflow == "trim" and len(best_reps) > n_target:
+    # If overflow == "trim", diversity-select exactly n_target clusters by
+    # picking the most diverse representatives, then keeping their clusters
+    # (members intact).
+    if overflow == "trim" and len(best_clusters) > n_target:
         seed = cfg.get("seed", 42)
-        best_reps = select_diverse(best_reps, n_target, seed=seed)
+        reps = [c.representative for c in best_clusters]
+        chosen = select_diverse(reps, n_target, seed=seed)
+        chosen_ids = {s.id for s in chosen}
+        best_clusters = [c for c in best_clusters if c.representative.id in chosen_ids]
 
-    return best_reps, best_threshold
+    return best_clusters, best_threshold
 
 
 class TaxonomicMode1(BaseMode):
@@ -194,24 +210,20 @@ class TaxonomicMode1(BaseMode):
                     clustered=False,
                 ))
             else:
-                reps, threshold = _binary_search_threshold(
+                clusters, threshold = _binary_search_threshold(
                     group_seqs,
                     self.n_per_group,
                     self.cfg,
                     self.overflow,
                     label=group_label,
                 )
-                all_reps.extend(reps)
-                for rep in reps:
-                    all_clusters.append(
-                        Cluster(
-                            cluster_id=f"{group_label}|{rep.id}",
-                            representative=rep,
-                        )
-                    )
+                for c in clusters:
+                    c.cluster_id = f"{group_label}|{c.representative.id}"
+                all_clusters.extend(clusters)
+                all_reps.extend(c.representative for c in clusters)
                 group_stats.append(GroupStat(
                     grouping=self.rank, group=group_label,
-                    n_before=len(group_seqs), n_after=len(reps),
+                    n_before=len(group_seqs), n_after=len(clusters),
                     clustered=True, cutoff=threshold,
                     cutoff_counts=compute_diversity_curve(group_seqs, self.cfg),
                 ))

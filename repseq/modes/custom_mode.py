@@ -143,18 +143,17 @@ class CustomMode(BaseMode):
                     clustered=False,
                 ))
             else:
-                reps, threshold = _binary_search_threshold(
+                clusters, threshold = _binary_search_threshold(
                     group_seqs, self.n_per_group, self.cfg, self.overflow,  # type: ignore[arg-type]
                     label=str(group_label),
                 )
-                all_reps.extend(reps)
-                for rep in reps:
-                    all_clusters.append(
-                        Cluster(cluster_id=f"{self.field}={group_label}|{rep.id}", representative=rep)
-                    )
+                for c in clusters:
+                    c.cluster_id = f"{self.field}={group_label}|{c.representative.id}"
+                all_clusters.extend(clusters)
+                all_reps.extend(c.representative for c in clusters)
                 group_stats.append(GroupStat(
                     grouping=self.field, group=str(group_label),
-                    n_before=len(group_seqs), n_after=len(reps),
+                    n_before=len(group_seqs), n_after=len(clusters),
                     clustered=True, cutoff=threshold,
                     cutoff_counts=compute_diversity_curve(group_seqs, self.cfg),
                 ))

@@ -17,7 +17,7 @@ def _base_cfg(tmp_path):
     return {
         "output": {"dir": str(tmp_path), "prefix": "test"},
         "clustering": {"backend": "mmseqs2", "alphabet_for_clustering": "protein"},
-        "qc": {"length_filter": {"mode": "median_percent", "min_percent": 50},
+        "qc": {"genome_length_filter": {"enabled": True, "min": 9000, "max": 13000},
                "ambiguous_threshold": 0.05},
         "representative": {"priority": ["refseq", "reviewed_uniprot", "longest"]},
         "segmented": {"enabled": False},
@@ -120,17 +120,32 @@ def test_render_summary_segmented_length_filter_uses_per_segment_wording(make_se
     assert "L too short: 14" in md
 
 
-def test_render_summary_non_segmented_keeps_global_length_wording(make_seq, tmp_path):
-    """Regression guard for the inverse: a non-segmented run with a
-    global-filter drop still gets the ±median-percent wording."""
-    cfg = _base_cfg(tmp_path)
+def test_render_summary_non_segmented_describes_absolute_genome_bounds(make_seq, tmp_path):
+    """A non-segmented run's length-filter prose must describe the absolute
+    nucleotide bounds of qc.genome_length_filter — no median/relative
+    wording (that filter was removed)."""
+    cfg = _base_cfg(tmp_path)  # genome_length_filter min=9000, max=13000
     qc = _qc(total_input=1000, passed=970, dedup=0, length=30, ambig=0)
     # Non-segmented: length_filter_skipped stays False (default).
     md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"])
-    assert "**30** outside the configured length window" in md
-    assert "outside ±50% of the per-rank median length" in md
+    assert "**30** outside the configured whole-genome length bounds" in md
+    assert "shorter than 9,000 nt" in md
+    assert "longer than 13,000 nt" in md
+    # Regression guards: the removed median wording must not reappear.
+    assert "median" not in md
+    assert "per-rank" not in md
     # And the per-segment sentence must NOT appear when removed_length_by_segment is empty.
     assert "per-segment length filter" not in md
+
+
+def test_render_summary_length_filter_lower_bound_only(make_seq, tmp_path):
+    """With only a min bound set, the prose names just the lower bound."""
+    cfg = _base_cfg(tmp_path)
+    cfg["qc"]["genome_length_filter"] = {"enabled": True, "min": 9000, "max": None}
+    qc = _qc(total_input=1000, passed=970, dedup=0, length=30, ambig=0)
+    md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"])
+    assert "shorter than 9,000 nt" in md
+    assert "longer than" not in md
 
 
 def test_render_summary_segmented_block_appears_only_when_enabled(make_seq, tmp_path):

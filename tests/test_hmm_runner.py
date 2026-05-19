@@ -16,12 +16,18 @@ from repseq.hmm.runner import (
 
 
 def _hit(target="RdRp", dom_score=200.0, dom_evalue=1e-50, hmm_len=300, ali_span=280):
+    # Coverage is measured on the HMM model span (hmm_to - hmm_from + 1).
+    # These tests express the covered span via ali_span for readability, so
+    # mirror it onto hmm coords (hmm_from=1, hmm_to=ali_span). ali_span stays
+    # as a real field (used for domain ordering elsewhere).
     return {
         "target": target,
         "dom_score": dom_score,
         "dom_evalue": dom_evalue,
         "hmm_len": hmm_len,
         "ali_span": ali_span,
+        "hmm_from": 1,
+        "hmm_to": ali_span,
     }
 
 
@@ -84,14 +90,19 @@ def test_passes_cutoffs_both_gates_required():
     assert passes_cutoffs(h_weak, ga_cutoffs={}, **cfg) is False
 
 
-def test_coverage_of_clipped_to_one():
-    """Pathological data: ali_span > hmm_len would yield > 1.0 — clip."""
-    assert coverage_of({"ali_span": 200, "hmm_len": 100}) == 1.0
-    assert coverage_of({"ali_span": 50, "hmm_len": 100}) == 0.5
-    # hmm_len=0 (defensive: should never happen in real data; the floor
-    # of max(hmm_len, 1) → 1 means we'd compute span/1 = span, which is
-    # then clipped to 1.0).
-    assert coverage_of({"ali_span": 50, "hmm_len": 0}) == 1.0
+def test_coverage_of_uses_hmm_model_span():
+    """Coverage is (hmm_to - hmm_from + 1) / hmm_len, NOT the protein
+    alignment span. A hit with a big insertion (large ali_span) but a
+    small HMM-model span must report the small model coverage."""
+    # Model span 150 of a 300-long model = 0.50, regardless of a large
+    # protein alignment span (insertions don't inflate coverage).
+    assert coverage_of(
+        {"hmm_from": 1, "hmm_to": 150, "hmm_len": 300, "ali_span": 290}
+    ) == 0.5
+    # Pathological: model span > hmm_len would exceed 1.0 — clip.
+    assert coverage_of({"hmm_from": 1, "hmm_to": 200, "hmm_len": 100}) == 1.0
+    # hmm_len=0 (defensive): max(hmm_len, 1) → 1, so span/1 clipped to 1.0.
+    assert coverage_of({"hmm_from": 1, "hmm_to": 50, "hmm_len": 0}) == 1.0
 
 
 def test_cache_key_changes_with_db_signature():

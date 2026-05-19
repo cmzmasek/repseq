@@ -1269,7 +1269,7 @@ def _final_summary(result, qc_report, cfg) -> None:
         detail = f" ({', '.join(bits)})" if bits else ""
         reasons.append(
             f"QC removed all {qc_report.total_input} input sequences{detail} — "
-            "loosen the relevant qc.* settings (length_filter, "
+            "loosen the relevant qc.* settings (genome_length_filter, "
             "ambiguous_threshold, annotation_filter keywords, protein_annotation)."
         )
     elif segmented and qc_report.removed_incomplete_isolates:
@@ -1745,18 +1745,19 @@ def init_config(output):
     cfg["qc"] = {}
     cfg["qc"]["remove_duplicates"] = click.confirm("Remove exact duplicates?", default=True)
 
-    lf_mode = click.prompt(
-        "Length filter mode", type=click.Choice(["median_percent", "min_max"]),
-        default="median_percent"
-    )
-    cfg["qc"]["length_filter"] = {"mode": lf_mode}
-    if lf_mode == "median_percent":
-        cfg["qc"]["length_filter"]["min_percent"] = click.prompt(
-            "Minimum percent of median length", default=50, type=int
+    # Whole-genome length filter — non-segmented only, absolute nt bounds.
+    glf: dict = {"enabled": False, "min": None, "max": None}
+    if not cfg.get("segmented", {}).get("enabled") and click.confirm(
+        "Enable whole-genome length filter (non-segmented only)?", default=False
+    ):
+        glf["enabled"] = True
+        glf["min"] = click.prompt(
+            "Minimum genome length in nt (blank for none)", default=None, type=int,
         )
-    else:
-        cfg["qc"]["length_filter"]["min_length"] = click.prompt("Minimum length", default=None, type=int)
-        cfg["qc"]["length_filter"]["max_length"] = click.prompt("Maximum length", default=None, type=int)
+        glf["max"] = click.prompt(
+            "Maximum genome length in nt (blank for none)", default=None, type=int,
+        )
+    cfg["qc"]["genome_length_filter"] = glf
 
     cfg["qc"]["ambiguous_threshold"] = click.prompt(
         "Max ambiguous character fraction (0-1)", default=0.05, type=float

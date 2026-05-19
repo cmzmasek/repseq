@@ -10,20 +10,19 @@ seed: 42
 qc:
   remove_duplicates: true
 
-  length_filter:
-    # mode: "median_percent" filters relative to the median input length
-    # mode: "min_max" filters by absolute min/max length
-    #
-    # NOTE: in median_percent mode the median is taken over the WHOLE input.
-    # For multi-gene datasets that median is not meaningful — use min_max.
-    # In segmented mode this whole-pool length filter is SKIPPED entirely
-    # (the input is a mix of segments of very different lengths); use
-    # segmented.viruses.<v>.segment_lengths for per-segment bounds instead.
-    mode: median_percent
-    min_percent: 50      # drop sequences shorter than this % of the median; 0 disables
-    # max_percent: 200   # optional: also drop sequences longer than this % of the median
-    # min_length: 100    # used when mode == min_max
-    # max_length: 10000  # used when mode == min_max
+  # Whole-genome length filter: drop input sequences outside absolute
+  # nucleotide bounds. Both bounds are optional but at least one is required
+  # when enabled. There is no relative/median mode — you must supply the
+  # actual expected genome length range (this is intentional: a median taken
+  # over a taxonomically mixed input is not meaningful).
+  #
+  # NON-SEGMENTED MODE ONLY. Setting enabled: true together with
+  # segmented.enabled: true is a hard config error — segmented runs filter
+  # per segment via segmented.viruses.<virus>.segment_lengths instead.
+  genome_length_filter:
+    enabled: false
+    min: null    # e.g. 9000  (drop sequences shorter than this many nt)
+    max: null    # e.g. 13000 (drop sequences longer than this many nt)
 
   # Maximum fraction of ambiguous characters allowed (applies to AA and NA)
   ambiguous_threshold: 0.05

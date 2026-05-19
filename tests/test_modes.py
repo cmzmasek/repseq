@@ -131,6 +131,74 @@ def test_taxonomic1_group_stats_record_cutoff_when_clustered(make_seq):
     assert gs.cutoff is not None and 0.0 < gs.cutoff <= 1.0
 
 
+def test_taxonomic1_preserves_cluster_members(make_seq):
+    """Regression: binary-search modes must report real cluster sizes, not
+    collapse every cluster to a singleton. _binary_search_threshold used to
+    return only representatives, so the mode rebuilt member-less clusters and
+    _clusters.tsv showed cluster_size=1 everywhere."""
+    seqs = [_with_tax(make_seq(f"s{i}", "ACGT" * 20), genus="Foo") for i in range(10)]
+    fake = [
+        Cluster(cluster_id="c0", representative=seqs[0], members=list(seqs[1:5])),
+        Cluster(cluster_id="c1", representative=seqs[5], members=list(seqs[6:10])),
+    ]
+    with patch("repseq.modes.taxonomic1.run_clustering", return_value=fake):
+        result = TaxonomicMode1(_base_cfg(), rank="genus", n_per_group=2).run(seqs)
+
+    assert len(result.clusters) == 2
+    assert sorted(c.size for c in result.clusters) == [5, 5]
+    assert all(c.members for c in result.clusters)
+    # cluster_id relabeled with the group + representative id.
+    assert all(c.cluster_id.startswith("Foo|") for c in result.clusters)
+
+
+def test_binary_search_returns_clusters_with_members(make_seq):
+    """The helper returns Cluster objects (members intact), not bare reps."""
+    from repseq.modes.taxonomic1 import _binary_search_threshold
+
+    seqs = [make_seq(f"s{i}", "ACGT" * 10) for i in range(10)]
+    fake = [
+        Cluster(cluster_id="c0", representative=seqs[0], members=list(seqs[1:6])),
+        Cluster(cluster_id="c1", representative=seqs[6], members=list(seqs[7:10])),
+    ]
+    with patch("repseq.modes.taxonomic1.run_clustering", return_value=fake):
+        clusters, _ = _binary_search_threshold(
+            seqs, n_target=2, cfg=_base_cfg(), overflow="keep"
+        )
+
+    assert all(isinstance(c, Cluster) for c in clusters)
+    assert sorted(c.size for c in clusters) == [4, 6]
+
+
+def test_taxonomic2_accumulates_transitive_members(make_seq):
+    """Hierarchical mode: a leaf representative stands for everything merged
+    into it across levels, so leaf cluster_size must reflect the transitive
+    member count, not 1."""
+    from repseq.modes.taxonomic2 import TaxonomicMode2
+
+    # 10 seqs, all genus=Foo, all species=Bar. Level 1 (genus) clusters
+    # 10→2; level 2 (species) is a small group that passes through, so the
+    # two level-1 reps reach the leaf carrying their members.
+    seqs = [
+        _with_tax(make_seq(f"s{i}", "ACGT" * 20), genus="Foo", species="Bar")
+        for i in range(10)
+    ]
+    fake = [
+        Cluster(cluster_id="c0", representative=seqs[0], members=list(seqs[1:5])),
+        Cluster(cluster_id="c1", representative=seqs[5], members=list(seqs[6:10])),
+    ]
+    rank_levels = [
+        {"rank": "genus", "n_per_group": 2},
+        {"rank": "species", "n_per_group": 5},
+    ]
+    # _binary_search_threshold lives in taxonomic1 and resolves run_clustering
+    # in that module's namespace, so patch it there (not in taxonomic2).
+    with patch("repseq.modes.taxonomic1.run_clustering", return_value=fake):
+        result = TaxonomicMode2(_base_cfg(), rank_levels=rank_levels).run(seqs)
+
+    assert len(result.clusters) == 2
+    assert sorted(c.size for c in result.clusters) == [5, 5]
+
+
 def test_global_mode_records_group_stats(make_seq):
     seqs = [
         make_seq("a", "AAAAACCCCCGGGGGTTTTT"),

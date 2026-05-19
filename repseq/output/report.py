@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 import yaml
 
+from ..hmm.runner import coverage_of
 from ..models import QCReport, RunResult, Sequence
 
 
@@ -408,8 +409,9 @@ def _format_hmmscan_cell(prot: dict) -> str:
     for h in passing:
         name = h.get("target", "?")
         ev = h.get("dom_evalue")
-        hmm_len = max(int(h.get("hmm_len", 0)), 1)
-        cov = min(1.0, h.get("ali_span", 0) / hmm_len)
+        # HMM-model coverage (hmm_span / hmm_len), matching the QC gate —
+        # not the protein alignment span.
+        cov = coverage_of(h)
         parts.append(f"{name}(E={ev:.2g},cov={cov:.2f})")
     return ";".join(parts)
 

@@ -21,12 +21,15 @@ DEFAULTS: dict[str, Any] = {
     "seed": 42,
     "qc": {
         "remove_duplicates": True,
-        "length_filter": {
-            "mode": "median_percent",   # "median_percent" | "min_max"
-            "min_percent": 50,          # used when mode == median_percent; 0 disables lower bound
-            "max_percent": None,        # optional upper cap, as % of median (median_percent mode)
-            "min_length": None,         # used when mode == min_max
-            "max_length": None,
+        "genome_length_filter": {
+            # Absolute nucleotide-length bounds on whole input sequences.
+            # NON-SEGMENTED MODE ONLY — enabling this with segmented.enabled
+            # is a config error (segmented runs use per-segment bounds via
+            # segmented.viruses.<v>.segment_lengths instead). Default off:
+            # the user must opt in and supply at least one of min/max.
+            "enabled": False,
+            "min": None,   # drop sequences shorter than this many nt
+            "max": None,   # drop sequences longer than this many nt
         },
         "ambiguous_threshold": 0.05,
         "protein_annotation": {
@@ -514,36 +517,51 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     """Return a list of validation error messages (empty = valid)."""
     errors: list[str] = []
 
-    # Length filter
-    lf = cfg.get("qc", {}).get("length_filter", {})
-    mode = lf.get("mode")
-    if mode not in ("median_percent", "min_max"):
+    # Genome length filter (non-segmented only). The old median-percent
+    # filter (qc.length_filter) was removed in favour of explicit absolute
+    # bounds — reject the renamed key so configs migrate consciously rather
+    # than silently losing their length filtering.
+    qc = cfg.get("qc", {}) or {}
+    if "length_filter" in qc:
         errors.append(
-            f"qc.length_filter.mode must be 'median_percent' or 'min_max', got '{mode}'"
+            "qc.length_filter was renamed to qc.genome_length_filter and the "
+            "median-percent mode was removed. Use "
+            "qc.genome_length_filter: {enabled: true, min: <nt>, max: <nt>} "
+            "with absolute nucleotide bounds (non-segmented mode only)."
         )
-    if mode == "median_percent":
-        pct = lf.get("min_percent")
-        if not isinstance(pct, (int, float)) or not (0 <= pct <= 100):
+    glf = qc.get("genome_length_filter", {}) or {}
+    if "enabled" in glf and not isinstance(glf.get("enabled"), bool):
+        errors.append("qc.genome_length_filter.enabled must be a boolean")
+    if glf.get("enabled"):
+        if cfg.get("segmented", {}).get("enabled"):
             errors.append(
-                "qc.length_filter.min_percent must be a number between 0 and 100 "
-                "(0 disables the lower bound)"
+                "qc.genome_length_filter.enabled cannot be true when "
+                "segmented.enabled is true — the whole-genome length filter "
+                "only applies to non-segmented runs. For segmented viruses, "
+                "set per-segment bounds via "
+                "segmented.viruses.<virus>.segment_lengths instead."
             )
-        max_pct = lf.get("max_percent")
-        if max_pct is not None:
-            if not isinstance(max_pct, (int, float)) or max_pct <= 0:
+        mn = glf.get("min")
+        mx = glf.get("max")
+        if mn is None and mx is None:
+            errors.append(
+                "qc.genome_length_filter.enabled is true but neither min nor "
+                "max is set — supply at least one absolute nucleotide bound."
+            )
+        for label, val in (("min", mn), ("max", mx)):
+            if val is not None and (not isinstance(val, int) or isinstance(val, bool) or val <= 0):
                 errors.append(
-                    "qc.length_filter.max_percent must be a positive number "
-                    "(percent of median length)"
+                    f"qc.genome_length_filter.{label} must be a positive integer "
+                    "(nucleotides) or null"
                 )
-            elif isinstance(pct, (int, float)) and max_pct <= pct:
-                errors.append(
-                    "qc.length_filter.max_percent must be greater than min_percent"
-                )
-    if mode == "min_max":
-        mn = lf.get("min_length")
-        mx = lf.get("max_length")
-        if mn is not None and mx is not None and mn >= mx:
-            errors.append("qc.length_filter.min_length must be less than max_length")
+        if (
+            isinstance(mn, int) and not isinstance(mn, bool)
+            and isinstance(mx, int) and not isinstance(mx, bool)
+            and mn > mx
+        ):
+            errors.append(
+                "qc.genome_length_filter.min must be <= qc.genome_length_filter.max"
+            )
 
     # Ambiguous threshold
     thresh = cfg.get("qc", {}).get("ambiguous_threshold")

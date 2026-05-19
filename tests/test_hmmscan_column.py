@@ -17,11 +17,16 @@ from repseq.output.report import (
 
 
 def _hit(target, *, dom_evalue, ali_span, hmm_len=300, passing=True):
+    # Coverage is now measured on the HMM model span (hmm_to - hmm_from + 1),
+    # so express the covered span via hmm coords. ali_span is kept (it's a
+    # real field used for domain ordering) but no longer drives coverage.
     return {
         "target": target,
         "dom_evalue": dom_evalue,
         "dom_score": 200.0,
         "ali_span": ali_span,
+        "hmm_from": 1,
+        "hmm_to": ali_span,
         "hmm_len": hmm_len,
         "passing": passing,
     }
