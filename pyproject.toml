@@ -18,7 +18,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# `[viz]` is intentionally matplotlib-only: it ships wheels for every
+# platform and installs without compiling, so `--plot` always works after
+# it. The embedding then falls back to a numpy-only classical MDS.
 viz = [
+    "matplotlib>=3.7",
+]
+# `[viz-umap]` adds the optional UMAP upgrade (nicer separation on large
+# diverse sets). umap-learn pins narrow numpy/scipy/numba ranges and can
+# fail to build/import in a shared env — that's why it's split out and why
+# repseq treats it as best-effort at run time, never required for a plot.
+viz-umap = [
     "matplotlib>=3.7",
     "umap-learn>=0.5",
 ]

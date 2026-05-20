@@ -73,10 +73,17 @@ conda install -c bioconda cd-hit           # Linux (conda)
 `cd-hit-est`) on your `PATH` automatically.
 
 **Plots** — if you want the optional diagnostic scatter plot of the clustering
-result:
+result (matplotlib only — installs cleanly everywhere):
 
 ```bash
 pip install -e '.[viz]'
+```
+
+For the optional UMAP embedding upgrade (falls back to classical MDS if
+not installed):
+
+```bash
+pip install -e '.[viz-umap]'
 ```
 
 **MSA + tree (optional, `--phylo`)** — to build a multiple-sequence
@@ -193,7 +200,7 @@ your FASTA file(s)
     • per-rep metadata spreadsheet
     • per-stratum + per-cluster + per-drop TSVs
     • plain-text run log
-    • (optional) UMAP clustering plot                            (--plot)
+    • (optional) UMAP/MDS clustering plot                        (--plot)
     • (optional) MAFFT MSA + IQ-TREE / FastTree + phyloXML tree  (--phylo)
 ```
 
@@ -452,17 +459,24 @@ isolates to fall out, not just that "some did".
 
 #### `{prefix}_clustering.png` — only if `--plot` is passed
 
-Two-panel UMAP scatter of the clustered sequences (k-mer Jaccard
-distance):
+Two-panel scatter of the clustered sequences (k-mer Jaccard distance):
 
 - **Left** — every (sub)sampled sequence as a dot, coloured by genus.
 - **Right** — the same dots, coloured by cluster, sized by cluster
   population, with faint lines from each member to its representative.
 
+The embedding uses **UMAP** when `umap-learn` is installed and imports
+cleanly, and otherwise falls back to a **numpy-only classical MDS**
+(PCoA) on the same distance matrix; the figure labels its axes and title
+with whichever method ran. Only `matplotlib` is required —
+`pip install -e '.[viz]'` — so `--plot` works out of the box. For the
+UMAP upgrade (nicer separation on large diverse sets) add it with
+`pip install -e '.[viz-umap]'`; if that package fails to build/import in
+your environment, `--plot` still produces the MDS plot.
+
 Bounded by a default 2000-point subsample for very large runs
 (representatives are always kept). Skipped when the run produced no
-clusters (`global -n` mode). Requires the `[viz]` extras
-(`pip install -e '.[viz]'`).
+clusters (`global -n` mode).
 
 ### Phylogeny outputs
 
@@ -1076,7 +1090,7 @@ backends, optional protein-annotation QC, per-isolate
 taxonomy-consistency QC for segmented viruses, **HMM-based marker
 selection (HMMER hmmscan + bundled Pfam-A subset)**, strain-as-isolate
 provenance + collision detection, segment-name synonyms, rich phyloXML
-output, an optional UMAP plot of the clustering, an auto-generated
+output, an optional UMAP/MDS plot of the clustering, an auto-generated
 Methods-section starter (`_summary.md`) on every run, and a per-stratum
 diversity curve in `_group_counts.tsv`. **741 offline regression tests
 pass**; the NCBI-backed paths have been validated end-to-end against

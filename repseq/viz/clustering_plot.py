@@ -1,14 +1,22 @@
-"""UMAP scatter of repseq clustering results.
+"""Two-panel scatter of repseq clustering results.
 
-Two-panel figure rendered from a finished ``RunResult``:
+Rendered from a finished ``RunResult``:
 
-* **Left**  — every clustered sequence embedded with UMAP on a k-mer Jaccard
+* **Left**  — every clustered sequence embedded on a k-mer Jaccard
   distance, colored by genus (top 10 + "Other").
 * **Right** — same coordinates, colored by cluster, with point size scaling
   with cluster size, faint member→representative lines, and an inset
   cluster-size histogram.
 
-Requires the optional ``[viz]`` extras: ``umap-learn`` + ``matplotlib``.
+The only hard requirement is ``matplotlib`` (``pip install 'repseq[viz]'``),
+which ships wheels for every platform and installs without compiling. The
+embedding prefers **UMAP** when ``umap-learn`` imports cleanly (the
+``[viz-umap]`` extra — nicer separation on large diverse sets) and otherwise
+falls back to a **numpy-only classical MDS** (PCoA) on the same distance
+matrix. ``umap-learn`` pins narrow numpy/scipy/numba ranges and frequently
+fails to import in a shared conda env, so the fallback is what keeps
+``--plot`` working everywhere; the figure honestly labels which method ran.
+
 For large runs the embedding is subsampled (representatives always kept)
 to keep distance-matrix cost bounded; lines are auto-suppressed past a
 density threshold to avoid spaghetti.
@@ -32,45 +40,121 @@ DEFAULT_MAX_POINTS = 2000
 DEFAULT_MAX_LINES = 500
 
 
-def _check_deps() -> None:
-    """Verify the optional plotting stack is importable.
+def _require_matplotlib() -> None:
+    """Verify matplotlib — the one hard requirement for ``--plot`` — imports.
 
     Distinguishes "not installed" from "installed but failing to import".
-    The latter is almost always a NumPy/SciPy/numba version clash in the
-    environment — ``import umap`` then raises an ``ImportError`` of its own,
-    which the old code mistook for "umap-learn is missing" and told the user
-    to reinstall a package they already had. Surface the real error instead.
+    The latter is almost always a NumPy/SciPy version clash in the
+    environment, not a repseq problem; surface the real error rather than
+    telling the user to reinstall a package they already have. Raises
+    ``ImportError`` with a plain-English next step on either.
     """
-    missing: list[str] = []
-    broken: list[str] = []
-    for module, pip_name in (("matplotlib", "matplotlib"), ("umap", "umap-learn")):
-        try:
-            importlib.import_module(module)
-        except ModuleNotFoundError as exc:
-            # The package itself is absent vs. one of its dependencies is.
-            if exc.name == module:
-                missing.append(pip_name)
-            else:
-                broken.append(f"{pip_name}: {exc}")
-        except ImportError as exc:
-            broken.append(f"{pip_name}: {exc}")
+    try:
+        importlib.import_module("matplotlib")
+    except ModuleNotFoundError as exc:
+        if exc.name == "matplotlib":
+            raise ImportError(
+                "Plotting requires matplotlib — install it with: "
+                "pip install 'repseq[viz]'"
+            ) from exc
+        raise ImportError(
+            f"matplotlib is installed but a dependency is missing ({exc}); "
+            "the cleanest fix is a dedicated environment for repseq"
+        ) from exc
+    except ImportError as exc:
+        raise ImportError(
+            f"matplotlib is installed but failed to import [{exc}] — this is "
+            "almost always a NumPy/SciPy version mismatch in the environment, "
+            "not a repseq problem; the cleanest fix is a dedicated "
+            "environment for repseq"
+        ) from exc
 
-    parts: list[str] = []
-    if missing:
-        parts.append(
-            f"Plotting requires {', '.join(missing)} — install the optional "
-            "extras with: pip install 'repseq[viz]'"
+
+def _umap_status() -> tuple[bool, str]:
+    """Return ``(usable, detail)`` for the optional UMAP upgrade.
+
+    "Usable" means ``import umap`` actually succeeds. umap-learn pins narrow
+    numpy/scipy/numba ranges and a mismatch surfaces as an ``ImportError``
+    (or, from numba/llvmlite, occasionally a non-Import exception) at import
+    time. Any of those means "fall back to MDS" — we never want a broken
+    optional dependency to abort a plot the fallback can produce.
+    """
+    try:
+        importlib.import_module("umap")
+        return True, "umap-learn available"
+    except ModuleNotFoundError as exc:
+        if exc.name == "umap":
+            return False, "umap-learn not installed (install 'repseq[viz-umap]')"
+        return False, f"umap-learn dependency missing: {exc}"
+    except ImportError as exc:
+        return False, f"umap-learn failed to import ({exc})"
+    except Exception as exc:  # numba/llvmlite can raise non-ImportError here
+        return False, f"umap-learn failed to import ({type(exc).__name__}: {exc})"
+
+
+def _classical_mds(dist) -> "object":
+    """Classical MDS (PCoA) into 2-D from a precomputed distance matrix.
+
+    numpy-only — no scipy, no umap. Double-centre the squared-distance
+    matrix ``B = -½ J D² J`` (``J`` the centring matrix) and take the two
+    largest-eigenvalue eigenvectors, scaling each axis by ``sqrt(λ)``.
+    Jaccard distance is not Euclidean, so ``B`` can carry small negative
+    eigenvalues; we simply keep the top-two *positive* ones (an axis with a
+    non-positive eigenvalue collapses to zero), which is the standard PCoA
+    handling for non-Euclidean inputs. Deterministic up to the arbitrary
+    sign of each eigenvector — no ``random_state`` lottery.
+    """
+    import numpy as np
+
+    d = np.asarray(dist, dtype=np.float64)
+    n = d.shape[0]
+    d2 = d ** 2
+    j = np.eye(n) - np.full((n, n), 1.0 / n)
+    b = -0.5 * (j @ d2 @ j)
+    # B is symmetric → eigh gives real eigenpairs in ascending order.
+    vals, vecs = np.linalg.eigh(b)
+    order = np.argsort(vals)[::-1][:2]
+    coords = np.zeros((n, 2), dtype=np.float64)
+    for axis, idx in enumerate(order):
+        lam = vals[idx]
+        if lam > 0:
+            coords[:, axis] = vecs[:, idx] * np.sqrt(lam)
+    return coords
+
+
+def _embed(dist, *, n: int, seed: int) -> tuple["object", str]:
+    """Embed the precomputed distance matrix into 2-D.
+
+    Prefers UMAP when ``umap-learn`` imports cleanly (better separation on
+    large diverse sets); otherwise — or if the UMAP fit itself raises —
+    falls back to numpy-only classical MDS. Returns ``(coords, method)``
+    where ``method`` is ``"UMAP"`` or ``"MDS"`` so the figure can label
+    honestly which embedding produced it.
+    """
+    usable, detail = _umap_status()
+    if usable:
+        try:
+            import umap
+
+            n_neighbors = max(2, min(15, n - 1))
+            reducer = umap.UMAP(
+                metric="precomputed",
+                n_neighbors=n_neighbors,
+                min_dist=0.1,
+                random_state=seed,
+                n_jobs=1,
+            )
+            return reducer.fit_transform(dist), "UMAP"
+        except Exception as exc:
+            logger.warning(
+                "UMAP embedding failed (%s) — falling back to classical MDS.",
+                exc,
+            )
+    else:
+        logger.info(
+            "%s — using classical MDS (PCoA) for the clustering plot.", detail
         )
-    if broken:
-        parts.append(
-            "the plotting stack is installed but failed to import ["
-            + "; ".join(broken)
-            + "] — this is almost always a NumPy/SciPy/numba version "
-            "mismatch in the environment, not a repseq problem; the cleanest "
-            "fix is a dedicated environment for repseq"
-        )
-    if parts:
-        raise ImportError("; ".join(parts))
+    return _classical_mds(dist), "MDS"
 
 
 def write_clustering_plot(
@@ -87,7 +171,7 @@ def write_clustering_plot(
     Returns the written path, or ``None`` if the run had nothing to plot
     (no clusters, or fewer than 3 sequences).
     """
-    _check_deps()
+    _require_matplotlib()
 
     if not result.clusters:
         logger.warning("No clusters in result — skipping clustering plot.")
@@ -135,17 +219,7 @@ def write_clustering_plot(
             d = _jaccard_distance(kmer_sets[i], kmer_sets[j])
             dist[i, j] = dist[j, i] = d
 
-    import umap
-
-    n_neighbors = max(2, min(15, n - 1))
-    reducer = umap.UMAP(
-        metric="precomputed",
-        n_neighbors=n_neighbors,
-        min_dist=0.1,
-        random_state=seed,
-        n_jobs=1,
-    )
-    coords = reducer.fit_transform(dist)
+    coords, method = _embed(dist, n=n, seed=seed)
     xs = coords[:, 0]
     ys = coords[:, 1]
 
@@ -168,6 +242,7 @@ def write_clustering_plot(
         n_plotted=n,
         n_input=n_input,
         max_lines=max_lines,
+        method=method,
         path=path,
     )
     return path
@@ -187,6 +262,7 @@ def _render(
     n_plotted,
     n_input,
     max_lines,
+    method: str,
     path: Path,
 ) -> None:
     import numpy as np
@@ -227,7 +303,7 @@ def _render(
         f"Before clustering — colored by genus  {sub_left}",
         fontsize=12, pad=10,
     )
-    ax1.set_xlabel("UMAP 1"); ax1.set_ylabel("UMAP 2")
+    ax1.set_xlabel(f"{method} 1"); ax1.set_ylabel(f"{method} 2")
     ax1.set_xticks([]); ax1.set_yticks([])
     for s in ax1.spines.values():
         s.set_edgecolor("#cccccc")
@@ -279,7 +355,7 @@ def _render(
         + " · ".join(subtitle_parts),
         fontsize=12, pad=10,
     )
-    ax2.set_xlabel("UMAP 1"); ax2.set_ylabel("UMAP 2")
+    ax2.set_xlabel(f"{method} 1"); ax2.set_ylabel(f"{method} 2")
     ax2.set_xticks([]); ax2.set_yticks([])
     for s in ax2.spines.values():
         s.set_edgecolor("#cccccc")
@@ -307,8 +383,14 @@ def _render(
     for s in inset.spines.values():
         s.set_edgecolor("#cccccc")
 
-    fig.suptitle("repseq clustering — sequence embedding",
-                 fontsize=13, y=1.02)
+    embed_label = (
+        "UMAP" if method == "UMAP"
+        else "classical MDS (umap-learn unavailable)"
+    )
+    fig.suptitle(
+        f"repseq clustering — sequence embedding ({embed_label}, k-mer Jaccard)",
+        fontsize=13, y=1.02,
+    )
     plt.tight_layout()
 
     path.parent.mkdir(parents=True, exist_ok=True)
