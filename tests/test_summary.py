@@ -181,6 +181,26 @@ def test_render_summary_phylo_section_appears_when_phylo_ran(make_seq, tmp_path)
     assert "IQ-TREE" in md
 
 
+def test_render_summary_per_protein_section_appears(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"tool": "fasttree", "per_protein": {"min_taxa": 3}}
+    md = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], per_protein_ran=True,
+    )
+    assert "## Phylogenetic inference" in md
+    assert "separate tree was built for each HMM" in md
+    assert "{prefix}_per_protein/" in md
+    assert "reassortment" in md
+    # MAFFT/tree-builder software rows show even though only 2F ran.
+    assert "MAFFT" in md
+
+
+def test_render_summary_no_phylo_section_when_neither_ran(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "## Phylogenetic inference" not in md
+
+
 def test_render_summary_protein_alphabet_described(make_seq, tmp_path):
     cfg = _base_cfg(tmp_path)
     # protein + non-segmented → "marker-protein sequences"

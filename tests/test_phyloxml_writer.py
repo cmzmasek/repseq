@@ -44,7 +44,7 @@ def _make_seq(seq_id, **overrides) -> Sequence:
             species="Hantaan orthohantavirus",
             genus="Orthohantavirus",
             family="Hantaviridae",
-            lineage={"subfamily": "Mammantavirinae"},
+            lineage={"subfamily": "Mammantavirinae", "subgenus": "Hantaanvirus"},
         ),
     )
     base.update(overrides)
@@ -373,10 +373,39 @@ def test_leaf_property_elements_use_repseq_namespace(tmp_path):
     expected = {
         "repseq:host", "repseq:collection_date", "repseq:country",
         "repseq:strain", "repseq:isolate_id", "repseq:year",
-        "repseq:species", "repseq:genus", "repseq:subfamily",
-        "repseq:family",
+        "repseq:species", "repseq:subgenus", "repseq:genus",
+        "repseq:subfamily", "repseq:family",
     }
     assert expected.issubset(refs)
+
+
+def test_subgenus_property_emitted_on_leaves(tmp_path):
+    """The full _TAX_RANKS ladder reaches leaf properties — subgenus
+    (lineage-only, commonly meaningful for coronaviruses) included."""
+    reps = [_make_seq("A"), _make_seq("B"), _make_seq("C")]
+    out = _run_write(tmp_path, reps)
+    root = ET.parse(out).getroot()
+    subgenus = [
+        p for p in root.findall(f".//{_ns('clade')}/{_ns('property')}")
+        if p.get("ref") == "repseq:subgenus"
+    ]
+    assert len(subgenus) == 3  # one per leaf
+    assert all(p.text == "Hantaanvirus" for p in subgenus)
+
+
+def test_absent_subranks_omitted_from_leaf_properties(tmp_path):
+    """suborder/order/subclass/class aren't in the fixture lineage, so
+    they must not appear as empty stubs."""
+    reps = [_make_seq("A"), _make_seq("B"), _make_seq("C")]
+    out = _run_write(tmp_path, reps)
+    root = ET.parse(out).getroot()
+    refs = {
+        p.get("ref")
+        for p in root.findall(f".//{_ns('clade')}/{_ns('property')}")
+    }
+    for absent in ("repseq:suborder", "repseq:order",
+                   "repseq:subclass", "repseq:class"):
+        assert absent not in refs
 
 
 def test_empty_metadata_omitted_from_properties(tmp_path):

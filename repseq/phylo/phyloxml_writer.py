@@ -15,9 +15,10 @@ This module replaces that with a writer that emits, per leaf:
 * A ``<sequence>`` block with the GenBank accession (``source="ncbi"``)
   and the original FASTA header as ``<name>``.
 * Repseq-namespaced ``<property>`` elements for host, collection_date,
-  country, strain, isolate_id, year, species, genus, subfamily,
-  family. Empty fields are omitted (no zombie ``<property/>``
-  elements).
+  country, strain, isolate_id, year, and the full 9-rank taxonomy
+  ladder (species, subgenus, genus, subfamily, family, suborder,
+  order, subclass, class). Empty fields are omitted (no zombie
+  ``<property/>`` elements).
 
 And, at tree level:
 
@@ -68,9 +69,28 @@ PHYLOXML_NS = "http://www.phyloxml.org"
 XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
 REPSEQ_NS = "https://github.com/cmzmasek/repseq"
 
+# Taxonomy ranks exported per leaf, kept in sync with the 9-rank
+# ``_TAX_RANKS`` ladder used by the FASTA bracket tags and the rep
+# TSVs (``output/report.py``). Sub-ranks (subgenus, suborder,
+# subclass) come only via ``TaxonomyInfo.lineage`` and are commonly
+# blank for viruses — empty ones are skipped, so a leaf only shows the
+# ranks that actually resolved.
+_TAXONOMY_RANKS: tuple[str, ...] = (
+    "species",
+    "subgenus",
+    "genus",
+    "subfamily",
+    "family",
+    "suborder",
+    "order",
+    "subclass",
+    "class",
+)
+
 # Per-leaf properties exported under the repseq: namespace.
-# Each entry is (property_ref, lookup_callable). Callables take the
-# Sequence and return Optional[str]. Empty results are skipped.
+# Each entry is (property_ref, lookup_key). Lookups resolve against the
+# Sequence (isolate metadata) or its TaxonomyInfo (rank names). Empty
+# results are skipped so the XML carries no zombie ``<property/>``.
 _LEAF_PROPERTIES: list[tuple[str, str]] = [
     ("repseq:host", "host"),
     ("repseq:collection_date", "collection_date"),
@@ -78,11 +98,7 @@ _LEAF_PROPERTIES: list[tuple[str, str]] = [
     ("repseq:strain", "strain"),
     ("repseq:isolate_id", "isolate_id"),
     ("repseq:year", "year"),         # derived from collection_date
-    ("repseq:species", "species"),    # from taxonomy
-    ("repseq:genus", "genus"),
-    ("repseq:subfamily", "subfamily"),
-    ("repseq:family", "family"),
-]
+] + [(f"repseq:{rank}", rank) for rank in _TAXONOMY_RANKS]  # from taxonomy
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +116,7 @@ def _leaf_property_value(seq: Sequence, key: str) -> Optional[str]:
     if key in ("host", "collection_date", "country", "strain", "isolate_id"):
         v = getattr(seq, key, None)
         return str(v) if v else None
-    if key in ("species", "genus", "subfamily", "family"):
+    if key in _TAXONOMY_RANKS:
         if seq.taxonomy is None:
             return None
         v = seq.taxonomy.get_rank(key)

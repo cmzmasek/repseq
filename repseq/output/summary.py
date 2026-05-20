@@ -509,8 +509,8 @@ def _describe_mode(mode: str, cfg: dict) -> str:
 
 
 def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
-                  versions: dict) -> str:
-    if not phylo_ran:
+                  versions: dict, per_protein_ran: bool = False) -> str:
+    if not phylo_ran and not per_protein_ran:
         return ""
     n_reps = len(result.representatives)
     alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
@@ -536,18 +536,40 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"({_CITATIONS['FastTree']}, {flag_note})."
         )
     rooting = (phylo_cfg.get("rooting", {}) or {}).get("method", "taxonomy_guided")
-    return (
-        f"## Phylogenetic inference\n\n"
-        f"A multiple sequence alignment of the **{_fmt_int(n_reps)}** "
-        f"representative sequences was built with **MAFFT** "
-        f"v{versions.get('mafft') or '?'} ({_CITATIONS['mafft']}, "
-        f"`--auto`). {tree_sentence} The tree was rooted using the "
-        f"**{rooting}** strategy (with minimum ancestor deviation and "
-        f"midpoint as fallbacks where applicable) and internal nodes "
-        f"were annotated with the last common ancestor (LCA) of their "
-        f"descendants. The final tree was emitted as PhyloXML alongside "
-        f"the underlying Newick file and FASTA alignment.\n"
-    )
+    paragraphs = ["## Phylogenetic inference\n"]
+    if phylo_ran:
+        paragraphs.append(
+            f"A multiple sequence alignment of the **{_fmt_int(n_reps)}** "
+            f"representative sequences was built with **MAFFT** "
+            f"v{versions.get('mafft') or '?'} ({_CITATIONS['mafft']}, "
+            f"`--auto`). {tree_sentence} The tree was rooted using the "
+            f"**{rooting}** strategy (with minimum ancestor deviation and "
+            f"midpoint as fallbacks where applicable) and internal nodes "
+            f"were annotated with the last common ancestor (LCA) of their "
+            f"descendants. The final tree was emitted as PhyloXML alongside "
+            f"the underlying Newick file and FASTA alignment.\n"
+        )
+    if per_protein_ran:
+        min_taxa = max(
+            3,
+            int((phylo_cfg.get("per_protein", {}) or {}).get("min_taxa", 3) or 3),
+        )
+        paragraphs.append(
+            f"In addition, a **separate tree was built for each HMM "
+            f"domain-architecture marker** declared for quality control "
+            f"(the `hmms:` tokens; e.g. `Bunya_G1--Bunya_G2`). For every "
+            f"marker, the satisfying CDS translation was taken from each "
+            f"representative that carries that architecture and aligned and "
+            f"inferred with the same MAFFT/{chosen} pipeline, rooting, and "
+            f"LCA annotation as above. Markers carried by fewer than "
+            f"**{min_taxa}** representatives were skipped. Each tree was "
+            f"emitted as PhyloXML with its alignment, Newick, and id-map "
+            f"into the `{{prefix}}_per_protein/` subdirectory. Incongruence "
+            f"between these single-marker trees (e.g. an L-segment "
+            f"polymerase tree disagreeing with an M-segment glycoprotein "
+            f"tree) is the expected signature of reassortment.\n"
+        )
+    return "\n".join(paragraphs)
 
 
 def _render_software(cfg: dict, versions: dict, phylo_ran: bool) -> str:
@@ -612,6 +634,7 @@ def render_summary(
     complete_isolates: Optional[dict] = None,
     segment_names: Optional[list[str]] = None,
     phylo_ran: bool = False,
+    per_protein_ran: bool = False,
     command: str = "",
 ) -> str:
     """Build the full Markdown summary as a single string."""
@@ -622,8 +645,8 @@ def render_summary(
         _render_qc(qc_report, cfg),
         _render_segmented(cfg, qc_report, complete_isolates, segment_names),
         _render_selection(cfg, result, qc_report),
-        _render_phylo(cfg, result, phylo_ran, versions),
-        _render_software(cfg, versions, phylo_ran),
+        _render_phylo(cfg, result, phylo_ran, versions, per_protein_ran),
+        _render_software(cfg, versions, phylo_ran or per_protein_ran),
         _render_footer(),
     ]
     # Drop empty sections (segmented + phylo are conditional).
@@ -638,6 +661,7 @@ def write_summary(
     complete_isolates: Optional[dict] = None,
     segment_names: Optional[list[str]] = None,
     phylo_ran: bool = False,
+    per_protein_ran: bool = False,
     command: str = "",
 ) -> Path:
     """Render the summary and write it to ``{prefix}_summary.md``.
@@ -653,6 +677,7 @@ def write_summary(
         complete_isolates=complete_isolates,
         segment_names=segment_names,
         phylo_ran=phylo_ran,
+        per_protein_ran=per_protein_ran,
         command=command,
     )
     path.write_text(md)

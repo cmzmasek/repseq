@@ -202,6 +202,7 @@ your FASTA file(s)
     • plain-text run log
     • (optional) UMAP/MDS clustering plot                        (--plot)
     • (optional) MAFFT MSA + IQ-TREE / FastTree + phyloXML tree  (--phylo)
+    • (optional) one tree per HMM domain-architecture marker     (--per-protein-phylo)
 ```
 
 The run log (`{prefix}_run.log`) records exactly what settings were used
@@ -545,6 +546,46 @@ before quoting a model in a methods section.
 > IQ-TREE additionally refuses UFBoot with fewer than 4 sequences; the
 > wrapper drops bootstrap automatically in that case but still produces
 > the tree.
+
+### Per-protein trees — `--per-protein-phylo`
+
+`--phylo` builds **one** tree from the whole representatives (the marker
+concat in segmented mode). `--per-protein-phylo` instead builds **one
+tree per declared HMM domain-architecture** — the same `hmms:` tokens you
+set for QC under `segment_markers` / `cluster_protein`. For each token
+(e.g. `Bunya_nucleocap`, or the multidomain `Bunya_G1--Bunya_G2`), repseq
+picks the CDS that satisfies it on every representative carrying that
+architecture and runs the *same* MAFFT → IQ-TREE/FastTree → root → LCA
+pipeline on those protein translations.
+
+Why you'd want it: comparing the single-marker trees side by side reveals
+**topological incongruence** — an L-segment polymerase tree disagreeing
+with an M-segment glycoprotein tree is the classic signature of
+**reassortment**, which the concatenated `--phylo` tree hides.
+
+Outputs land in a `{prefix}_per_protein/` subdirectory, one set per built
+family (`<family>` = the sanitised token, prefixed with the segment in
+segmented mode, e.g. `M_Bunya_G1--Bunya_G2`):
+
+```
+{prefix}_per_protein/
+  M_Bunya_G1--Bunya_G2_msa.fasta
+  M_Bunya_G1--Bunya_G2_tree.nwk
+  M_Bunya_G1--Bunya_G2_tree.xml
+  M_Bunya_G1--Bunya_G2_tree_id_map.tsv
+  S_Bunya_nucleocap_msa.fasta
+  …
+```
+
+Each file has the same format and rich annotation as its `--phylo`
+counterpart. The flag runs alone or alongside `--phylo`.
+
+> **Requirements / fail-soft:** needs the HMM tier (`hmm.enabled` plus
+> configured `hmms:`) to have run, and `mafft` + a tree builder on PATH.
+> A family carried by fewer than `phylo.per_protein.min_taxa` (default 3)
+> representatives is skipped with a log note; if no family qualifies — or
+> the HMM tier didn't run — the whole step is skipped with one stderr
+> line, leaving the rest of the run intact.
 
 ---
 

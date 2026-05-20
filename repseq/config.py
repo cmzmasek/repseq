@@ -328,6 +328,15 @@ DEFAULTS: dict[str, Any] = {
             # ``bootstrap``; ``-alrt`` only, use ``sh_alrt``).
             "confidence_type": "auto",
         },
+        # Per-protein trees (2F), triggered with --per-protein-phylo.
+        # One tree per declared HMM domain-architecture token (the same
+        # hmms: used for QC). Requires the HMM tier to have run.
+        "per_protein": {
+            # A family is built only when at least this many
+            # representatives carry the architecture. Never drops below
+            # 3 (the tree-builder floor) regardless of what's set here.
+            "min_taxa": 3,
+        },
     },
     "taxonomy": {
         "ncbi_email": None,

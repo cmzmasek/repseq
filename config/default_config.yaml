@@ -464,6 +464,16 @@ phylo:
     # arguments). Override only if you've changed the tree arguments —
     # e.g. classical bootstrap → "bootstrap", IQ-TREE -alrt only → "sh_alrt".
     confidence_type: auto
+  # Per-protein trees (2F) — enabled per-run with --per-protein-phylo.
+  # Builds one tree per declared HMM domain-architecture token (the same
+  # `hmms:` you configure for QC under segment_markers / cluster_protein),
+  # written into the {prefix}_per_protein/ subdirectory. Requires the HMM
+  # tier to have run (hmm.enabled + configured hmms:).
+  per_protein:
+    # A family (token) is only built into a tree when at least this many
+    # representatives carry the architecture. Clamped to a floor of 3
+    # (neither IQ-TREE nor FastTree builds a tree on fewer).
+    min_taxa: 3
 
 output:
   dir: ./repseq_output

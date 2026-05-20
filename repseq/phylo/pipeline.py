@@ -133,6 +133,7 @@ def _write_short_id_fasta(
     path: Path,
     use_protein: bool = False,
     labels: Optional[dict[str, str]] = None,
+    bodies: Optional[dict[str, str]] = None,
 ) -> None:
     """Write a FASTA whose primary header token is the short id.
 
@@ -143,9 +144,15 @@ def _write_short_id_fasta(
     for a short id, that label is appended as the FASTA *description*
     (after a single space); MAFFT preserves the description verbatim
     into the output MSA, where it's visible in alignment viewers like
-    AliView / Jalview / MEGA but ignored by tree-builders. With
-    ``use_protein=True`` the body comes from ``rep.protein_sequence``
-    (the marker / per-isolate AA concat).
+    AliView / Jalview / MEGA but ignored by tree-builders.
+
+    Body selection, in priority order:
+      * ``bodies`` (keyed by ``seq.id``) — an explicit per-rep string,
+        used by the per-protein-tree path (2F) where the leaf body is a
+        specific CDS translation rather than a whole-rep sequence;
+      * else ``rep.protein_sequence`` when ``use_protein`` (marker / AA
+        concat, 2E protein alphabet);
+      * else ``rep.sequence`` (2E nucleotide).
     """
     reverse = {v: k for k, v in id_map.items()}
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -161,7 +168,10 @@ def _write_short_id_fasta(
                              .replace("\t", " ").strip()
             header = f">{short} {label}" if label else f">{short}"
             fh.write(header + "\n")
-            seq = (rep.protein_sequence if use_protein else rep.sequence) or ""
+            if bodies is not None:
+                seq = bodies.get(rep.id) or ""
+            else:
+                seq = (rep.protein_sequence if use_protein else rep.sequence) or ""
             for i in range(0, len(seq), 70):
                 fh.write(seq[i:i + 70] + "\n")
 
@@ -218,15 +228,53 @@ def run_phylogeny(
 
     use_protein = _use_protein_sequence(representatives, cfg)
     is_protein = use_protein or _is_protein(representatives)
+    bodies = {
+        rep.id: ((rep.protein_sequence if use_protein else rep.sequence) or "")
+        for rep in representatives
+    }
+    return _build_tree(
+        representatives,
+        bodies,
+        is_protein=is_protein,
+        cfg=cfg,
+        out_dir=out_dir,
+        file_prefix=prefix,
+        xml_name_prefix=prefix,
+    )
+
+
+def _build_tree(
+    representatives: list[Sequence],
+    bodies: dict[str, str],
+    *,
+    is_protein: bool,
+    cfg: dict[str, Any],
+    out_dir: Path,
+    file_prefix: str,
+    xml_name_prefix: str,
+) -> list[Path]:
+    """Build one MSA + tree + phyloXML from a list of leaves.
+
+    The shared engine behind both the whole-representative tree (2E,
+    :func:`run_phylogeny`) and each per-protein-family tree (2F,
+    :func:`repseq.phylo.per_protein.run_per_protein_phylogeny`).
+
+    ``bodies`` maps ``seq.id`` → the AA/NT string to align for that leaf
+    (a whole-rep sequence for 2E, a specific CDS translation for 2F).
+    Output files are ``{file_prefix}_{msa.fasta,tree.nwk,tree.xml,
+    tree_id_map.tsv,iqtree_summary.txt}`` under ``out_dir``;
+    ``xml_name_prefix`` becomes the phyloXML ``<phylogeny>`` name.
+    Raises :class:`PhyloError` on any binary/parse failure.
+    """
     tree_tool = _pick_tree_tool(cfg, is_protein)
     id_map = _build_id_map(representatives)
 
-    input_fasta = out_dir / f"{prefix}_phylo_input.fasta"
-    msa_fasta = out_dir / f"{prefix}_msa.fasta"
-    newick_path = out_dir / f"{prefix}_tree.nwk"
-    phyloxml_path = out_dir / f"{prefix}_tree.xml"
-    id_map_path = out_dir / f"{prefix}_tree_id_map.tsv"
-    iqtree_summary_path = out_dir / f"{prefix}_iqtree_summary.txt"
+    input_fasta = out_dir / f"{file_prefix}_phylo_input.fasta"
+    msa_fasta = out_dir / f"{file_prefix}_msa.fasta"
+    newick_path = out_dir / f"{file_prefix}_tree.nwk"
+    phyloxml_path = out_dir / f"{file_prefix}_tree.xml"
+    id_map_path = out_dir / f"{file_prefix}_tree_id_map.tsv"
+    iqtree_summary_path = out_dir / f"{file_prefix}_iqtree_summary.txt"
 
     # Build a per-rep description label using the same labeling format
     # that drives the tree leaves. This lands as the FASTA description
@@ -243,7 +291,7 @@ def run_phylogeny(
     }
     _write_short_id_fasta(
         representatives, id_map, input_fasta,
-        use_protein=use_protein, labels=labels,
+        bodies=bodies, labels=labels,
     )
     _write_id_map(id_map, id_map_path)
 
@@ -329,7 +377,7 @@ def run_phylogeny(
             representatives,
             id_map,
             cfg=cfg or {},
-            prefix=prefix,
+            prefix=xml_name_prefix,
             alphabet=alphabet_label,
             msa_tool="MAFFT",
             msa_version=mafft_mod.tool_version(),
