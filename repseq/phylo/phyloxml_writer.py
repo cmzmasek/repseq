@@ -203,8 +203,12 @@ def _format_branch_length(value: Optional[float]) -> Optional[str]:
 
 def _collect_underlying_records(
     seq: Sequence,
-) -> tuple[list[tuple[str, Optional[str]]], list[tuple[str, Optional[str], str]]]:
-    """Return ``(nuc_records, protein_records)`` for one leaf sequence.
+) -> tuple[
+    list[tuple[str, Optional[str]]],
+    list[tuple[str, Optional[str], str]],
+    dict[str, dict],
+]:
+    """Return ``(nuc_records, protein_records, protein_by_id)`` for one leaf.
 
     * ``nuc_records``: ``[(accession, name)]`` per nucleotide segment,
       in segment order. For segmented CONCAT leaves the segments come
@@ -215,6 +219,9 @@ def _collect_underlying_records(
       third tuple element lets the caller resolve which segment a
       protein lives on (currently unused but kept for future
       per-protein annotation).
+    * ``protein_by_id``: ``{protein_id: protein_dict}`` so the caller can
+      reach a CDS's ``hmm_hits`` / ``length`` for the domain-architecture
+      block.
 
     A leaf with no CDS info (``seq.proteins is None``) yields an empty
     protein_records list and the property emitter degrades gracefully.
@@ -222,6 +229,7 @@ def _collect_underlying_records(
     segments = seq.concat_segments or [seq]
     nuc_records: list[tuple[str, Optional[str]]] = []
     protein_records: list[tuple[str, Optional[str], str]] = []
+    protein_by_id: dict[str, dict] = {}
     for seg in segments:
         if seg.accession:
             nuc_records.append((seg.accession, _clean_name(seg.description or seg.header)))
@@ -230,7 +238,8 @@ def _collect_underlying_records(
             if not pid:
                 continue
             protein_records.append((pid, _clean_name(p.get("product")), seg.accession or ""))
-    return nuc_records, protein_records
+            protein_by_id.setdefault(pid, p)
+    return nuc_records, protein_records, protein_by_id
 
 
 def _clean_name(value: Optional[str]) -> Optional[str]:
@@ -253,17 +262,62 @@ def _clean_name(value: Optional[str]) -> Optional[str]:
     return s or None
 
 
+def _format_evalue(value: Any) -> Optional[str]:
+    """Format an E-value as a valid ``xs:double`` for ``confidence=``."""
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _emit_domain_architecture(sequence_el: ET.Element, prot: dict) -> None:
+    """Append a ``<domain_architecture>`` block from a CDS's HMM hits.
+
+    Every hit becomes a ``<domain from=… to=… confidence=…>NAME</domain>``
+    using the 1-based protein coordinates (``ali_from``/``ali_to``) and
+    the per-domain E-value (``dom_evalue``). ALL hits are emitted (not
+    just the ``passing`` ones) so Archaeopteryx's interactive E-value
+    slider has the full range to filter against. Domains are ordered by
+    start position; ``length`` is the protein length in residues.
+    No hits → no block.
+    """
+    hits = [
+        h for h in (prot.get("hmm_hits") or [])
+        if h.get("ali_from") is not None and h.get("ali_to") is not None
+    ]
+    if not hits:
+        return
+    length = prot.get("length")
+    if not length and prot.get("sequence"):
+        length = len(prot["sequence"])
+    attrs = {"length": str(int(length))} if length else {}
+    da = ET.SubElement(sequence_el, "domain_architecture", attrs)
+    for h in sorted(hits, key=lambda x: int(x["ali_from"])):
+        d_attrs = {
+            "from": str(int(h["ali_from"])),
+            "to": str(int(h["ali_to"])),
+        }
+        conf = _format_evalue(h.get("dom_evalue"))
+        if conf is not None:
+            d_attrs["confidence"] = conf
+        dom = ET.SubElement(da, "domain", d_attrs)
+        dom.text = str(h.get("target") or "")
+
+
 def _emit_sequence_element(
     clade: ET.Element,
     seq_type: str,
     accession: Optional[str],
     name: Optional[str],
+    prot: Optional[dict] = None,
 ) -> None:
     """Append one ``<sequence type="...">`` block to ``clade``.
 
     Skipped entirely when there's no accession AND no name, so we
     never write a bare ``<sequence/>`` that some viewers complain
-    about.
+    about. When ``prot`` is given (per-protein trees), its HMM hits are
+    rendered as a ``<domain_architecture>`` after ``<name>`` — the
+    schema-correct position within ``Sequence``.
     """
     if not accession and not name:
         return
@@ -272,6 +326,8 @@ def _emit_sequence_element(
         acc_el = ET.SubElement(sequence_el, "accession", {"source": "ncbi"})
         acc_el.text = str(accession)
     _set_text(sequence_el, "name", name)
+    if prot is not None:
+        _emit_domain_architecture(sequence_el, prot)
 
 
 def _serialise_leaf(
@@ -282,6 +338,7 @@ def _serialise_leaf(
     conf_type: str,
     color_scheme: Optional[ColorScheme] = None,
     shown_protein_ids: Optional[set[str]] = None,
+    domain_architecture: bool = False,
 ) -> None:
     """Emit one terminal ``<clade>`` with rich annotation.
 
@@ -309,6 +366,11 @@ def _serialise_leaf(
     type="dna">`` elements and all three summary ``repseq:`` properties
     are unaffected — they always reflect the leaf's complete gene
     content.
+
+    ``domain_architecture`` (per-protein trees) adds a
+    ``<domain_architecture>`` block to each emitted protein
+    ``<sequence>`` from that CDS's HMM hits, so viewers (Archaeopteryx)
+    draw the domain boxes.
     """
     clade = ET.SubElement(parent, "clade")
 
@@ -335,7 +397,7 @@ def _serialise_leaf(
         _set_text(tax_el, "scientific_name", species)
 
     # <sequence> elements: markers first, then other proteins, then nucs.
-    nuc_records, protein_records = _collect_underlying_records(seq)
+    nuc_records, protein_records, protein_by_id = _collect_underlying_records(seq)
     marker_ids = list(seq.marker_protein_ids or [])
     marker_set = set(marker_ids)
     # Stable sort keeps marker ids in the configured marker order
@@ -354,9 +416,15 @@ def _serialise_leaf(
         emit_markers = [r for r in markers if r[0] in shown_protein_ids]
         emit_others = [r for r in others if r[0] in shown_protein_ids]
     for pid, product, _src in emit_markers:
-        _emit_sequence_element(clade, "protein", pid, product)
+        _emit_sequence_element(
+            clade, "protein", pid, product,
+            prot=protein_by_id.get(pid) if domain_architecture else None,
+        )
     for pid, product, _src in emit_others:
-        _emit_sequence_element(clade, "protein", pid, product)
+        _emit_sequence_element(
+            clade, "protein", pid, product,
+            prot=protein_by_id.get(pid) if domain_architecture else None,
+        )
     for acc, name in nuc_records:
         _emit_sequence_element(clade, "dna", acc, name)
 
@@ -425,6 +493,7 @@ def _serialise_internal(
     label_by_id: dict[str, str],
     color_scheme: Optional[ColorScheme] = None,
     leaf_protein_ids: Optional[dict[str, set[str]]] = None,
+    domain_architecture: bool = False,
 ) -> None:
     """Emit one internal ``<clade>`` and recurse into children."""
     clade = ET.SubElement(parent, "clade")
@@ -476,6 +545,7 @@ def _serialise_internal(
                     if leaf_protein_ids is not None
                     else None
                 ),
+                domain_architecture=domain_architecture,
             )
         else:
             _serialise_internal(
@@ -486,6 +556,7 @@ def _serialise_internal(
                 label_by_id=label_by_id,
                 color_scheme=color_scheme,
                 leaf_protein_ids=leaf_protein_ids,
+                domain_architecture=domain_architecture,
             )
 
 
@@ -585,6 +656,7 @@ def _build_phylogeny_description(
     extra_tree_args: list[str],
     rooting_method: Optional[str] = None,
     markers: Optional[str] = None,
+    trim_note: Optional[str] = None,
 ) -> str:
     """Compose the ``<phylogeny><description>`` element."""
     when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -596,6 +668,8 @@ def _build_phylogeny_description(
     ]
     if extra_msa_args:
         bits.append(f"mafft_args={' '.join(extra_msa_args)}")
+    if trim_note:
+        bits.append(f"trim={trim_note}")
     bits.append(f"tree={tree_tool} {tree_version}")
     if model:
         bits.append(f"model={model}")
@@ -634,6 +708,8 @@ def write_phyloxml(
     rooting_method: Optional[str] = None,
     color_scheme: Optional[ColorScheme] = None,
     leaf_protein_ids: Optional[dict[str, set[str]]] = None,
+    domain_architecture: bool = False,
+    trim_note: Optional[str] = None,
 ) -> None:
     """Render a tree to a richly-annotated phyloXML file at
     ``phyloxml_path``.
@@ -728,6 +804,7 @@ def write_phyloxml(
             extra_tree_args=extra_tree_args,
             rooting_method=rooting_method,
             markers=_markers_summary(representatives),
+            trim_note=trim_note,
         ),
     )
 
@@ -741,6 +818,7 @@ def write_phyloxml(
         label_by_id=label_by_id,
         color_scheme=color_scheme,
         leaf_protein_ids=leaf_protein_ids,
+        domain_architecture=domain_architecture,
     )
 
     # Pretty-print: stdlib doesn't ship a pretty printer that handles

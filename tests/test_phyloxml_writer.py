@@ -109,7 +109,7 @@ def test_confidence_type_for_unknown_tool_defaults_to_bootstrap():
 
 def _run_write(tmp_path, reps, *, cfg=None, tree_tool="FastTree",
                model="GTR", ufboot=None, alphabet="nucleotide",
-               leaf_protein_ids=None):
+               leaf_protein_ids=None, domain_architecture=False):
     newick = tmp_path / "tree.nwk"
     # Build a Newick where leaf labels are the short ids that id_map
     # will resolve back. Three taxa is the minimum the orchestrator
@@ -129,6 +129,7 @@ def _run_write(tmp_path, reps, *, cfg=None, tree_tool="FastTree",
         model=model,
         ufboot=ufboot,
         leaf_protein_ids=leaf_protein_ids,
+        domain_architecture=domain_architecture,
     )
     return out
 
@@ -293,6 +294,73 @@ def test_leaf_protein_ids_restricts_protein_sequences_only(tmp_path):
     assert props["repseq:protein_acc"] == "P_main, P_aux"
     assert props["repseq:protein_names"] == "polymerase, auxiliary protein"
     assert props["repseq:nuc_acc"] == "ACC1"
+
+
+def _seq_with_domains():
+    return {
+        "protein_id": "P_spike", "product": "spike",
+        "length": 1273, "sequence": "M" * 1273,
+        "hmm_hits": [
+            # Deliberately out of order to check sorting by ali_from, and
+            # one weak hit to confirm ALL hits are emitted (not passing-only).
+            {"target": "CoV_S2", "ali_from": 334, "ali_to": 1200,
+             "dom_evalue": 1e-120, "passing": True},
+            {"target": "CoV_S1", "ali_from": 13, "ali_to": 305,
+             "dom_evalue": 2e-40, "passing": True},
+            {"target": "weak_dom", "ali_from": 400, "ali_to": 450,
+             "dom_evalue": 0.3, "passing": False},
+        ],
+    }
+
+
+def test_domain_architecture_emitted_for_per_protein(tmp_path):
+    reps = [_make_seq("ACC1"), _make_seq("ACC2"), _make_seq("ACC3")]
+    for r in reps:
+        r.proteins = [dict(_seq_with_domains())]
+    out = _run_write(
+        tmp_path, reps,
+        leaf_protein_ids={r.id: {"P_spike"} for r in reps},
+        domain_architecture=True,
+    )
+    root = ET.parse(out).getroot()
+    da = root.find(f".//{_ns('sequence')}/{_ns('domain_architecture')}")
+    assert da is not None
+    assert da.get("length") == "1273"
+    domains = da.findall(_ns("domain"))
+    # ALL three hits become boxes (weak one included), ordered by 'from'.
+    names = [d.text for d in domains]
+    assert names == ["CoV_S1", "CoV_S2", "weak_dom"]
+    first = domains[0]
+    assert first.get("from") == "13"
+    assert first.get("to") == "305"
+    assert first.get("confidence") == "2e-40"
+
+
+def test_domain_architecture_absent_by_default(tmp_path):
+    """The 2E path (domain_architecture=False) emits no domain block."""
+    reps = [_make_seq("ACC1"), _make_seq("ACC2"), _make_seq("ACC3")]
+    for r in reps:
+        r.proteins = [dict(_seq_with_domains())]
+        r.marker_protein_ids = ["P_spike"]
+    out = _run_write(tmp_path, reps)  # default: no domain architecture
+    root = ET.parse(out).getroot()
+    assert root.find(f".//{_ns('domain_architecture')}") is None
+
+
+def test_domain_architecture_skipped_when_no_hits(tmp_path):
+    reps = [_make_seq("ACC1"), _make_seq("ACC2"), _make_seq("ACC3")]
+    for r in reps:
+        r.proteins = [{"protein_id": "P_x", "product": "x",
+                       "length": 100, "sequence": "M" * 100, "hmm_hits": []}]
+    out = _run_write(
+        tmp_path, reps,
+        leaf_protein_ids={r.id: {"P_x"} for r in reps},
+        domain_architecture=True,
+    )
+    root = ET.parse(out).getroot()
+    # Protein <sequence> still emitted, but no empty <domain_architecture>.
+    assert root.find(f".//{_ns('sequence')}") is not None
+    assert root.find(f".//{_ns('domain_architecture')}") is None
 
 
 def test_leaf_protein_ids_none_keeps_all_proteins(tmp_path):

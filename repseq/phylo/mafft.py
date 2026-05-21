@@ -4,9 +4,9 @@ Shells out to ``mafft`` and writes the aligned FASTA. Default mode is
 ``--auto`` which picks the algorithm by input size (FFT-NS-2 for large
 inputs, L-INS-i for small, etc.) — fine for most cases. Power users can
 override via ``phylo.mafft.extra_args``. The per-protein-tree path
-(2F) passes its own ``extra_args`` (default L-INS-i:
-``--maxiterate 1000 --localpair``) with ``use_auto=False``, since those
-single-gene alignments are small enough to afford high accuracy.
+(2F) can pass its own ``extra_args`` (e.g. opt-in L-INS-i
+``--maxiterate 1000 --localpair``) with ``use_auto=False``; by default
+it too uses ``--auto``.
 """
 
 from __future__ import annotations

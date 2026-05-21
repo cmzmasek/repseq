@@ -16,9 +16,10 @@ WARN vs FAIL policy:
     is a best-effort upgrade and ``--plot`` falls back to classical MDS
     without it.
   * every external clustering / phylogeny binary (mmseqs, cd-hit,
-    cd-hit-est, mafft, FastTree, iqtree2) → WARN. None of them is
+    cd-hit-est, mafft, trimal, FastTree, iqtree2) → WARN. None of them is
     strictly required: you can pick the backend you have installed,
-    or use diversity-only modes that don't shell out.
+    or use diversity-only modes that don't shell out. trimal is only
+    used when phylo.trimal / phylo.per_protein.trimal is enabled.
   * network checks (NCBI Entrez + UniProt REST) → WARN when unreachable;
     you can still run with ``--no-resolve``.
   * cache directory writable → FAIL if not, since every resolved run
@@ -137,6 +138,7 @@ _EXTERNAL_BINARIES: tuple[tuple[str, str], ...] = (
     ("cd-hit",     "clustering (alternative backend, protein)"),
     ("cd-hit-est", "clustering (alternative backend, nucleotide)"),
     ("mafft",      "MSA, --phylo only"),
+    ("trimal",     "optional alignment trimming, only when phylo.trimal / phylo.per_protein.trimal enabled"),
     ("FastTree",   "phylogeny, --phylo only on nucleotide (also accepts 'fasttree')"),
     ("iqtree2",    "phylogeny, --phylo only on protein (also accepts 'iqtree')"),
     ("hmmscan",    "HMM-based marker selection (HMMER, hmm.enabled only)"),

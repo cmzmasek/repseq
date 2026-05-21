@@ -332,7 +332,7 @@ representative:
 hmm:
   enabled: true
   # null → use the bundled viral-core profile set shipped with repseq
-  # (repseq/data/hmms/repseq_viral_core.hmm — ~18 Pfam-A profiles for
+  # (repseq/data/hmms/repseq_viral_core.hmm — 19 Pfam-A profiles for
   # RdRp, nucleocapsid, glycoprotein, helicase, protease across the
   # main viral families). Absolute path → user-supplied .hmm file;
   # auto-`hmmpress`-ed on first use if the .h3* index files are missing.
@@ -372,6 +372,22 @@ phylo:
     # Examples: ["--maxiterate", "1000"] for accurate L-INS-i;
     #           ["--retree", "1"] to speed a very large pass.
     extra_args: []
+  # Optional alignment trimming (trimAl) for the whole-genome tree (2E),
+  # between MAFFT and the tree-builder. OFF by default. When on,
+  # {prefix}_msa.fasta becomes the trimmed (tree-input) alignment and the
+  # raw MAFFT output is kept as {prefix}_msa_untrimmed.fasta. In partitioned
+  # mode each per-family alignment is trimmed BEFORE concatenation, so the
+  # partition charset ranges stay correct. Soft-fails (loud warning + builds
+  # on the untrimmed alignment) when trimal is missing / errors / strips the
+  # alignment to nothing. `repseq doctor` reports trimal as optional.
+  trimal:
+    enabled: false
+    # trimAl method → the `-<mode>` flag. automated1 = trimAl's heuristic
+    # best for ML-tree reconstruction; also: gappyout, strict, strictplus,
+    # nogaps, noallgaps. Threshold trimming (-gt/-st/-cons) goes in extra_args.
+    mode: automated1
+    # Raw trimal flags appended verbatim, e.g. ["-gt", "0.8"].
+    extra_args: []
   fasttree:
     # Raw FastTree flags. The substitution model is picked automatically:
     # default JTT for protein, "-nt -gtr" for nucleotide.
@@ -399,6 +415,36 @@ phylo:
     # Raw flags appended verbatim, e.g. ["-alrt", "1000"] for SH-aLRT
     # alongside UFBoot, or ["--allnni"] for thorough NNI search.
     extra_args: []
+  # Partitioned-supermatrix tree — the principled multi-marker analysis.
+  # When enabled AND the run resolves to protein + IQ-TREE AND the HMM tier
+  # resolved >= 2 marker families, the whole-genome tree (2E) is built by
+  # aligning each marker family SEPARATELY (one MAFFT per family), then
+  # concatenating the per-family MSAs column-wise into a supermatrix and
+  # letting IQ-TREE fit a substitution model PER partition. This replaces
+  # gluing the markers into one string aligned under one model — which lets
+  # MAFFT align unrelated proteins across segment seams and forces a single
+  # model across genuinely different protein families. Outputs gain
+  # {prefix}_partition.nex (NEXUS charsets) and {prefix}_msa_<family>.fasta
+  # (per-family MSAs); {prefix}_msa.fasta becomes the supermatrix. Soft-falls
+  # back to the legacy concat-then-align path when the run can't be
+  # partitioned (FastTree, no HMM families, < 2 alignable families).
+  partition:
+    # Master switch. Default ON for protein + IQ-TREE runs. Set false to
+    # force the legacy concat-then-align behaviour.
+    enabled: true
+    # IQ-TREE partition linkage (Chernomor et al. 2016):
+    #   proportional — -p, edge-linked proportional: one shared branch-length
+    #                  set + a per-partition rate multiplier. Standard default.
+    #   equal        — -q, edge-equal: all partitions share branch lengths.
+    #   unlinked     — -Q, edge-unlinked: each partition gets independent
+    #                  branch lengths (most flexible; many more parameters).
+    linkage: proportional
+    # Optional per-family model pin, keyed by the family LABEL
+    # (segment_token, e.g. L_RdRP_4 or M_Bunya_G1--Bunya_G2; no segment
+    # prefix in non-segmented runs). Families absent here get MFP →
+    # ModelFinder per partition. Example:
+    #   models: {L_RdRP_4: "LG+G4", S_Bunya_nucleocap: "WAG+G4"}
+    models: {}
   labeling:
     # Per-leaf display labels on the phyloXML tree.
     #
@@ -512,14 +558,28 @@ phylo:
     # reassortment / recombination signal. Needs >= 2 trees to compare.
     # Set false to skip the table.
     incongruence: true
-    # MAFFT options for the per-protein (single-gene) alignments. These
-    # alignments are small enough to afford high-accuracy L-INS-i, so the
-    # default is "--maxiterate 1000 --localpair". When this list is
-    # non-empty, MAFFT is invoked WITHOUT --auto so the explicit strategy
-    # takes effect (the whole-genome --phylo tree still uses --auto +
-    # phylo.mafft.extra_args). Set to [] to fall back to --auto here too.
+    # MAFFT options for the per-protein (single-gene) alignments.
+    # Default is empty -> MAFFT --auto (fast, size-adaptive), same as the
+    # whole-genome tree. For a high-accuracy publication run, set this to
+    # ["--maxiterate", "1000", "--localpair"] (L-INS-i) — affordable on
+    # these small single-gene alignments but noticeably slower, hence
+    # opt-in. A non-empty list is passed to MAFFT WITHOUT --auto so the
+    # explicit strategy takes effect.
     mafft:
-      extra_args: ["--maxiterate", "1000", "--localpair"]
+      extra_args: []
+    # Emit a phyloXML <domain_architecture> on each per-protein tree leaf,
+    # built from that CDS's HMM hits — every hit, with its E-value as the
+    # domain confidence, so a viewer (Archaeopteryx) can draw the domain
+    # boxes and filter them with its interactive E-value slider. Default
+    # on; set false to omit the domain blocks.
+    domain_architecture: true
+    # Optional trimAl trimming for the per-protein (single-gene) alignments,
+    # independent of the whole-genome phylo.trimal. OFF by default; same
+    # shape and same soft-fail behaviour.
+    trimal:
+      enabled: false
+      mode: automated1
+      extra_args: []
 
 output:
   dir: ./repseq_output

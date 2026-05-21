@@ -31,20 +31,29 @@ mkdir -p "$OUTDIR"
 #     literally "Bunya_nucleocap" (broader family coverage).
 #   - PF00863 (originally guessed for Peptidase_C18) was Peptidase_C4
 #     (picornaviral 2A protease). MEROPS family C18 has no dedicated
-#     Pfam profile, so this slot is DROPPED rather than substituted.
-#     If a viral protease slot is needed in future, candidates are:
-#       PF00548 (Picornain 3C), PF00770 (Adenovirus endoprotease),
-#       PF00851 (Helper component proteinase), PF00863 (Peptidase_C4),
-#       PF02902 (Ulp1 protease), PF03290 (Vaccinia I7).
+#     Pfam profile, so that exact slot stays dropped. The viral-protease
+#     slot it was meant to fill is now occupied by PF05409
+#     (Peptidase_C30, the coronavirus 3C-like main protease / Mpro) —
+#     a real Pfam family with a curated GA cutoff that lets coronavirus
+#     ORF1ab/replicase be HMM-gated on its protease. Other viral-protease
+#     candidates if more are wanted: PF00548 (Picornain 3C),
+#     PF00770 (Adenovirus endoprotease), PF00851 (Helper component
+#     proteinase), PF00863 (Peptidase_C4), PF02902 (Ulp1 protease),
+#     PF03290 (Vaccinia I7).
+#   - PF04196 (Bunya_RdRp) added so bunyavirus L segments can be
+#     HMM-gated on their RNA-dependent RNA polymerase (the bundle's
+#     RdRP_4/RdRP_2 don't cover the bunyavirus L protein).
 #
-# Bundle ends up with 17 profiles instead of the 18 originally proposed.
+# Bundle ends up with 19 profiles.
 PROFILES=(
     "PF02123 RdRP_4 RdRp_polymerase"
     "PF00978 RdRP_2 RdRp_polymerase"
     "PF00972 Flavi_NS5 Flaviviral_polymerase"
     "PF00946 Mononeg_RNA_pol Mononegavirales_polymerase"
+    "PF04196 Bunya_RdRp Bunyavirus_polymerase"
     "PF01443 Viral_helicase1 Helicase"
     "PF00949 Peptidase_S7 Flavivirus_NS3_protease"
+    "PF05409 Peptidase_C30 Coronavirus_3CL_main_protease"
     "PF00952 Bunya_nucleocap Bunyaviridae_nucleocapsid"
     "PF05505 Ebola_NP Filovirus_nucleoprotein"
     "PF00506 Flu_NP Orthomyxoviridae_nucleoprotein"

@@ -298,6 +298,38 @@ def test_per_protein_leaf_shows_only_family_protein(tmp_path):
         assert "M_GP" not in prot_accs
 
 
+def test_per_protein_leaf_carries_domain_architecture(tmp_path):
+    """The per-protein tree leaf's protein <sequence> gets a
+    <domain_architecture> built from that CDS's HMM hits."""
+    import xml.etree.ElementTree as ET
+
+    cfg = _seg_cfg({"S": {"hmms": ["Bunya_nucleocap"]}})
+    reps = [_concat_rep(f"iso{i}", {"S": _S_proteins()}) for i in range(3)]
+    _run(reps, cfg, tmp_path)
+    xml = tmp_path / "bunya_per_protein" / "S_Bunya_nucleocap_tree.xml"
+    ns = "{http://www.phyloxml.org}"
+    root = ET.parse(xml).getroot()
+    das = root.findall(f".//{ns}sequence/{ns}domain_architecture")
+    assert das  # at least one leaf carries it
+    domains = das[0].findall(f"{ns}domain")
+    assert [d.text for d in domains] == ["Bunya_nucleocap"]
+    assert domains[0].get("from") == "1"
+    assert domains[0].get("to") == "100"
+
+
+def test_per_protein_domain_architecture_can_be_disabled(tmp_path):
+    import xml.etree.ElementTree as ET
+
+    cfg = _seg_cfg({"S": {"hmms": ["Bunya_nucleocap"]}})
+    cfg["phylo"]["per_protein"]["domain_architecture"] = False
+    reps = [_concat_rep(f"iso{i}", {"S": _S_proteins()}) for i in range(3)]
+    _run(reps, cfg, tmp_path)
+    xml = tmp_path / "bunya_per_protein" / "S_Bunya_nucleocap_tree.xml"
+    ns = "{http://www.phyloxml.org}"
+    root = ET.parse(xml).getroot()
+    assert root.find(f".//{ns}domain_architecture") is None
+
+
 def test_incongruence_table_written_for_two_families(tmp_path):
     cfg = _seg_cfg({
         "S": {"hmms": ["Bunya_nucleocap"]},

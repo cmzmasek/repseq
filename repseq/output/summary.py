@@ -36,6 +36,8 @@ _TOOL_PROBES: tuple[tuple[str, list[str], Optional[str]], ...] = (
     ("mmseqs",     ["version"],     r"^(\S+)$"),
     # mafft --version writes "v7.520 (2023/Mar/16)" to stderr.
     ("mafft",      ["--version"],   r"v?(\d[\d.]*)"),
+    # trimal --version prints "trimAl v1.4.rev15 build[...]" to stdout.
+    ("trimal",     ["--version"],   r"trimAl\s+v?(\S+)"),
     # FastTree with no args prints usage with "FastTree 2.1.11" on stderr.
     ("FastTree",   [],              r"FastTree\s+(?:Version\s+)?(\d[\d.]*)"),
     # iqtree2 --version: "IQ-TREE multicore version 2.2.5 ..."
@@ -114,6 +116,7 @@ _CITATIONS: dict[str, str] = {
     "cd-hit-est":  "Fu, Niu, Zhu, Wu & Li 2012, *Bioinformatics* 28(23):3150-3152",
     "mmseqs":      "Steinegger & Söding 2017, *Nat. Biotechnol.* 35(11):1026-1028",
     "mafft":       "Katoh & Standley 2013, *Mol. Biol. Evol.* 30(4):772-780",
+    "trimal":      "Capella-Gutiérrez, Silla-Martínez & Gabaldón 2009, *Bioinformatics* 25(15):1972-1973",
     "FastTree":    "Price, Dehal & Arkin 2010, *PLoS ONE* 5(3):e9490",
     "iqtree2":     "Minh et al. 2020, *Mol. Biol. Evol.* 37(5):1530-1534",
     "ncbi":        "Sayers et al. 2022, *Nucleic Acids Res.* 50(D1):D20-D26",
@@ -536,13 +539,75 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"({_CITATIONS['FastTree']}, {flag_note})."
         )
     rooting = (phylo_cfg.get("rooting", {}) or {}).get("method", "taxonomy_guided")
+    # Partitioned supermatrix is the default for protein + IQ-TREE runs; it
+    # only applies when the HMM tier resolves >= 2 marker families, else the
+    # pipeline falls back to concat-then-align (described in the else branch).
+    part_cfg = phylo_cfg.get("partition", {}) or {}
+    partition_active = (
+        bool(part_cfg.get("enabled", True))
+        and alphabet == "protein"
+        and chosen == "iqtree2"
+    )
+    # Optional trimAl trimming, described where it sits (between MAFFT and
+    # the tree). Whole-genome (phylo.trimal) and per-protein
+    # (phylo.per_protein.trimal) have independent switches.
+    _gt = phylo_cfg.get("trimal", {}) or {}
+    if _gt.get("enabled"):
+        _gm = _gt.get("mode", "automated1")
+        genome_trim_clause = (
+            f"The alignment was then trimmed with **trimAl** "
+            f"({_CITATIONS.get('trimal', 'Capella-Gutiérrez et al. 2009')}, "
+            f"`-{_gm}`) to drop poorly-aligned / gap-rich columns before tree "
+            f"inference, with the untrimmed MAFFT alignment retained as "
+            f"`{{prefix}}_msa_untrimmed.fasta`. "
+        )
+        genome_trim_partition_clause = (
+            f"Each per-family alignment was trimmed with **trimAl** "
+            f"({_CITATIONS.get('trimal', 'Capella-Gutiérrez et al. 2009')}, "
+            f"`-{_gm}`) before concatenation, so the partition column ranges "
+            f"reflect the trimmed widths (untrimmed alignments retained). "
+        )
+    else:
+        genome_trim_clause = ""
+        genome_trim_partition_clause = ""
     paragraphs = ["## Phylogenetic inference\n"]
-    if phylo_ran:
+    if phylo_ran and partition_active:
+        linkage = part_cfg.get("linkage", "proportional")
+        linkage_flag = {
+            "proportional": "-p", "equal": "-q", "unlinked": "-Q",
+        }.get(linkage, "-p")
+        paragraphs.append(
+            f"The whole-genome tree of the **{_fmt_int(n_reps)}** "
+            f"representatives was built as a **partitioned supermatrix**. "
+            f"Each declared marker family (the `hmms:` domain-architecture "
+            f"tokens used for QC) was aligned **separately** with **MAFFT** "
+            f"v{versions.get('mafft') or '?'} ({_CITATIONS['mafft']}, "
+            f"`--auto`). {genome_trim_partition_clause}The per-family "
+            f"alignments were concatenated "
+            f"column-wise into one supermatrix. A maximum-likelihood tree was "
+            f"then inferred with **IQ-TREE** v{versions.get('iqtree2') or '?'} "
+            f"({_CITATIONS['iqtree2']}) fitting a substitution model **per "
+            f"partition** (ModelFinder) under **{linkage}**-linkage branch "
+            f"lengths (`{linkage_flag}`) with ultrafast bootstrap (UFBoot). "
+            f"This avoids aligning unrelated proteins across segment seams and "
+            f"forcing a single model across distinct protein families. The "
+            f"tree was rooted using the **{rooting}** strategy (minimum "
+            f"ancestor deviation and midpoint as fallbacks) and internal nodes "
+            f"annotated with the last common ancestor (LCA) of their "
+            f"descendants. Outputs include the supermatrix alignment "
+            f"(`{{prefix}}_msa.fasta`), the per-family alignments "
+            f"(`{{prefix}}_msa_<family>.fasta`), a NEXUS partition file "
+            f"(`{{prefix}}_partition.nex`), the Newick, and the PhyloXML. When "
+            f"fewer than two marker families are resolvable, the pipeline "
+            f"falls back to a single concatenated-marker alignment under one "
+            f"model.\n"
+        )
+    elif phylo_ran:
         paragraphs.append(
             f"A multiple sequence alignment of the **{_fmt_int(n_reps)}** "
             f"representative sequences was built with **MAFFT** "
             f"v{versions.get('mafft') or '?'} ({_CITATIONS['mafft']}, "
-            f"`--auto`). {tree_sentence} The tree was rooted using the "
+            f"`--auto`). {genome_trim_clause}{tree_sentence} The tree was rooted using the "
             f"**{rooting}** strategy (with minimum ancestor deviation and "
             f"midpoint as fallbacks where applicable) and internal nodes "
             f"were annotated with the last common ancestor (LCA) of their "
@@ -553,14 +618,22 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
         pp_cfg = phylo_cfg.get("per_protein", {}) or {}
         min_taxa = max(3, int(pp_cfg.get("min_taxa", 3) or 3))
         pp_mafft = list((pp_cfg.get("mafft", {}) or {}).get("extra_args", []) or [])
+        pp_trim = pp_cfg.get("trimal", {}) or {}
+        pp_trim_clause = (
+            f" (then trimmed with **trimAl** `-{pp_trim.get('mode', 'automated1')}`)"
+            if pp_trim.get("enabled") else ""
+        )
         if pp_mafft:
             align_sentence = (
                 f"aligned with MAFFT (`{' '.join(pp_mafft)}`; high-accuracy "
-                f"L-INS-i for these single-gene sets) and inferred with "
-                f"{chosen}"
+                f"L-INS-i for these single-gene sets){pp_trim_clause} and "
+                f"inferred with {chosen}"
             )
         else:
-            align_sentence = f"aligned and inferred with the same MAFFT/{chosen} pipeline"
+            align_sentence = (
+                f"aligned{pp_trim_clause} and inferred with the same "
+                f"MAFFT/{chosen} pipeline"
+            )
         paragraphs.append(
             f"In addition, a **separate tree was built for each HMM "
             f"domain-architecture marker** declared for quality control "
@@ -571,7 +644,15 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"LCA annotation as above. Markers carried by fewer than "
             f"**{min_taxa}** representatives were skipped. Each tree was "
             f"emitted as PhyloXML with its alignment, Newick, and id-map "
-            f"into the `{{prefix}}_per_protein/` subdirectory. Incongruence "
+            f"into the `{{prefix}}_per_protein/` subdirectory."
+            + (
+                " Each leaf's protein carries its HMM **domain "
+                "architecture** (a phyloXML `<domain_architecture>` of every "
+                "domain hit with its E-value), which viewers such as "
+                "Archaeopteryx render as domain boxes."
+                if pp_cfg.get("domain_architecture", True) else ""
+            )
+            + f" Incongruence "
             f"between these single-marker trees (e.g. an L-segment "
             f"polymerase tree disagreeing with an M-segment glycoprotein "
             f"tree) is the expected signature of reassortment.\n"
@@ -633,6 +714,13 @@ def _render_software(cfg: dict, versions: dict, phylo_ran: bool) -> str:
         rows.append(_row("Pfam-A", "—", "HMM profile source (bundled subset)", _CITATIONS["pfam"]))
     if phylo_ran:
         rows.append(_row("MAFFT",    versions.get("mafft"),    "Multiple sequence alignment", _CITATIONS["mafft"]))
+        _phylo_cfg = cfg.get("phylo", {}) or {}
+        _trim_on = (
+            (_phylo_cfg.get("trimal", {}) or {}).get("enabled")
+            or ((_phylo_cfg.get("per_protein", {}) or {}).get("trimal", {}) or {}).get("enabled")
+        )
+        if _trim_on:
+            rows.append(_row("trimAl", versions.get("trimal"), "Alignment trimming (when enabled)", _CITATIONS["trimal"]))
         rows.append(_row("IQ-TREE",  versions.get("iqtree2"),  "Maximum-likelihood tree (when chosen)", _CITATIONS["iqtree2"]))
         rows.append(_row("FastTree", versions.get("FastTree"), "Approximate-ML tree (when chosen)",     _CITATIONS["FastTree"]))
     rows.append(_row("NCBI E-utilities", "—", "Taxonomy / CDS retrieval", _CITATIONS["ncbi"]))

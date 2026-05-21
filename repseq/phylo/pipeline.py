@@ -58,6 +58,8 @@ from .lca import (
 )
 from .coloring import ColorScheme, build_color_scheme
 from .mafft import MafftError, run_mafft
+from . import trimal as trimal_mod
+from .trimal import maybe_trim
 from .phyloxml_writer import write_phyloxml
 from .rooting import root_tree
 
@@ -229,6 +231,24 @@ def run_phylogeny(
 
     use_protein = _use_protein_sequence(representatives, cfg)
     is_protein = use_protein or _is_protein(representatives)
+    tree_tool = _pick_tree_tool(cfg, is_protein)
+    color_scheme = build_color_scheme(representatives, cfg)
+
+    # Partitioned supermatrix (default on for protein + IQ-TREE runs):
+    # align each marker family separately and let IQ-TREE fit a model per
+    # partition, instead of gluing the markers into one string and fitting a
+    # single model over the lot. Soft-falls back to concat-then-align below
+    # (returns None) when the run can't be partitioned — FastTree, no
+    # HMM-resolvable families, or fewer than two alignable families.
+    part_cfg = ((cfg or {}).get("phylo", {}) or {}).get("partition", {}) or {}
+    if part_cfg.get("enabled", True) and use_protein and tree_tool == "iqtree":
+        from .partition import build_partitioned_phylogeny
+        partitioned = build_partitioned_phylogeny(
+            representatives, cfg, out_dir, prefix, color_scheme=color_scheme,
+        )
+        if partitioned is not None:
+            return partitioned
+
     bodies = {
         rep.id: ((rep.protein_sequence if use_protein else rep.sequence) or "")
         for rep in representatives
@@ -241,7 +261,8 @@ def run_phylogeny(
         out_dir=out_dir,
         file_prefix=prefix,
         xml_name_prefix=prefix,
-        color_scheme=build_color_scheme(representatives, cfg),
+        color_scheme=color_scheme,
+        trimal_settings=(cfg.get("phylo", {}) or {}).get("trimal"),
     )
 
 
@@ -258,6 +279,8 @@ def _build_tree(
     leaf_protein_ids: Optional[dict[str, set[str]]] = None,
     mafft_extra_args: Optional[list[str]] = None,
     mafft_use_auto: bool = True,
+    domain_architecture: bool = False,
+    trimal_settings: Optional[dict[str, Any]] = None,
 ) -> list[Path]:
     """Build one MSA + tree + phyloXML from a list of leaves.
 
@@ -279,6 +302,8 @@ def _build_tree(
     ``mafft_extra_args`` / ``mafft_use_auto`` override the MAFFT command
     (the per-protein path passes its L-INS-i args with auto off); ``None``
     falls back to ``phylo.mafft.extra_args`` with ``--auto``.
+    ``domain_architecture`` (per-protein trees) makes the writer emit a
+    ``<domain_architecture>`` from each shown CDS's HMM hits.
     Raises :class:`PhyloError` on any binary/parse failure.
     """
     tree_tool = _pick_tree_tool(cfg, is_protein)
@@ -335,6 +360,37 @@ def _build_tree(
         raise PhyloError(str(exc)) from exc
 
     written_extras: list[Path] = []
+
+    # Optional trimAl trimming between MAFFT and the tree-builder. On
+    # success {file_prefix}_msa.fasta becomes the trimmed (tree-input)
+    # alignment and the raw MAFFT output is retained as _msa_untrimmed.fasta;
+    # on a soft-fail (disabled / binary missing / degenerate) the MAFFT
+    # output stays as _msa.fasta and the tree is built untrimmed.
+    trim_note_str: Optional[str] = None
+    if trimal_settings and trimal_settings.get("enabled"):
+        untrimmed = out_dir / f"{file_prefix}_msa_untrimmed.fasta"
+        try:
+            if untrimmed.exists():
+                untrimmed.unlink()
+            msa_fasta.rename(untrimmed)
+        except OSError:
+            untrimmed = msa_fasta
+        if maybe_trim(untrimmed, msa_fasta, cfg, trimal_settings, label=file_prefix):
+            written_extras.append(untrimmed)
+            trim_note_str = trimal_mod.trim_note(trimal_settings)
+        else:
+            # Restore the MAFFT output as the canonical (untrimmed) MSA.
+            if untrimmed != msa_fasta:
+                if msa_fasta.exists():
+                    try:
+                        msa_fasta.unlink()
+                    except OSError:
+                        pass
+                try:
+                    untrimmed.rename(msa_fasta)
+                except OSError:
+                    pass
+
     if tree_tool == "iqtree":
         try:
             run_iqtree(
@@ -352,12 +408,72 @@ def _build_tree(
         except FastTreeError as exc:
             raise PhyloError(str(exc)) from exc
 
+    model_label = (
+        ("JTT" if is_protein else "GTR")
+        if tree_tool == "fasttree"
+        else _resolved_model(cfg, tree_tool)
+    )
+    return _finalize_tree(
+        representatives=representatives,
+        id_map=id_map,
+        cfg=cfg,
+        out_dir=out_dir,
+        file_prefix=file_prefix,
+        xml_name_prefix=xml_name_prefix,
+        is_protein=is_protein,
+        tree_tool=tree_tool,
+        newick_path=newick_path,
+        msa_fasta=msa_fasta,
+        id_map_path=id_map_path,
+        model_label=model_label,
+        extra_mafft=mafft_args_used,
+        written_extras=written_extras,
+        color_scheme=color_scheme,
+        leaf_protein_ids=leaf_protein_ids,
+        domain_architecture=domain_architecture,
+        input_fasta=input_fasta,
+        trim_note=trim_note_str,
+    )
+
+
+def _finalize_tree(
+    *,
+    representatives: list[Sequence],
+    id_map: dict[str, str],
+    cfg: dict[str, Any],
+    out_dir: Path,
+    file_prefix: str,
+    xml_name_prefix: str,
+    is_protein: bool,
+    tree_tool: str,
+    newick_path: Path,
+    msa_fasta: Path,
+    id_map_path: Path,
+    model_label: Optional[str],
+    extra_mafft: list[str],
+    written_extras: list[Path],
+    color_scheme: Optional[ColorScheme] = None,
+    leaf_protein_ids: Optional[dict[str, set[str]]] = None,
+    domain_architecture: bool = False,
+    input_fasta: Optional[Path] = None,
+    extra_outputs: Optional[list[Path]] = None,
+    trim_note: Optional[str] = None,
+) -> list[Path]:
+    """Shared post-tree tail: parse Newick → root → LCA → phyloXML.
+
+    Both the concat-then-align builder (:func:`_build_tree`) and the
+    partitioned-supermatrix builder
+    (:func:`repseq.phylo.partition.build_partitioned_phylogeny`) end here, so
+    rooting, LCA labelling, taxonomy colouring, and the rich phyloXML writer
+    are identical regardless of how the MSA + Newick were produced. The
+    leaves are representatives (``id_map`` insertion order must match
+    ``representatives`` 1:1). ``input_fasta`` (when given) is the temp MSA
+    input to unlink; ``extra_outputs`` are appended to the returned file
+    list (the partitioned path passes its NEXUS + per-family MSAs here).
+    Returns ``[msa, nwk, xml, id_map] + written_extras + extra_outputs``.
+    """
+    phyloxml_path = out_dir / f"{file_prefix}_tree.xml"
     alphabet_label = "protein" if is_protein else "nucleotide"
-    if tree_tool == "fasttree":
-        model_label = "JTT" if is_protein else "GTR"
-    else:
-        model_label = _resolved_model(cfg, tree_tool)
-    extra_mafft = mafft_args_used
     extra_tree = list(
         ((cfg or {}).get("phylo", {}).get(tree_tool, {}) or {}).get(
             "extra_args", [],
@@ -373,8 +489,6 @@ def _build_tree(
     except Exception as exc:
         raise PhyloError(f"could not parse Newick {newick_path}: {exc}") from exc
 
-    # _build_id_map walks representatives in order, so id_map's
-    # insertion order matches the representatives list 1:1.
     reps_by_short_id = dict(zip(id_map.keys(), representatives))
 
     rooting_cfg = (cfg or {}).get("phylo", {}).get("rooting", {}) or {}
@@ -428,14 +542,21 @@ def _build_tree(
             rooting_method=rooting_method_used,
             color_scheme=color_scheme,
             leaf_protein_ids=leaf_protein_ids,
+            domain_architecture=domain_architecture,
+            trim_note=trim_note,
         )
     except Exception as exc:
         raise PhyloError(f"Newick → phyloXML conversion failed: {exc}") from exc
 
     # The temp input is redundant once the MSA is written.
-    try:
-        input_fasta.unlink()
-    except OSError:
-        pass
+    if input_fasta is not None:
+        try:
+            input_fasta.unlink()
+        except OSError:
+            pass
 
-    return [msa_fasta, newick_path, phyloxml_path, id_map_path] + written_extras
+    return (
+        [msa_fasta, newick_path, phyloxml_path, id_map_path]
+        + written_extras
+        + (extra_outputs or [])
+    )

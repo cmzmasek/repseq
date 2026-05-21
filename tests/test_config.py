@@ -38,11 +38,10 @@ def test_validate_config_accepts_defaults():
     assert errors == []
 
 
-def test_validate_config_per_protein_mafft_default_is_linsi():
+def test_validate_config_per_protein_mafft_default_is_auto():
     cfg = load_config(None)
-    assert cfg["phylo"]["per_protein"]["mafft"]["extra_args"] == [
-        "--maxiterate", "1000", "--localpair",
-    ]
+    # Default is empty → MAFFT --auto (fast); L-INS-i is opt-in.
+    assert cfg["phylo"]["per_protein"]["mafft"]["extra_args"] == []
     assert validate_config(cfg) == []
 
 
@@ -58,6 +57,48 @@ def test_validate_config_rejects_bad_per_protein_incongruence():
     cfg["phylo"]["per_protein"]["incongruence"] = "yes"
     errors = validate_config(cfg)
     assert any("per_protein.incongruence" in e for e in errors)
+
+
+def test_validate_config_per_protein_domain_architecture_default_on():
+    cfg = load_config(None)
+    assert cfg["phylo"]["per_protein"]["domain_architecture"] is True
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_bad_per_protein_domain_architecture():
+    cfg = load_config(None)
+    cfg["phylo"]["per_protein"]["domain_architecture"] = "yes"
+    errors = validate_config(cfg)
+    assert any("per_protein.domain_architecture" in e for e in errors)
+
+
+def test_validate_config_trimal_default_off_and_valid():
+    cfg = load_config(None)
+    assert cfg["phylo"]["trimal"]["enabled"] is False
+    assert cfg["phylo"]["trimal"]["mode"] == "automated1"
+    assert cfg["phylo"]["per_protein"]["trimal"]["enabled"] is False
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_bad_trimal_mode():
+    cfg = load_config(None)
+    cfg["phylo"]["trimal"]["mode"] = "supertrim"
+    errors = validate_config(cfg)
+    assert any("phylo.trimal.mode" in e for e in errors)
+
+
+def test_validate_config_rejects_bad_trimal_extra_args():
+    cfg = load_config(None)
+    cfg["phylo"]["trimal"]["extra_args"] = "-gt 0.8"
+    errors = validate_config(cfg)
+    assert any("phylo.trimal.extra_args" in e for e in errors)
+
+
+def test_validate_config_validates_per_protein_trimal():
+    cfg = load_config(None)
+    cfg["phylo"]["per_protein"]["trimal"]["mode"] = "nope"
+    errors = validate_config(cfg)
+    assert any("phylo.per_protein.trimal.mode" in e for e in errors)
 
 
 def test_validate_config_rejects_legacy_length_filter_key():

@@ -181,6 +181,52 @@ def test_run_phylogeny_happy_path_writes_all_outputs(tmp_path):
     assert not (tmp_path / "test_phylo_input.fasta").exists()
 
 
+def _stub_trim_ok(input_fasta, output_fasta, cfg, settings, *, label=""):
+    # Identity "trim": copy the untrimmed input to the output and report
+    # success, exercising the orchestration (rename + retain untrimmed).
+    output_fasta.write_text(Path(input_fasta).read_text())
+    return True
+
+
+def test_run_phylogeny_trimal_retains_untrimmed_and_records_provenance(tmp_path):
+    reps = [_seq(f"p{i}", "MKLPQEFIL") for i in range(3)]
+    cfg = {"phylo": {"tool": "fasttree", "trimal": {"enabled": True, "mode": "automated1"}}}
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft_writes_alignment), \
+         patch("repseq.phylo.pipeline.run_fasttree",
+               side_effect=_stub_fasttree_writes_newick(["S0001", "S0002", "S0003"])), \
+         patch("repseq.phylo.pipeline.maybe_trim", side_effect=_stub_trim_ok):
+        files = run_phylogeny(reps, cfg, tmp_path, "test")
+
+    names = {f.name for f in files}
+    # The tree-input MSA + the retained raw MAFFT output.
+    assert "test_msa.fasta" in names
+    assert "test_msa_untrimmed.fasta" in names
+    assert (tmp_path / "test_msa_untrimmed.fasta").exists()
+    # Provenance recorded in the phyloXML description.
+    assert "trim=" in (tmp_path / "test_tree.xml").read_text()
+
+
+def test_run_phylogeny_trimal_softfails_to_untrimmed(tmp_path):
+    """maybe_trim returning False (binary missing / degenerate) → the MAFFT
+    output is restored as _msa.fasta, no _msa_untrimmed.fasta, tree still built."""
+    reps = [_seq(f"p{i}", "MKLPQEFIL") for i in range(3)]
+    cfg = {"phylo": {"tool": "fasttree", "trimal": {"enabled": True}}}
+
+    def _trim_fail(input_fasta, output_fasta, cfg, settings, *, label=""):
+        return False  # no output written
+
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft_writes_alignment), \
+         patch("repseq.phylo.pipeline.run_fasttree",
+               side_effect=_stub_fasttree_writes_newick(["S0001", "S0002", "S0003"])), \
+         patch("repseq.phylo.pipeline.maybe_trim", side_effect=_trim_fail):
+        files = run_phylogeny(reps, cfg, tmp_path, "test")
+
+    assert (tmp_path / "test_msa.fasta").exists()        # MAFFT output restored
+    assert not (tmp_path / "test_msa_untrimmed.fasta").exists()
+    assert (tmp_path / "test_tree.xml").exists()         # tree still produced
+    assert "trim=" not in (tmp_path / "test_tree.xml").read_text()
+
+
 def test_run_phylogeny_picks_nucleotide_model_for_nt_reps(tmp_path):
     reps = [
         _seq(f"n{i}", "ACGTACGT", seq_type=SequenceType.NUCLEOTIDE) for i in range(3)

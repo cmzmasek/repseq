@@ -29,6 +29,10 @@ class IQTreeError(RuntimeError):
     pass
 
 
+# Partition linkage → IQ-TREE flag (Chernomor et al. 2016).
+_LINKAGE_FLAGS = {"proportional": "-p", "equal": "-q", "unlinked": "-Q"}
+
+
 def _count_msa_records(msa_fasta: Path) -> int:
     n = 0
     with open(msa_fasta) as fh:
@@ -84,6 +88,8 @@ def run_iqtree(
     cfg: dict[str, Any],
     is_protein: bool,
     summary_path: Optional[Path] = None,
+    partition_file: Optional[Path] = None,
+    partition_linkage: str = "proportional",
 ) -> None:
     """Run IQ-TREE on ``msa_fasta`` and write the ML tree to ``output_newick``.
 
@@ -102,6 +108,13 @@ def run_iqtree(
     IQ-TREE itself detects the alphabet from the alignment, but we use
     the flag to validate the configured model is appropriate (an explicit
     NT model on AA data would fail late inside IQ-TREE).
+
+    ``partition_file`` (a NEXUS charsets file) switches IQ-TREE into
+    partitioned mode: the ``-m`` model is dropped (models come from the
+    NEXUS ``charpartition`` — ``MFP`` per charset runs ModelFinder per
+    partition) and the alignment is passed under ``partition_linkage``'s
+    flag — ``proportional`` → ``-p`` (edge-linked, the default), ``equal``
+    → ``-q``, ``unlinked`` → ``-Q``.
     """
     binary_name_override = (
         cfg.get("phylo", {}).get("iqtree", {}).get("binary")
@@ -140,26 +153,44 @@ def run_iqtree(
         local_input = td / "input.fasta"
         local_input.write_bytes(msa_fasta.read_bytes())
 
-        cmd = [
-            iqtree,
-            "-s", str(local_input),
-            "-m", str(model),
-            "-T", str(threads),
-            "-seed", str(seed),
-            "--prefix", str(td / "run"),
-            "--quiet",
-            # IQ-TREE refuses to overwrite by default; this scratch dir is
-            # always empty, but pass --redo so a re-run on the same tmp
-            # path also succeeds.
-            "--redo",
-        ]
+        if partition_file is not None:
+            # Partitioned: drop -m (per-charset models live in the NEXUS
+            # charpartition) and pass the alignment under the linkage flag.
+            local_part = td / "partition.nex"
+            local_part.write_text(Path(partition_file).read_text())
+            flag = _LINKAGE_FLAGS.get(partition_linkage, "-p")
+            cmd = [
+                iqtree,
+                "-s", str(local_input),
+                flag, str(local_part),
+                "-T", str(threads),
+                "-seed", str(seed),
+                "--prefix", str(td / "run"),
+                "--quiet",
+                "--redo",
+            ]
+        else:
+            cmd = [
+                iqtree,
+                "-s", str(local_input),
+                "-m", str(model),
+                "-T", str(threads),
+                "-seed", str(seed),
+                "--prefix", str(td / "run"),
+                "--quiet",
+                # IQ-TREE refuses to overwrite by default; this scratch dir is
+                # always empty, but pass --redo so a re-run on the same tmp
+                # path also succeeds.
+                "--redo",
+            ]
         if ufboot and int(ufboot) > 0:
             cmd.extend(["-B", str(int(ufboot))])
         cmd.extend(extra_args)
 
         # Bench-scientist progress message: echo only the args worth
         # showing — strip the binary path and the path-bearing args
-        # (-s INPUT, --prefix PFX) which carry no user-meaningful info.
+        # (-s INPUT, --prefix PFX, the partition file) which carry no
+        # user-meaningful info. Keep the partition flag itself visible.
         display_parts: list[str] = []
         skip_next = False
         for tok in cmd[1:]:
@@ -168,6 +199,10 @@ def run_iqtree(
                 continue
             if tok in ("-s", "--prefix"):
                 skip_next = True
+                continue
+            if tok in ("-p", "-q", "-Q"):
+                display_parts.append(tok)
+                skip_next = True  # skip the partition-file path
                 continue
             display_parts.append(tok)
         print(

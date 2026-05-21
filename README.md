@@ -202,6 +202,8 @@ your FASTA file(s)
     • plain-text run log
     • (optional) UMAP/MDS clustering plot                        (--plot)
     • (optional) MAFFT MSA + IQ-TREE / FastTree + phyloXML tree  (--phylo)
+    •            (protein + IQ-TREE: partitioned-supermatrix tree, per-marker model)
+    •            (optional trimAl column trimming; off by default)
     • (optional) one tree per HMM domain-architecture marker     (--per-protein-phylo)
 ```
 
@@ -240,6 +242,8 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_representatives_protein.fasta` | when `alphabet_for_clustering: protein` (default) | The AA strings actually fed into the clusterer. |
 | `{prefix}_clustering.png` | only with `--plot` | Diagnostic scatter of the clustering. |
 | `{prefix}_msa.fasta`, `_tree.nwk`, `_tree.xml`, `_tree_id_map.tsv` | only with `--phylo` | Alignment + tree + name mapping. |
+| `{prefix}_partition.nex`, `_msa_<family>.fasta` | `--phylo`, protein + IQ-TREE | NEXUS partition file + per-family alignments (partitioned-supermatrix tree). |
+| `{prefix}_msa_untrimmed.fasta` | `--phylo` + `phylo.trimal.enabled` | Raw MAFFT alignment retained when trimAl trimming ran (`_msa.fasta` is then the trimmed tree input). |
 | `{prefix}_iqtree_summary.txt` | only with `--phylo` + IQ-TREE | IQ-TREE ModelFinder report. |
 | `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations). |
 
@@ -482,15 +486,70 @@ clusters (`global -n` mode).
 ### Phylogeny outputs
 
 Written only when you pass `--phylo`. The full pipeline:
-short-id remap → MAFFT (`--auto`) → tree builder → root → label internal
+short-id remap → MAFFT (`--auto`) → *(optional)* trimAl trimming → tree
+builder → root → label internal
 nodes by LCA → phyloXML. Tree builder is auto-picked from your
 clustering alphabet: **IQ-TREE for protein** (ModelFinder + UFBoot
 bootstrap by default) and **FastTree for nucleotide** (with `-nt -gtr`).
 Set `phylo.tool: fasttree` (or `iqtree`) to pin one.
 
+##### Alignment trimming (trimAl, optional, off by default)
+
+Enable `phylo.trimal.enabled: true` to trim poorly-aligned / gap-rich
+columns from the alignment **before** tree inference with
+[trimAl](http://trimal.cgenomics.org/) — it sits between MAFFT and the
+tree-builder. `mode` is the trimAl method (default `automated1`, its
+heuristic best for ML trees; also `gappyout`/`strict`/`strictplus`/
+`nogaps`/`noallgaps`), and `extra_args` is a raw passthrough for threshold
+trimming (`["-gt", "0.8"]`). The per-protein trees have an independent
+`phylo.per_protein.trimal` with the same shape. When trimming runs,
+`{prefix}_msa.fasta` becomes the trimmed (tree-input) alignment and the
+raw MAFFT output is kept as `{prefix}_msa_untrimmed.fasta`; in partitioned
+mode each per-family alignment is trimmed before concatenation (so the
+NEXUS charset ranges stay correct). If trimal is missing or strips the
+alignment to nothing, repseq emits a loud warning and builds the tree on
+the **untrimmed** alignment rather than failing — so you never lose the
+tree over a trimming tool. `repseq doctor` reports trimal as an optional
+binary. The trimal version + mode are recorded in the phyloXML
+`<description>`.
+
+##### Partitioned supermatrix (default for protein + IQ-TREE)
+
+For protein runs that use IQ-TREE, the whole-genome tree is built as a
+**partitioned supermatrix** rather than by gluing every marker into one
+string. Each declared marker family (the `hmms:` domain-architecture
+tokens you already use for QC) is aligned **separately** with MAFFT, the
+per-family alignments are concatenated **column-wise** into a supermatrix,
+and IQ-TREE fits a substitution model **per partition** (ModelFinder).
+This is the statistically correct multi-marker analysis: MAFFT is never
+asked to align an L-polymerase against an M-glycoprotein at a segment
+seam, and a polymerase and a glycoprotein no longer share one model.
+
+This is **on by default** (`phylo.partition.enabled: true`); it
+applies only when the run resolves to protein + IQ-TREE **and** the HMM
+tier resolved at least two marker families. Otherwise — FastTree, no HMM
+tier, or a single family — it transparently falls back to the legacy
+single-alignment, single-model path. Knobs under `phylo.partition`:
+
+- `linkage` — IQ-TREE branch-length linkage across partitions:
+  `proportional` (`-p`, edge-linked + per-partition rate; the default),
+  `equal` (`-q`, shared branch lengths), or `unlinked` (`-Q`, independent
+  branch lengths per partition — most flexible, useful when segments may
+  have different histories).
+- `models` — optional per-family model pin keyed by family label
+  (`{L_RdRP_4: "LG+G4", S_Bunya_nucleocap: "WAG+G4"}`); families left out
+  get `MFP` (ModelFinder picks).
+
+Extra outputs in this mode: the per-family alignments
+`{prefix}_msa_<family>.fasta` and the NEXUS partition file
+`{prefix}_partition.nex` (the column ranges + per-partition models IQ-TREE
+was run with). `{prefix}_msa.fasta` is then the **concatenated
+supermatrix** the tree was actually inferred on.
+
 #### `{prefix}_msa.fasta`
 
-The MAFFT alignment. Headers are `>S0001 <pretty-label>` — the short
+The MAFFT alignment (the concatenated supermatrix in partitioned mode).
+Headers are `>S0001 <pretty-label>` — the short
 `SNNNN` id stays the first whitespace-separated token (safe for any
 phylo tool), and the descriptive label (built from `phylo.labeling.format`
 / `segmented_format`) is appended as the FASTA description so AliView /
@@ -575,12 +634,12 @@ set for QC under `segment_markers` / `cluster_protein`. For each token
 (e.g. `Bunya_nucleocap`, or the multidomain `Bunya_G1--Bunya_G2`), repseq
 picks the CDS that satisfies it on every representative carrying that
 architecture and runs the *same* MAFFT → IQ-TREE/FastTree → root → LCA
-pipeline on those protein translations. Because these are small
-single-gene alignments, they default to **high-accuracy MAFFT L-INS-i**
-(`--maxiterate 1000 --localpair`, run without `--auto`) rather than the
-size-adaptive `--auto` used for the whole-genome `--phylo` tree —
-configurable via `phylo.per_protein.mafft.extra_args` (set `[]` to fall
-back to `--auto`).
+pipeline on those protein translations. The alignments use MAFFT
+`--auto` by default (fast). For a high-accuracy publication run, set
+`phylo.per_protein.mafft.extra_args: ["--maxiterate", "1000",
+"--localpair"]` (L-INS-i) — affordable on these small single-gene
+alignments but noticeably slower, so it's opt-in; a non-empty list is
+passed to MAFFT without `--auto` so the strategy takes effect.
 
 Why you'd want it: comparing the single-marker trees side by side reveals
 **topological incongruence** — an L-segment polymerase tree disagreeing
@@ -603,13 +662,33 @@ segmented mode, e.g. `M_Bunya_G1--Bunya_G2`):
 ```
 
 Each tree file has the same format and rich annotation as its `--phylo`
-counterpart, with one deliberate difference: a leaf shows **only the CDS
-that fed that tree** as `<sequence type="protein">` (the `CoV_nucleocap`
-tree shows just the nucleocapsid protein, not every CDS of the genome).
-The `<sequence type="dna">` element encoding it, and the
+counterpart, with two deliberate differences. First, a leaf shows **only
+the CDS that fed that tree** as `<sequence type="protein">` (the
+`CoV_nucleocap` tree shows just the nucleocapsid protein, not every CDS
+of the genome). The `<sequence type="dna">` element encoding it, and the
 `repseq:nuc_acc` / `repseq:protein_acc` / `repseq:protein_names` summary
-properties, still describe the leaf's full gene content. The flag runs
-alone or alongside `--phylo`.
+properties, still describe the leaf's full gene content. Second, that
+protein carries its **HMM domain architecture** as a phyloXML
+`<domain_architecture>` — one `<domain>` per hit, with the protein
+coordinates and the hit's E-value as `confidence`:
+
+```xml
+<sequence type="protein">
+  <accession source="ncbi">QHD43416</accession>
+  <name>spike glycoprotein</name>
+  <domain_architecture length="1273">
+    <domain from="13" to="305" confidence="2e-40">CoV_S1</domain>
+    <domain from="334" to="1273" confidence="1e-120">CoV_S2</domain>
+  </domain_architecture>
+</sequence>
+```
+
+[Archaeopteryx](https://sites.google.com/view/aptxjs) draws these as
+domain boxes on the leaf and lets you filter them with its interactive
+E-value slider — so *all* hits are emitted (not just the ones that
+cleared repseq's cutoffs), giving the slider its full range. Turn the
+block off with `phylo.per_protein.domain_architecture: false`. The flag
+runs alone or alongside `--phylo`.
 
 #### `{prefix}_incongruence.tsv` — incongruence as a number
 

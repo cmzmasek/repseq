@@ -256,6 +256,10 @@ def run_per_protein_phylogeny(
     # High-accuracy MAFFT (L-INS-i by default) for these single-gene
     # alignments; resolved once and applied to every family.
     pp_mafft_args, pp_mafft_auto = _per_protein_mafft(cfg)
+    # Render each leaf protein's HMM hits as a phyloXML <domain_architecture>
+    # (Archaeopteryx draws the domain boxes; its E-value slider filters them).
+    pp_cfg = ((cfg or {}).get("phylo", {}) or {}).get("per_protein", {}) or {}
+    emit_domains = bool(pp_cfg.get("domain_architecture", True))
 
     for family_label, token, segment in specs:
         try:
@@ -304,6 +308,8 @@ def run_per_protein_phylogeny(
                 leaf_protein_ids=leaf_protein_ids,
                 mafft_extra_args=pp_mafft_args,
                 mafft_use_auto=pp_mafft_auto,
+                domain_architecture=emit_domains,
+                trimal_settings=pp_cfg.get("trimal"),
             )
         except PhyloError as exc:
             logger.warning("[per-protein] family %s failed: %s", family_label, exc)

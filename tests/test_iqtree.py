@@ -232,6 +232,50 @@ def test_run_iqtree_raises_when_subprocess_fails(tmp_path):
             run_iqtree(msa, out, cfg, is_protein=True)
 
 
+def test_run_iqtree_partition_uses_linkage_flag_and_drops_model(tmp_path):
+    """A partition_file switches IQ-TREE into partitioned mode: the linkage
+    flag (-p/-q/-Q) carries the NEXUS, -m is dropped (models live in the
+    charpartition), and the partition-file path is copied into the workdir."""
+    msa = tmp_path / "msa.fasta"
+    _write_msa(msa, n=4)
+    part = tmp_path / "partition.nex"
+    part.write_text("#nexus\nbegin sets;\n  charset a = 1-3;\nend;\n")
+    out = tmp_path / "out.nwk"
+    cfg = {"temp_dir": str(tmp_path), "seed": 7, "threads": 2}
+
+    fake_run, captured = _fake_run_writes_outputs()
+    with patch("repseq.phylo.iqtree.subprocess.run", side_effect=fake_run), \
+         patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
+        run_iqtree(
+            msa, out, cfg, is_protein=True,
+            partition_file=part, partition_linkage="unlinked",
+        )
+
+    cmd = captured["cmd"]
+    assert "-Q" in cmd                       # unlinked → -Q
+    assert "-m" not in cmd                   # model dropped under partitions
+    # The flag is immediately followed by a NEXUS path inside the workdir.
+    nexus_arg = cmd[cmd.index("-Q") + 1]
+    assert nexus_arg.endswith("partition.nex")
+    assert out.read_text()                   # tree copied out
+
+
+def test_run_iqtree_partition_linkage_defaults_to_proportional(tmp_path):
+    msa = tmp_path / "msa.fasta"
+    _write_msa(msa, n=4)
+    part = tmp_path / "partition.nex"
+    part.write_text("#nexus\nbegin sets;\n  charset a = 1-3;\nend;\n")
+    out = tmp_path / "out.nwk"
+    cfg = {"temp_dir": str(tmp_path), "seed": 1, "threads": 1}
+
+    fake_run, captured = _fake_run_writes_outputs()
+    with patch("repseq.phylo.iqtree.subprocess.run", side_effect=fake_run), \
+         patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
+        run_iqtree(msa, out, cfg, is_protein=True, partition_file=part)
+
+    assert "-p" in captured["cmd"]           # proportional default
+
+
 def test_run_iqtree_raises_when_treefile_missing(tmp_path):
     """IQ-TREE exits 0 but writes no .treefile → clear error, not silent
     success."""

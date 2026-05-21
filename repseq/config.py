@@ -193,8 +193,8 @@ DEFAULTS: dict[str, Any] = {
         # missing or the database is unavailable.
         "enabled": True,
         # null = use the bundled viral-core set (`repseq/data/hmms/
-        # repseq_viral_core.hmm`, ~18 Pfam-A profiles for RdRp,
-        # nucleocapsid, glycoprotein, etc.). Absolute path = user-
+        # repseq_viral_core.hmm`, 19 Pfam-A profiles for RdRp,
+        # nucleocapsid, glycoprotein, protease, etc.). Absolute path = user-
         # supplied .hmm file; auto-`hmmpress`-ed on first use if the
         # .h3* index files are missing.
         "database": None,
@@ -233,6 +233,24 @@ DEFAULTS: dict[str, Any] = {
             # ["--retree", "1"] for a faster pass on a very large input.
             "extra_args": [],
         },
+        # Optional alignment trimming (trimAl) between MAFFT and the
+        # tree-builder, for the whole-genome tree (2E). OFF by default.
+        # In partitioned mode each per-family alignment is trimmed BEFORE
+        # concatenation (so the partition charset ranges stay valid).
+        # Soft-fails (loud warning + builds on the UNTRIMMED alignment)
+        # when trimal is missing, errors, or strips the alignment to
+        # nothing. The per-protein trees have their own knob at
+        # phylo.per_protein.trimal.
+        "trimal": {
+            "enabled": False,
+            # trimAl method → the `-<mode>` flag. "automated1" is trimAl's
+            # heuristic best-for-ML-trees default; other column-trimming
+            # methods: gappyout, strict, strictplus, nogaps, noallgaps.
+            # Threshold trimming (-gt / -st / -cons) goes in extra_args.
+            "mode": "automated1",
+            # Raw trimal flags appended verbatim, e.g. ["-gt", "0.8"].
+            "extra_args": [],
+        },
         "fasttree": {
             # Raw FastTree flags appended to its argv. The protein /
             # nucleotide model is picked automatically from the rep
@@ -252,6 +270,38 @@ DEFAULTS: dict[str, Any] = {
             "ultrafast_bootstrap": 1000,
             # Raw flags appended verbatim, e.g. ["-alrt", "1000"] for SH-aLRT.
             "extra_args": [],
+        },
+        # Partitioned-supermatrix tree (the principled multi-marker
+        # analysis). When enabled AND the run resolves to protein + IQ-TREE
+        # AND the HMM tier resolved >= 2 marker families, the whole-genome
+        # tree (2E) is built by aligning each marker family separately, then
+        # concatenating the per-family MSAs column-wise into a supermatrix
+        # and letting IQ-TREE fit a model PER partition (-p/-q/-Q). This
+        # replaces gluing the markers into one string + one model + one
+        # MAFFT (which can align unrelated proteins across segment seams).
+        # Soft-falls back to that concat-then-align path when the run can't
+        # be partitioned (FastTree, no HMM families, < 2 families).
+        "partition": {
+            # Master switch. Default ON for protein + IQ-TREE runs; set
+            # false to force the legacy concat-then-align behaviour.
+            "enabled": True,
+            # IQ-TREE partition linkage (Chernomor et al. 2016):
+            #   "proportional" — -p, edge-linked proportional: one shared
+            #                    branch-length set + a per-partition rate
+            #                    multiplier. The standard default.
+            #   "equal"        — -q, edge-equal: all partitions share branch
+            #                    lengths (fewest parameters).
+            #   "unlinked"     — -Q, edge-unlinked: each partition gets its
+            #                    own branch lengths (most flexible; many more
+            #                    parameters — useful when segments may have
+            #                    different histories, e.g. reassortment).
+            "linkage": "proportional",
+            # Optional per-family substitution-model pin, keyed by the family
+            # LABEL (segment_token, e.g. "L_RdRP_4" or "M_Bunya_G1--Bunya_G2";
+            # the segment prefix is dropped in non-segmented runs). A family
+            # absent here gets "MFP" → ModelFinder picks its model. Example:
+            #   models: {L_RdRP_4: "LG+G4", S_Bunya_nucleocap: "WAG+G4"}
+            "models": {},
         },
         # Per-leaf display labels on the phyloXML tree.
         # Supported placeholders: {species}, {genus}, {subgenus},
@@ -370,13 +420,30 @@ DEFAULTS: dict[str, Any] = {
             # signal. Needs >= 2 trees to compare; soft-fails otherwise.
             "incongruence": True,
             # MAFFT args for the per-protein (single-gene) alignments.
-            # These are small enough to afford high-accuracy L-INS-i, so
-            # the default is "--maxiterate 1000 --localpair". When this
-            # list is non-empty MAFFT is invoked WITHOUT --auto (so the
-            # explicit strategy takes effect); set [] to fall back to the
-            # whole-genome tree's --auto + phylo.mafft.extra_args.
+            # Default is empty → MAFFT --auto (fast; size-adaptive), the
+            # same as the whole-genome tree. For a high-accuracy
+            # publication run set this to ["--maxiterate", "1000",
+            # "--localpair"] (L-INS-i) — these single-gene alignments are
+            # small enough to afford it, but it's noticeably slower, so
+            # it's opt-in. A non-empty list is passed to MAFFT WITHOUT
+            # --auto (so the explicit strategy takes effect).
             "mafft": {
-                "extra_args": ["--maxiterate", "1000", "--localpair"],
+                "extra_args": [],
+            },
+            # Emit a phyloXML <domain_architecture> on each per-protein
+            # tree leaf, built from that CDS's HMM hits (every hit, with
+            # its E-value as the domain confidence — so Archaeopteryx's
+            # interactive E-value slider can filter them). Default on.
+            "domain_architecture": True,
+            # Optional trimAl trimming for the per-protein (single-gene)
+            # alignments — independent of the whole-genome phylo.trimal.
+            # OFF by default; same shape (mode → -<mode>, default
+            # automated1; extra_args raw passthrough). Soft-fails to the
+            # untrimmed alignment exactly like phylo.trimal.
+            "trimal": {
+                "enabled": False,
+                "mode": "automated1",
+                "extra_args": [],
             },
         },
     },
@@ -1011,6 +1078,55 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         isinstance(x, str) for x in pp_mafft_extra
     ):
         errors.append("phylo.per_protein.mafft.extra_args must be a list of strings")
+    if "domain_architecture" in pp_cfg and not isinstance(
+        pp_cfg["domain_architecture"], bool
+    ):
+        errors.append("phylo.per_protein.domain_architecture must be a boolean")
+
+    # trimAl blocks (whole-genome phylo.trimal + per-protein
+    # phylo.per_protein.trimal share the same shape).
+    _TRIMAL_MODES = (
+        "automated1", "gappyout", "strict", "strictplus", "nogaps", "noallgaps",
+    )
+
+    def _check_trimal_block(block: dict, where: str) -> None:
+        if "enabled" in block and not isinstance(block["enabled"], bool):
+            errors.append(f"{where}.enabled must be a boolean")
+        mode = block.get("mode", "automated1")
+        if mode not in _TRIMAL_MODES:
+            errors.append(
+                f"{where}.mode '{mode}' is not supported "
+                f"(use one of {list(_TRIMAL_MODES)}; threshold trimming goes "
+                f"in {where}.extra_args)"
+            )
+        ta_extra = block.get("extra_args", [])
+        if not isinstance(ta_extra, list) or not all(
+            isinstance(x, str) for x in ta_extra
+        ):
+            errors.append(f"{where}.extra_args must be a list of strings")
+
+    _check_trimal_block(phylo_cfg.get("trimal", {}) or {}, "phylo.trimal")
+    _check_trimal_block(
+        pp_cfg.get("trimal", {}) or {}, "phylo.per_protein.trimal",
+    )
+
+    part_cfg = phylo_cfg.get("partition", {}) or {}
+    if "enabled" in part_cfg and not isinstance(part_cfg["enabled"], bool):
+        errors.append("phylo.partition.enabled must be a boolean")
+    plink = part_cfg.get("linkage", "proportional")
+    if plink not in ("proportional", "equal", "unlinked"):
+        errors.append(
+            f"phylo.partition.linkage '{plink}' is not supported "
+            "(use 'proportional', 'equal', or 'unlinked')"
+        )
+    pmodels = part_cfg.get("models", {})
+    if not isinstance(pmodels, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in pmodels.items()
+    ):
+        errors.append(
+            "phylo.partition.models must be a mapping of family-label → "
+            "model string"
+        )
 
     rooting_cfg = phylo_cfg.get("rooting", {}) or {}
     rmethod = rooting_cfg.get("method", "auto")

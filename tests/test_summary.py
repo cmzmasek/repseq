@@ -183,6 +183,60 @@ def test_render_summary_phylo_section_appears_when_phylo_ran(make_seq, tmp_path)
     assert "coloured by **genus**" in md
 
 
+def test_render_summary_phylo_describes_partitioned_supermatrix(make_seq, tmp_path):
+    """protein + IQ-TREE + partition enabled (the default) → the phylo
+    section describes the partitioned-supermatrix analysis, not concat."""
+    cfg = _base_cfg(tmp_path)  # alphabet_for_clustering=protein
+    cfg["phylo"] = {
+        "tool": "iqtree",
+        "partition": {"enabled": True, "linkage": "unlinked"},
+    }
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "partitioned supermatrix" in md
+    assert "per partition" in md
+    assert "aligned **separately**" in md
+    # Linkage surfaced as words + IQ-TREE flag.
+    assert "unlinked" in md and "`-Q`" in md
+    assert "{prefix}_partition.nex" in md
+
+
+def test_render_summary_phylo_describes_trimal_when_enabled(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    # FastTree path → concat branch; trimming enabled on the genome tree.
+    cfg["phylo"] = {"tool": "fasttree", "trimal": {"enabled": True, "mode": "automated1"}}
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "trimAl" in md
+    assert "`-automated1`" in md
+    assert "{prefix}_msa_untrimmed.fasta" in md
+    # Software table gains a trimAl row.
+    assert "Alignment trimming" in md
+
+
+def test_render_summary_phylo_no_trimal_prose_when_off(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"tool": "fasttree"}  # trimal defaults off
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "trimAl" not in md
+
+
+def test_render_summary_per_protein_describes_trimal_when_enabled(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {
+        "tool": "fasttree",
+        "per_protein": {"min_taxa": 3, "trimal": {"enabled": True, "mode": "gappyout"}},
+    }
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], per_protein_ran=True)
+    assert "trimAl" in md and "`-gappyout`" in md
+
+
+def test_render_summary_phylo_concat_when_partition_disabled(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"tool": "iqtree", "partition": {"enabled": False}}
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "partitioned supermatrix" not in md
+    assert "multiple sequence alignment of the" in md
+
+
 def test_render_summary_coloring_two_rank_and_disabled(make_seq, tmp_path):
     cfg = _base_cfg(tmp_path)
     cfg["phylo"] = {
@@ -213,6 +267,9 @@ def test_render_summary_per_protein_section_appears(make_seq, tmp_path):
     # Incongruence table described by default.
     assert "Robinson-Foulds" in md
     assert "{prefix}_per_protein/{prefix}_incongruence.tsv" in md
+    # Domain-architecture annotation described by default.
+    assert "domain architecture" in md
+    assert "<domain_architecture>" in md
 
 
 def test_render_summary_per_protein_describes_linsi_mafft(make_seq, tmp_path):
