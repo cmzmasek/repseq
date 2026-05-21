@@ -512,6 +512,14 @@ phylo:
     # reassortment / recombination signal. Needs >= 2 trees to compare.
     # Set false to skip the table.
     incongruence: true
+    # MAFFT options for the per-protein (single-gene) alignments. These
+    # alignments are small enough to afford high-accuracy L-INS-i, so the
+    # default is "--maxiterate 1000 --localpair". When this list is
+    # non-empty, MAFFT is invoked WITHOUT --auto so the explicit strategy
+    # takes effect (the whole-genome --phylo tree still uses --auto +
+    # phylo.mafft.extra_args). Set to [] to fall back to --auto here too.
+    mafft:
+      extra_args: ["--maxiterate", "1000", "--localpair"]
 
 output:
   dir: ./repseq_output

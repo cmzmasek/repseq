@@ -215,6 +215,22 @@ def test_render_summary_per_protein_section_appears(make_seq, tmp_path):
     assert "{prefix}_per_protein/{prefix}_incongruence.tsv" in md
 
 
+def test_render_summary_per_protein_describes_linsi_mafft(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {
+        "tool": "fasttree",
+        "per_protein": {
+            "min_taxa": 3,
+            "mafft": {"extra_args": ["--maxiterate", "1000", "--localpair"]},
+        },
+    }
+    md = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], per_protein_ran=True,
+    )
+    assert "--maxiterate 1000 --localpair" in md
+    assert "L-INS-i" in md
+
+
 def test_render_summary_incongruence_omitted_when_disabled(make_seq, tmp_path):
     cfg = _base_cfg(tmp_path)
     cfg["phylo"] = {

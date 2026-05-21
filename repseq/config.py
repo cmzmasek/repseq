@@ -369,6 +369,15 @@ DEFAULTS: dict[str, Any] = {
             # between marker trees is the reassortment/recombination
             # signal. Needs >= 2 trees to compare; soft-fails otherwise.
             "incongruence": True,
+            # MAFFT args for the per-protein (single-gene) alignments.
+            # These are small enough to afford high-accuracy L-INS-i, so
+            # the default is "--maxiterate 1000 --localpair". When this
+            # list is non-empty MAFFT is invoked WITHOUT --auto (so the
+            # explicit strategy takes effect); set [] to fall back to the
+            # whole-genome tree's --auto + phylo.mafft.extra_args.
+            "mafft": {
+                "extra_args": ["--maxiterate", "1000", "--localpair"],
+            },
         },
     },
     "taxonomy": {
@@ -996,6 +1005,12 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         )
     if "incongruence" in pp_cfg and not isinstance(pp_cfg["incongruence"], bool):
         errors.append("phylo.per_protein.incongruence must be a boolean")
+    pp_mafft = pp_cfg.get("mafft", {}) or {}
+    pp_mafft_extra = pp_mafft.get("extra_args", [])
+    if not isinstance(pp_mafft_extra, list) or not all(
+        isinstance(x, str) for x in pp_mafft_extra
+    ):
+        errors.append("phylo.per_protein.mafft.extra_args must be a list of strings")
 
     rooting_cfg = phylo_cfg.get("rooting", {}) or {}
     rmethod = rooting_cfg.get("method", "auto")

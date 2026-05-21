@@ -550,17 +550,24 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"the underlying Newick file and FASTA alignment.\n"
         )
     if per_protein_ran:
-        min_taxa = max(
-            3,
-            int((phylo_cfg.get("per_protein", {}) or {}).get("min_taxa", 3) or 3),
-        )
+        pp_cfg = phylo_cfg.get("per_protein", {}) or {}
+        min_taxa = max(3, int(pp_cfg.get("min_taxa", 3) or 3))
+        pp_mafft = list((pp_cfg.get("mafft", {}) or {}).get("extra_args", []) or [])
+        if pp_mafft:
+            align_sentence = (
+                f"aligned with MAFFT (`{' '.join(pp_mafft)}`; high-accuracy "
+                f"L-INS-i for these single-gene sets) and inferred with "
+                f"{chosen}"
+            )
+        else:
+            align_sentence = f"aligned and inferred with the same MAFFT/{chosen} pipeline"
         paragraphs.append(
             f"In addition, a **separate tree was built for each HMM "
             f"domain-architecture marker** declared for quality control "
             f"(the `hmms:` tokens; e.g. `Bunya_G1--Bunya_G2`). For every "
             f"marker, the satisfying CDS translation was taken from each "
-            f"representative that carries that architecture and aligned and "
-            f"inferred with the same MAFFT/{chosen} pipeline, rooting, and "
+            f"representative that carries that architecture and {align_sentence}, "
+            f"with the same rooting and "
             f"LCA annotation as above. Markers carried by fewer than "
             f"**{min_taxa}** representatives were skipped. Each tree was "
             f"emitted as PhyloXML with its alignment, Newick, and id-map "

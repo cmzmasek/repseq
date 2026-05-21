@@ -120,7 +120,7 @@ def test_run_phylogeny_skips_with_fewer_than_three_reps(tmp_path):
         run_phylogeny(reps, {}, tmp_path, "test")
 
 
-def _stub_mafft_writes_alignment(input_fasta: Path, output_fasta: Path, cfg):
+def _stub_mafft_writes_alignment(input_fasta: Path, output_fasta: Path, cfg, **kwargs):
     # Echo the input back as a "trivial alignment" — same headers, same
     # sequences. The orchestrator never inspects the alignment content,
     # only its path, so an identity copy is enough.
@@ -211,7 +211,7 @@ def test_run_phylogeny_uses_protein_sequence_when_alphabet_protein(tmp_path):
     seen_is_protein: list[bool] = []
     seen_input_bodies: list[str] = []
 
-    def _mafft(input_fasta, output_fasta, cfg):
+    def _mafft(input_fasta, output_fasta, cfg, **kwargs):
         # Capture what's being aligned.
         body = "".join(
             line for line in input_fasta.read_text().splitlines()
@@ -243,7 +243,7 @@ def test_run_phylogeny_uses_protein_sequence_when_alphabet_protein(tmp_path):
 def test_run_phylogeny_wraps_mafft_error_as_phyloerror(tmp_path):
     reps = [_seq(f"p{i}", "MK") for i in range(3)]
 
-    def _boom(input_fasta, output_fasta, cfg):
+    def _boom(input_fasta, output_fasta, cfg, **kwargs):
         raise MafftError("mafft segfaulted")
 
     with patch("repseq.phylo.pipeline.run_mafft", side_effect=_boom):

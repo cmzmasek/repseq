@@ -145,7 +145,7 @@ def test_segment_proteins_scopes_to_named_segment():
 # Orchestration (mocked binaries)
 # ---------------------------------------------------------------------------
 
-def _stub_mafft(input_fasta: Path, output_fasta: Path, cfg):
+def _stub_mafft(input_fasta: Path, output_fasta: Path, cfg, **kwargs):
     output_fasta.parent.mkdir(parents=True, exist_ok=True)
     output_fasta.write_text(input_fasta.read_text())
 
@@ -210,6 +210,92 @@ def test_family_below_min_taxa_is_skipped(tmp_path):
     sub = tmp_path / "bunya_per_protein"
     assert (sub / "S_Bunya_nucleocap_tree.xml").exists()
     assert not (sub / "M_Bunya_G1--Bunya_G2_tree.xml").exists()
+
+
+def test_per_protein_uses_linsi_mafft_without_auto(tmp_path):
+    """The per-protein alignments default to L-INS-i, passed to run_mafft
+    as extra_args with use_auto=False."""
+    cfg = _seg_cfg({"S": {"hmms": ["Bunya_nucleocap"]}})
+    cfg["phylo"]["per_protein"]["mafft"] = {
+        "extra_args": ["--maxiterate", "1000", "--localpair"]
+    }
+    reps = [_concat_rep(f"iso{i}", {"S": _S_proteins()}) for i in range(3)]
+
+    calls = []
+
+    def _capture_mafft(input_fasta, output_fasta, cfg, **kwargs):
+        calls.append(kwargs)
+        output_fasta.parent.mkdir(parents=True, exist_ok=True)
+        output_fasta.write_text(input_fasta.read_text())
+
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_capture_mafft), \
+         patch("repseq.phylo.pipeline.run_fasttree", side_effect=_stub_fasttree):
+        run_per_protein_phylogeny(reps, cfg, tmp_path, "bunya")
+
+    assert calls, "run_mafft was never called"
+    for kw in calls:
+        assert kw.get("extra_args") == ["--maxiterate", "1000", "--localpair"]
+        assert kw.get("use_auto") is False
+
+
+def test_per_protein_empty_mafft_falls_back_to_auto(tmp_path):
+    cfg = _seg_cfg({"S": {"hmms": ["Bunya_nucleocap"]}})
+    cfg["phylo"]["per_protein"]["mafft"] = {"extra_args": []}
+    reps = [_concat_rep(f"iso{i}", {"S": _S_proteins()}) for i in range(3)]
+
+    calls = []
+
+    def _capture_mafft(input_fasta, output_fasta, cfg, **kwargs):
+        calls.append(kwargs)
+        output_fasta.parent.mkdir(parents=True, exist_ok=True)
+        output_fasta.write_text(input_fasta.read_text())
+
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_capture_mafft), \
+         patch("repseq.phylo.pipeline.run_fasttree", side_effect=_stub_fasttree):
+        run_per_protein_phylogeny(reps, cfg, tmp_path, "bunya")
+
+    # Empty per-protein mafft → fall back to the 2E --auto path
+    # (_build_tree resolves None to the empty cfg list, auto stays on).
+    for kw in calls:
+        assert not kw.get("extra_args")        # None or []
+        assert kw.get("use_auto") is True
+
+
+def test_per_protein_leaf_shows_only_family_protein(tmp_path):
+    """In the S (nucleocapsid) tree, each CONCAT leaf must show only the
+    S segment's nucleocapsid protein as <sequence type="protein"> — not
+    the M glycoprotein — while keeping its dna sequences and full
+    summary properties."""
+    import xml.etree.ElementTree as ET
+
+    cfg = _seg_cfg({
+        "S": {"hmms": ["Bunya_nucleocap"]},
+        "M": {"hmms": ["Bunya_G1--Bunya_G2"]},
+    })
+    reps = [
+        _concat_rep(f"iso{i}", {"S": _S_proteins(), "M": _M_proteins()})
+        for i in range(3)
+    ]
+    _run(reps, cfg, tmp_path)
+    xml = tmp_path / "bunya_per_protein" / "S_Bunya_nucleocap_tree.xml"
+    assert xml.exists()
+    ns = "{http://www.phyloxml.org}"
+    root = ET.parse(xml).getroot()
+    leaves = [
+        c for c in root.iter(f"{ns}clade")
+        if c.find(f"{ns}sequence") is not None
+        and any(s.get("type") == "dna" for s in c.findall(f"{ns}sequence"))
+    ]
+    assert leaves
+    for clade in leaves:
+        prot_accs = [
+            s.find(f"{ns}accession").text
+            for s in clade.findall(f"{ns}sequence")
+            if s.get("type") == "protein"
+        ]
+        # Only the nucleocapsid CDS, never the M glycoprotein.
+        assert prot_accs == ["S_N"]
+        assert "M_GP" not in prot_accs
 
 
 def test_incongruence_table_written_for_two_families(tmp_path):

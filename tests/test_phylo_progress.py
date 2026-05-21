@@ -52,6 +52,30 @@ def test_mafft_prints_start_and_finish(tmp_path, capsys):
     assert "--thread 4" in err
 
 
+def test_mafft_explicit_args_drop_auto(tmp_path, capsys):
+    """With use_auto=False and explicit extra_args (the per-protein
+    L-INS-i path), --auto is omitted and the strategy flags are passed."""
+    input_fasta = tmp_path / "in.fasta"
+    input_fasta.write_text(">a\nMKL\n>b\nMKL\n")
+    out = tmp_path / "msa.fasta"
+
+    with patch("repseq.phylo.mafft._check_mafft", return_value="/fake/mafft"), \
+         patch(
+             "repseq.phylo.mafft.subprocess.run",
+             side_effect=_stub_subprocess_run_with_output(">a\nMKL\n>b\nMKL\n"),
+         ):
+        run_mafft(
+            input_fasta, out, {"threads": 8},
+            extra_args=["--maxiterate", "1000", "--localpair"],
+            use_auto=False,
+        )
+
+    err = capsys.readouterr().err
+    assert "--auto" not in err
+    assert "--maxiterate 1000 --localpair" in err
+    assert "--thread 8" in err
+
+
 def test_fasttree_prints_start_and_finish_nt(tmp_path, capsys):
     msa = tmp_path / "msa.fasta"
     msa.write_text(">a\nACGT\n>b\nACGT\n")

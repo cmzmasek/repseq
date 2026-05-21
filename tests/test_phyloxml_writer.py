@@ -108,7 +108,8 @@ def test_confidence_type_for_unknown_tool_defaults_to_bootstrap():
 # ---------------------------------------------------------------------------
 
 def _run_write(tmp_path, reps, *, cfg=None, tree_tool="FastTree",
-               model="GTR", ufboot=None, alphabet="nucleotide"):
+               model="GTR", ufboot=None, alphabet="nucleotide",
+               leaf_protein_ids=None):
     newick = tmp_path / "tree.nwk"
     # Build a Newick where leaf labels are the short ids that id_map
     # will resolve back. Three taxa is the minimum the orchestrator
@@ -127,6 +128,7 @@ def _run_write(tmp_path, reps, *, cfg=None, tree_tool="FastTree",
         tree_version="2.1.11",
         model=model,
         ufboot=ufboot,
+        leaf_protein_ids=leaf_protein_ids,
     )
     return out
 
@@ -250,6 +252,66 @@ def test_leaf_emits_three_summary_property_lists(tmp_path):
     # Marker-first ordering replicated in the summary lists.
     assert props["repseq:protein_acc"] == "P_main, P_aux"
     assert props["repseq:protein_names"] == "polymerase, auxiliary protein"
+
+
+def test_leaf_protein_ids_restricts_protein_sequences_only(tmp_path):
+    """Per-protein trees: only the CDS used for that tree is shown as
+    <sequence type="protein">; the <sequence type="dna"> stays and all
+    three summary properties remain full."""
+    reps = [_make_seq("ACC1"), _make_seq("ACC2"), _make_seq("ACC3")]
+    proteins = [
+        {"protein_id": "P_aux", "product": "auxiliary protein",
+         "length": 50, "sequence": "M" * 50},
+        {"protein_id": "P_main", "product": "polymerase",
+         "length": 100, "sequence": "M" * 100},
+    ]
+    for r in reps:
+        r.proteins = [dict(p) for p in proteins]
+        r.marker_protein_ids = ["P_main"]
+    # Only P_aux fed this (hypothetical) family's tree.
+    out = _run_write(
+        tmp_path, reps,
+        leaf_protein_ids={r.id: {"P_aux"} for r in reps},
+    )
+    root = ET.parse(out).getroot()
+    target = None
+    for clade in root.iter(_ns("clade")):
+        accs = [a.text for a in clade.findall(f"{_ns('sequence')}/{_ns('accession')}")]
+        if "ACC1" in accs:
+            target = clade
+            break
+    assert target is not None
+    seqs = target.findall(_ns("sequence"))
+    by_type = {}
+    for s in seqs:
+        by_type.setdefault(s.get("type"), []).append(s.find(_ns("accession")).text)
+    # Exactly one protein <sequence> (P_aux), and the dna stays.
+    assert by_type["protein"] == ["P_aux"]
+    assert by_type["dna"] == ["ACC1"]
+    # Summary properties unaffected — still list everything.
+    props = {p.get("ref"): p.text for p in target.findall(_ns("property"))}
+    assert props["repseq:protein_acc"] == "P_main, P_aux"
+    assert props["repseq:protein_names"] == "polymerase, auxiliary protein"
+    assert props["repseq:nuc_acc"] == "ACC1"
+
+
+def test_leaf_protein_ids_none_keeps_all_proteins(tmp_path):
+    """Without leaf_protein_ids (the 2E path) every CDS is still shown."""
+    reps = [_make_seq("ACC1"), _make_seq("ACC2"), _make_seq("ACC3")]
+    reps[0].proteins = [
+        {"protein_id": "P_aux", "product": "aux", "length": 50, "sequence": "M" * 50},
+        {"protein_id": "P_main", "product": "pol", "length": 100, "sequence": "M" * 100},
+    ]
+    reps[0].marker_protein_ids = ["P_main"]
+    out = _run_write(tmp_path, reps)  # no leaf_protein_ids
+    root = ET.parse(out).getroot()
+    target = next(
+        c for c in root.iter(_ns("clade"))
+        if "ACC1" in [a.text for a in c.findall(f"{_ns('sequence')}/{_ns('accession')}")]
+    )
+    prot = [s.find(_ns("accession")).text for s in target.findall(_ns("sequence"))
+            if s.get("type") == "protein"]
+    assert prot == ["P_main", "P_aux"]
 
 
 def test_segmented_concat_emits_one_sequence_per_segment_and_protein(tmp_path):

@@ -575,7 +575,12 @@ set for QC under `segment_markers` / `cluster_protein`. For each token
 (e.g. `Bunya_nucleocap`, or the multidomain `Bunya_G1--Bunya_G2`), repseq
 picks the CDS that satisfies it on every representative carrying that
 architecture and runs the *same* MAFFT → IQ-TREE/FastTree → root → LCA
-pipeline on those protein translations.
+pipeline on those protein translations. Because these are small
+single-gene alignments, they default to **high-accuracy MAFFT L-INS-i**
+(`--maxiterate 1000 --localpair`, run without `--auto`) rather than the
+size-adaptive `--auto` used for the whole-genome `--phylo` tree —
+configurable via `phylo.per_protein.mafft.extra_args` (set `[]` to fall
+back to `--auto`).
 
 Why you'd want it: comparing the single-marker trees side by side reveals
 **topological incongruence** — an L-segment polymerase tree disagreeing
@@ -598,7 +603,13 @@ segmented mode, e.g. `M_Bunya_G1--Bunya_G2`):
 ```
 
 Each tree file has the same format and rich annotation as its `--phylo`
-counterpart. The flag runs alone or alongside `--phylo`.
+counterpart, with one deliberate difference: a leaf shows **only the CDS
+that fed that tree** as `<sequence type="protein">` (the `CoV_nucleocap`
+tree shows just the nucleocapsid protein, not every CDS of the genome).
+The `<sequence type="dna">` element encoding it, and the
+`repseq:nuc_acc` / `repseq:protein_acc` / `repseq:protein_names` summary
+properties, still describe the leaf's full gene content. The flag runs
+alone or alongside `--phylo`.
 
 #### `{prefix}_incongruence.tsv` — incongruence as a number
 

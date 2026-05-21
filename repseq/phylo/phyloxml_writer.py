@@ -281,6 +281,7 @@ def _serialise_leaf(
     label: str,
     conf_type: str,
     color_scheme: Optional[ColorScheme] = None,
+    shown_protein_ids: Optional[set[str]] = None,
 ) -> None:
     """Emit one terminal ``<clade>`` with rich annotation.
 
@@ -299,6 +300,15 @@ def _serialise_leaf(
       ``repseq:protein_names``.
     * The isolate-level ``repseq:`` properties (host, country, date,
       strain, …) as before.
+
+    ``shown_protein_ids`` (per-protein trees, 2F) restricts the emitted
+    ``<sequence type="protein">`` elements to just the CDS used for that
+    tree's inference — so the CoV_nucleocap tree shows only the
+    CoV_nucleocap protein, not every CDS of the genome. ``None`` (2E)
+    keeps the full marker-first protein list. The ``<sequence
+    type="dna">`` elements and all three summary ``repseq:`` properties
+    are unaffected — they always reflect the leaf's complete gene
+    content.
     """
     clade = ET.SubElement(parent, "clade")
 
@@ -335,9 +345,17 @@ def _serialise_leaf(
         for rec in protein_records if rec[0] == pid
     ]
     others = [rec for rec in protein_records if rec[0] not in marker_set]
-    for pid, product, _src in markers:
+    # Protein <sequence> elements to actually emit. In a per-protein
+    # tree (shown_protein_ids set) only the CDS used for that tree is
+    # shown; otherwise the full marker-first list. The summary
+    # properties below stay full regardless.
+    emit_markers, emit_others = markers, others
+    if shown_protein_ids is not None:
+        emit_markers = [r for r in markers if r[0] in shown_protein_ids]
+        emit_others = [r for r in others if r[0] in shown_protein_ids]
+    for pid, product, _src in emit_markers:
         _emit_sequence_element(clade, "protein", pid, product)
-    for pid, product, _src in others:
+    for pid, product, _src in emit_others:
         _emit_sequence_element(clade, "protein", pid, product)
     for acc, name in nuc_records:
         _emit_sequence_element(clade, "dna", acc, name)
@@ -406,6 +424,7 @@ def _serialise_internal(
     seq_by_id: dict[str, Sequence],
     label_by_id: dict[str, str],
     color_scheme: Optional[ColorScheme] = None,
+    leaf_protein_ids: Optional[dict[str, set[str]]] = None,
 ) -> None:
     """Emit one internal ``<clade>`` and recurse into children."""
     clade = ET.SubElement(parent, "clade")
@@ -452,6 +471,11 @@ def _serialise_internal(
                 label=label_by_id.get(original, original),
                 conf_type=conf_type,
                 color_scheme=color_scheme,
+                shown_protein_ids=(
+                    leaf_protein_ids.get(original)
+                    if leaf_protein_ids is not None
+                    else None
+                ),
             )
         else:
             _serialise_internal(
@@ -461,6 +485,7 @@ def _serialise_internal(
                 seq_by_id=seq_by_id,
                 label_by_id=label_by_id,
                 color_scheme=color_scheme,
+                leaf_protein_ids=leaf_protein_ids,
             )
 
 
@@ -608,6 +633,7 @@ def write_phyloxml(
     tree=None,
     rooting_method: Optional[str] = None,
     color_scheme: Optional[ColorScheme] = None,
+    leaf_protein_ids: Optional[dict[str, set[str]]] = None,
 ) -> None:
     """Render a tree to a richly-annotated phyloXML file at
     ``phyloxml_path``.
@@ -714,6 +740,7 @@ def write_phyloxml(
         seq_by_id=seq_by_id,
         label_by_id=label_by_id,
         color_scheme=color_scheme,
+        leaf_protein_ids=leaf_protein_ids,
     )
 
     # Pretty-print: stdlib doesn't ship a pretty printer that handles

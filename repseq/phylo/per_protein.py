@@ -177,6 +177,25 @@ def _min_taxa(cfg: dict[str, Any]) -> int:
         return 3
 
 
+def _per_protein_mafft(cfg: dict[str, Any]) -> tuple[Optional[list[str]], bool]:
+    """MAFFT args for the per-protein alignments → ``(extra_args, use_auto)``.
+
+    These single-gene alignments are small enough to afford high-accuracy
+    L-INS-i, so the default is ``--maxiterate 1000 --localpair``. When the
+    per-protein ``mafft.extra_args`` list is non-empty it is used verbatim
+    with ``--auto`` OFF (so the explicit strategy takes effect); when
+    empty, returns ``(None, True)`` to fall back to the 2E behaviour
+    (``--auto`` + ``phylo.mafft.extra_args``).
+    """
+    m = (
+        ((cfg or {}).get("phylo", {}) or {}).get("per_protein", {}) or {}
+    ).get("mafft", {}) or {}
+    args = list(m.get("extra_args", []) or [])
+    if args:
+        return args, False
+    return None, True
+
+
 def _hmm_tier_ran(cfg: dict[str, Any], representatives: list[Sequence]) -> bool:
     """Did the HMM scan actually annotate any protein this session?
 
@@ -234,6 +253,10 @@ def run_per_protein_phylogeny(
     # cross-tree incongruence legible at a glance.
     color_scheme = build_color_scheme(representatives, cfg)
 
+    # High-accuracy MAFFT (L-INS-i by default) for these single-gene
+    # alignments; resolved once and applied to every family.
+    pp_mafft_args, pp_mafft_auto = _per_protein_mafft(cfg)
+
     for family_label, token, segment in specs:
         try:
             parsed = parse_hmm_token(token)
@@ -243,12 +266,18 @@ def run_per_protein_phylogeny(
 
         leaf_reps: list[Sequence] = []
         bodies: dict[str, str] = {}
+        # protein id(s) shown as <sequence type="protein"> on each leaf:
+        # only the CDS that actually fed this family's tree.
+        leaf_protein_ids: dict[str, set[str]] = {}
         for rep in representatives:
             cds = _best_satisfying_cds(_segment_proteins(rep, segment), parsed)
             if cds is None:
                 continue
             leaf_reps.append(rep)
             bodies[rep.id] = cds["sequence"]
+            pid = cds.get("protein_id")
+            if pid:
+                leaf_protein_ids[rep.id] = {pid}
 
         if len(leaf_reps) < min_taxa:
             sparse.append(f"{family_label} ({len(leaf_reps)})")
@@ -272,6 +301,9 @@ def run_per_protein_phylogeny(
                 file_prefix=family_label,
                 xml_name_prefix=f"{prefix}_{family_label}",
                 color_scheme=color_scheme,
+                leaf_protein_ids=leaf_protein_ids,
+                mafft_extra_args=pp_mafft_args,
+                mafft_use_auto=pp_mafft_auto,
             )
         except PhyloError as exc:
             logger.warning("[per-protein] family %s failed: %s", family_label, exc)

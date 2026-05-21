@@ -255,6 +255,9 @@ def _build_tree(
     file_prefix: str,
     xml_name_prefix: str,
     color_scheme: Optional[ColorScheme] = None,
+    leaf_protein_ids: Optional[dict[str, set[str]]] = None,
+    mafft_extra_args: Optional[list[str]] = None,
+    mafft_use_auto: bool = True,
 ) -> list[Path]:
     """Build one MSA + tree + phyloXML from a list of leaves.
 
@@ -270,6 +273,12 @@ def _build_tree(
     ``color_scheme`` (when given) is a shared taxonomy-colour palette
     forwarded to the writer; passing the *same* scheme into every tree of
     a run keeps a given taxon the same colour across 2E and all 2F trees.
+    ``leaf_protein_ids`` (per-protein trees) maps ``seq.id`` → the set of
+    CDS protein ids that fed this tree, so the writer shows only those as
+    ``<sequence type="protein">``; ``None`` (2E) shows the full set.
+    ``mafft_extra_args`` / ``mafft_use_auto`` override the MAFFT command
+    (the per-protein path passes its L-INS-i args with auto off); ``None``
+    falls back to ``phylo.mafft.extra_args`` with ``--auto``.
     Raises :class:`PhyloError` on any binary/parse failure.
     """
     tree_tool = _pick_tree_tool(cfg, is_protein)
@@ -301,8 +310,27 @@ def _build_tree(
     )
     _write_id_map(id_map, id_map_path)
 
+    # Resolve the MAFFT command once — used for both the run and the
+    # phyloXML provenance description. A caller-supplied override (the
+    # per-protein L-INS-i default) drops --auto so its strategy flags
+    # take effect; otherwise --auto + phylo.mafft.extra_args (2E).
+    if mafft_extra_args is not None:
+        mafft_args_used = list(mafft_extra_args)
+        mafft_auto_used = mafft_use_auto
+    else:
+        mafft_args_used = list(
+            ((cfg or {}).get("phylo", {}).get("mafft", {}) or {}).get(
+                "extra_args", [],
+            )
+            or []
+        )
+        mafft_auto_used = True
+
     try:
-        run_mafft(input_fasta, msa_fasta, cfg)
+        run_mafft(
+            input_fasta, msa_fasta, cfg,
+            extra_args=mafft_args_used, use_auto=mafft_auto_used,
+        )
     except MafftError as exc:
         raise PhyloError(str(exc)) from exc
 
@@ -329,10 +357,7 @@ def _build_tree(
         model_label = "JTT" if is_protein else "GTR"
     else:
         model_label = _resolved_model(cfg, tree_tool)
-    extra_mafft = list(
-        ((cfg or {}).get("phylo", {}).get("mafft", {}) or {}).get("extra_args", [])
-        or []
-    )
+    extra_mafft = mafft_args_used
     extra_tree = list(
         ((cfg or {}).get("phylo", {}).get(tree_tool, {}) or {}).get(
             "extra_args", [],
@@ -402,6 +427,7 @@ def _build_tree(
             tree=parsed_tree,
             rooting_method=rooting_method_used,
             color_scheme=color_scheme,
+            leaf_protein_ids=leaf_protein_ids,
         )
     except Exception as exc:
         raise PhyloError(f"Newick → phyloXML conversion failed: {exc}") from exc

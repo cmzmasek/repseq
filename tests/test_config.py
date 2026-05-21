@@ -38,6 +38,28 @@ def test_validate_config_accepts_defaults():
     assert errors == []
 
 
+def test_validate_config_per_protein_mafft_default_is_linsi():
+    cfg = load_config(None)
+    assert cfg["phylo"]["per_protein"]["mafft"]["extra_args"] == [
+        "--maxiterate", "1000", "--localpair",
+    ]
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_bad_per_protein_mafft_args():
+    cfg = load_config(None)
+    cfg["phylo"]["per_protein"]["mafft"]["extra_args"] = "--localpair"
+    errors = validate_config(cfg)
+    assert any("per_protein.mafft.extra_args" in e for e in errors)
+
+
+def test_validate_config_rejects_bad_per_protein_incongruence():
+    cfg = load_config(None)
+    cfg["phylo"]["per_protein"]["incongruence"] = "yes"
+    errors = validate_config(cfg)
+    assert any("per_protein.incongruence" in e for e in errors)
+
+
 def test_validate_config_rejects_legacy_length_filter_key():
     """The renamed qc.length_filter must be rejected so configs migrate
     consciously instead of silently losing length filtering."""
