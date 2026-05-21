@@ -523,6 +523,14 @@ phyloXML with rich, browseable annotation:
   tree, so a genus is the same colour everywhere — which is what makes
   cross-tree incongruence (reassortment) jump out visually. Set
   `phylo.coloring.enabled: false` to turn it off.
+  - `saturation` and `value` (both 0–1) are the **HSV** vividness and
+    brightness held constant across the palette — only the hue changes
+    per taxon. `saturation` is how vivid vs. washed-out (`0` = grey,
+    `1` = fully vivid); `value` is how bright vs. dark (`0` = black,
+    `1` = brightest). The defaults (`0.65` / `0.90`) give strong but
+    not garish colours that stay legible on a white background. Lower
+    `saturation` for pastels; lower `value` for darker, muted tones.
+  - `missing_color` is the `#RRGGBB` grey used for unresolved taxa.
 - Every annotated internal clade gets a `<name>` and a `<taxonomy>`
   block holding the LCA's scientific name + rank (`min_rank=genus` by
   default; the labeller keeps each monophyletic clade labelled at its
