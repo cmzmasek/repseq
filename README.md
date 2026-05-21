@@ -594,10 +594,37 @@ segmented mode, e.g. `M_Bunya_G1--Bunya_G2`):
   M_Bunya_G1--Bunya_G2_tree_id_map.tsv
   S_Bunya_nucleocap_msa.fasta
   …
+  {prefix}_incongruence.tsv
 ```
 
-Each file has the same format and rich annotation as its `--phylo`
+Each tree file has the same format and rich annotation as its `--phylo`
 counterpart. The flag runs alone or alongside `--phylo`.
+
+#### `{prefix}_incongruence.tsv` — incongruence as a number
+
+So you don't have to eyeball it, repseq scores the **pairwise unrooted
+Robinson-Foulds (RF) distance** between every pair of marker trees (and,
+when `--phylo` also ran, the whole-genome tree as a `GENOME` row):
+
+| tree_a | tree_b | rf | norm_rf | n_common_taxa |
+|--------|--------|----|---------|---------------|
+| Spike  | N      | 4  | 0.3333  | 18            |
+| Spike  | GENOME | 0  | 0.0000  | 21            |
+| N      | GENOME | 4  | 0.2857  | 18            |
+
+- **`rf`** — number of bipartitions that differ between the two trees,
+  scored on their **shared** taxa only (marker trees have different leaf
+  sets). `0` = identical unrooted topology; higher = more disagreement.
+  Rooting is ignored, so a marker that merely *roots* differently isn't
+  counted as incongruent.
+- **`norm_rf`** — `rf` divided by the maximum possible RF for that many
+  shared taxa (`2·(n−3)`), so values are comparable across pairs with
+  different overlap. `NA` when fewer than 4 taxa are shared.
+- **`n_common_taxa`** — how many representatives the pair has in common
+  (the basis for that row's score).
+
+A `GENOME` column tells you which marker departs most from the consensus
+history. Turn the table off with `phylo.per_protein.incongruence: false`.
 
 > **Requirements / fail-soft:** needs the HMM tier (`hmm.enabled` plus
 > configured `hmms:`) to have run, and `mafft` + a tree builder on PATH.

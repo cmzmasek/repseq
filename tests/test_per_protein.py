@@ -212,6 +212,49 @@ def test_family_below_min_taxa_is_skipped(tmp_path):
     assert not (sub / "M_Bunya_G1--Bunya_G2_tree.xml").exists()
 
 
+def test_incongruence_table_written_for_two_families(tmp_path):
+    cfg = _seg_cfg({
+        "S": {"hmms": ["Bunya_nucleocap"]},
+        "M": {"hmms": ["Bunya_G1--Bunya_G2"]},
+    })
+    reps = [
+        _concat_rep(f"iso{i}", {"S": _S_proteins(), "M": _M_proteins()})
+        for i in range(3)
+    ]
+    files = _run(reps, cfg, tmp_path)
+    inc = tmp_path / "bunya_per_protein" / "bunya_incongruence.tsv"
+    assert inc.exists()
+    assert inc in files
+    lines = inc.read_text().splitlines()
+    assert lines[0] == "tree_a\ttree_b\trf\tnorm_rf\tn_common_taxa"
+    # One pair (S × M); all 3 isolates carry both → 3 common taxa.
+    body = [ln for ln in lines[1:] if ln.strip()]
+    assert len(body) == 1
+    assert body[0].endswith("\t3")  # n_common_taxa
+
+
+def test_incongruence_table_skipped_when_disabled(tmp_path):
+    cfg = _seg_cfg({
+        "S": {"hmms": ["Bunya_nucleocap"]},
+        "M": {"hmms": ["Bunya_G1--Bunya_G2"]},
+    })
+    cfg["phylo"]["per_protein"]["incongruence"] = False
+    reps = [
+        _concat_rep(f"iso{i}", {"S": _S_proteins(), "M": _M_proteins()})
+        for i in range(3)
+    ]
+    _run(reps, cfg, tmp_path)
+    assert not (tmp_path / "bunya_per_protein" / "bunya_incongruence.tsv").exists()
+
+
+def test_incongruence_skipped_for_single_family(tmp_path):
+    cfg = _seg_cfg({"S": {"hmms": ["Bunya_nucleocap"]}})
+    reps = [_concat_rep(f"iso{i}", {"S": _S_proteins()}) for i in range(3)]
+    _run(reps, cfg, tmp_path)
+    # One family, no --phylo genome tree → no pair to compare.
+    assert not (tmp_path / "bunya_per_protein" / "bunya_incongruence.tsv").exists()
+
+
 def test_raises_when_no_tokens_configured(tmp_path):
     cfg = _seg_cfg({})
     reps = [_concat_rep(f"iso{i}", {"S": _S_proteins()}) for i in range(3)]

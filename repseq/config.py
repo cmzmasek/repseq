@@ -361,6 +361,14 @@ DEFAULTS: dict[str, Any] = {
             # representatives carry the architecture. Never drops below
             # 3 (the tree-builder floor) regardless of what's set here.
             "min_taxa": 3,
+            # After building the per-protein trees, write a pairwise
+            # unrooted Robinson-Foulds distance table
+            # ({prefix}_incongruence.tsv) quantifying topological
+            # incongruence between the marker trees (and the
+            # whole-genome tree from --phylo, when present). High RF
+            # between marker trees is the reassortment/recombination
+            # signal. Needs >= 2 trees to compare; soft-fails otherwise.
+            "incongruence": True,
         },
     },
     "taxonomy": {
@@ -978,6 +986,16 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         errors.append(
             "phylo.coloring.missing_color must be a '#RRGGBB' hex colour string"
         )
+
+    pp_cfg = phylo_cfg.get("per_protein", {}) or {}
+    mt = pp_cfg.get("min_taxa", 3)
+    if not isinstance(mt, int) or isinstance(mt, bool) or mt < 1:
+        errors.append(
+            "phylo.per_protein.min_taxa must be a positive integer "
+            "(values below 3 are clamped to 3 at runtime)"
+        )
+    if "incongruence" in pp_cfg and not isinstance(pp_cfg["incongruence"], bool):
+        errors.append("phylo.per_protein.incongruence must be a boolean")
 
     rooting_cfg = phylo_cfg.get("rooting", {}) or {}
     rmethod = rooting_cfg.get("method", "auto")

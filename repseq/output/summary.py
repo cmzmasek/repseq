@@ -569,6 +569,17 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"polymerase tree disagreeing with an M-segment glycoprotein "
             f"tree) is the expected signature of reassortment.\n"
         )
+        if (phylo_cfg.get("per_protein", {}) or {}).get("incongruence", True):
+            paragraphs.append(
+                f"That incongruence was quantified with pairwise **unrooted "
+                f"Robinson-Foulds (RF) distances** between the marker trees "
+                f"(and the whole-genome tree, when `--phylo` also ran), "
+                f"scored on each pair's shared taxa and written to "
+                f"`{{prefix}}_per_protein/{{prefix}}_incongruence.tsv` "
+                f"(RF = 0 for identical unrooted topologies, higher for "
+                f"more topological disagreement; normalised by the maximum "
+                f"RF for the shared-taxon count).\n"
+            )
     coloring_cfg = (phylo_cfg.get("coloring", {}) or {})
     if coloring_cfg.get("enabled", True):
         cranks = list(coloring_cfg.get("ranks") or ["genus"])

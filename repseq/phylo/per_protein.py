@@ -225,6 +225,7 @@ def run_per_protein_phylogeny(
     sub_dir = out_dir / f"{prefix}_per_protein"
     written: list[Path] = []
     built = 0
+    built_labels: list[str] = []
     sparse: list[str] = []
 
     # Build the leaf-colour palette once over the FULL representative set
@@ -277,6 +278,7 @@ def run_per_protein_phylogeny(
             continue
         written.extend(files)
         built += 1
+        built_labels.append(family_label)
 
     if built == 0:
         detail = f" (sparse families: {', '.join(sparse)})" if sparse else ""
@@ -284,4 +286,61 @@ def run_per_protein_phylogeny(
             f"no protein family had >= {min_taxa} representatives carrying the "
             f"declared architecture — nothing built{detail}"
         )
+
+    inc_path = _write_incongruence_table(
+        built_labels, sub_dir, out_dir, prefix, cfg,
+    )
+    if inc_path is not None:
+        written.append(inc_path)
+
     return written
+
+
+def _write_incongruence_table(
+    built_labels: list[str],
+    sub_dir: Path,
+    out_dir: Path,
+    prefix: str,
+    cfg: dict[str, Any],
+) -> Optional[Path]:
+    """Pairwise unrooted-RF table across the built family trees (+ the 2E
+    whole-genome tree when ``--phylo`` wrote one). Soft-fail: returns the
+    path written, or None when disabled / too few trees / on any error.
+
+    Reads each tree's on-disk Newick + ``_tree_id_map.tsv`` (the genome
+    tree's land in ``out_dir`` from the ``--phylo`` step, which always
+    runs before this one), so no tree objects need threading in.
+    """
+    pp_cfg = ((cfg or {}).get("phylo", {}) or {}).get("per_protein", {}) or {}
+    if not pp_cfg.get("incongruence", True):
+        return None
+    try:
+        trees: list[tuple[str, Path, Path]] = [
+            (
+                label,
+                sub_dir / f"{label}_tree.nwk",
+                sub_dir / f"{label}_tree_id_map.tsv",
+            )
+            for label in built_labels
+        ]
+        genome_nwk = out_dir / f"{prefix}_tree.nwk"
+        genome_map = out_dir / f"{prefix}_tree_id_map.tsv"
+        if genome_nwk.exists() and genome_map.exists():
+            trees.append(("GENOME", genome_nwk, genome_map))
+        if len(trees) < 2:
+            return None  # need a pair to compare
+        from .incongruence import compute_incongruence, write_incongruence_tsv
+
+        rows = compute_incongruence(trees)
+        if not rows:
+            return None
+        inc_path = sub_dir / f"{prefix}_incongruence.tsv"
+        write_incongruence_tsv(rows, inc_path)
+        logger.info(
+            "[per-protein] wrote pairwise incongruence table (%d pair(s)): %s",
+            len(rows), inc_path,
+        )
+        return inc_path
+    except Exception as exc:  # never let a metric bug void the trees
+        logger.warning("[per-protein] incongruence table failed: %s", exc)
+        return None

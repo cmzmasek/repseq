@@ -501,6 +501,17 @@ phylo:
     # representatives carry the architecture. Clamped to a floor of 3
     # (neither IQ-TREE nor FastTree builds a tree on fewer).
     min_taxa: 3
+    # After the per-protein trees are built, write a pairwise unrooted
+    # Robinson-Foulds (RF) distance table, {prefix}_incongruence.tsv,
+    # under {prefix}_per_protein/. Columns: tree_a, tree_b, rf, norm_rf,
+    # n_common_taxa. RF is computed on each pair's shared taxa and
+    # ignores rooting; rf=0 means identical unrooted topology, higher =
+    # more incongruent. norm_rf = rf / (2*(n-3)) for n>=4 common taxa,
+    # else NA. When --phylo also ran, the whole-genome tree is included
+    # as an extra "GENOME" row set. High RF between marker trees is the
+    # reassortment / recombination signal. Needs >= 2 trees to compare.
+    # Set false to skip the table.
+    incongruence: true
 
 output:
   dir: ./repseq_output
