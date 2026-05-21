@@ -569,6 +569,23 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"polymerase tree disagreeing with an M-segment glycoprotein "
             f"tree) is the expected signature of reassortment.\n"
         )
+    coloring_cfg = (phylo_cfg.get("coloring", {}) or {})
+    if coloring_cfg.get("enabled", True):
+        cranks = list(coloring_cfg.get("ranks") or ["genus"])
+        if len(cranks) >= 2:
+            rank_sentence = (
+                f"by **{cranks[0]}** (a distinct hue per {cranks[0]}), with "
+                f"**{cranks[1]}** shaded within its parent {cranks[0]}'s hue"
+            )
+        else:
+            rank_sentence = f"by **{cranks[0]}** (a distinct hue per {cranks[0]})"
+        paragraphs.append(
+            f"Tree leaves were coloured {rank_sentence}; unresolved taxa "
+            f"were left a neutral grey. The same colour palette was applied "
+            f"across every tree, and is stored in the PhyloXML as a node "
+            f"font-colour property readable by tree viewers such as "
+            f"Archaeopteryx.\n"
+        )
     return "\n".join(paragraphs)
 
 

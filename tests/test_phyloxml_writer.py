@@ -9,6 +9,7 @@ binary calls are not exercised here — those are mocked in tests/test_phylo.py.
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from collections import Counter
 from pathlib import Path
 
 from repseq.models import Sequence, SequenceType, TaxonomyInfo
@@ -364,8 +365,12 @@ def test_leaf_property_elements_use_repseq_namespace(tmp_path):
     root = ET.parse(out).getroot()
     props = root.findall(f".//{_ns('clade')}/{_ns('property')}")
     assert len(props) > 0
-    # Every property must be repseq:... — no foreign namespaces leaked.
+    # Every metadata property must be repseq:... — no foreign namespaces
+    # leaked. The style:font_color colouring property is the one
+    # deliberate exception (a viewer-styling hint, applies_to="node").
     for p in props:
+        if p.get("ref") == "style:font_color":
+            continue
         assert p.get("ref", "").startswith("repseq:")
         assert p.get("datatype") == "xsd:string"
         assert p.get("applies_to") == "clade"
@@ -406,6 +411,87 @@ def test_absent_subranks_omitted_from_leaf_properties(tmp_path):
     for absent in ("repseq:suborder", "repseq:order",
                    "repseq:subclass", "repseq:class"):
         assert absent not in refs
+
+
+def _leaf_colors(out) -> list[str]:
+    root = ET.parse(out).getroot()
+    return [
+        p.text
+        for p in root.findall(f".//{_ns('clade')}/{_ns('property')}")
+        if p.get("ref") == "style:font_color"
+    ]
+
+
+def test_leaf_color_property_emitted_by_default(tmp_path):
+    """Colouring is on-by-default (genus mode): every leaf carries a
+    style:font_color #RRGGBB property with applies_to="node"."""
+    reps = [_make_seq("A"), _make_seq("B"), _make_seq("C")]
+    out = _run_write(tmp_path, reps)
+    root = ET.parse(out).getroot()
+    color_props = [
+        p for p in root.findall(f".//{_ns('clade')}/{_ns('property')}")
+        if p.get("ref") == "style:font_color"
+    ]
+    assert len(color_props) == 3
+    for p in color_props:
+        assert p.get("datatype") == "xsd:token"
+        assert p.get("applies_to") == "node"
+        assert p.text and p.text.startswith("#") and len(p.text) == 7
+
+
+def test_leaf_color_omitted_when_disabled(tmp_path):
+    reps = [_make_seq("A"), _make_seq("B"), _make_seq("C")]
+    cfg = {"phylo": {"coloring": {"enabled": False}}}
+    out = _run_write(tmp_path, reps, cfg=cfg)
+    assert _leaf_colors(out) == []
+
+
+def test_same_genus_shares_color_default_mode(tmp_path):
+    reps = [_make_seq("A"), _make_seq("B"), _make_seq("C")]  # all Orthohantavirus
+    out = _run_write(tmp_path, reps)
+    colors = _leaf_colors(out)
+    assert len(set(colors)) == 1  # one genus → one colour
+
+
+def test_missing_genus_renders_grey(tmp_path):
+    bare = TaxonomyInfo(taxid=1, species="x", genus="", family="Hantaviridae")
+    reps = [
+        _make_seq("A"),
+        _make_seq("B"),
+        _make_seq("C", taxonomy=bare),
+    ]
+    out = _run_write(tmp_path, reps)
+    root = ET.parse(out).getroot()
+    # Find the C leaf's colour: its label contains accession C.
+    by_color = _leaf_colors(out)
+    assert "#808080" in by_color  # the genus-less leaf
+    assert any(c != "#808080" for c in by_color)  # the others are coloured
+
+
+def test_two_rank_mode_subgenus_varies_within_genus(tmp_path):
+    """[genus, subgenus]: two subgenera of one genus get distinct (but
+    non-grey) colours."""
+    tax_a = TaxonomyInfo(
+        taxid=1, species="s1", genus="Orthohantavirus",
+        family="Hantaviridae", lineage={"subgenus": "Hantaanvirus"},
+    )
+    tax_b = TaxonomyInfo(
+        taxid=2, species="s2", genus="Orthohantavirus",
+        family="Hantaviridae", lineage={"subgenus": "Puumalavirus"},
+    )
+    reps = [
+        _make_seq("A", taxonomy=tax_a),
+        _make_seq("B", taxonomy=tax_b),
+        _make_seq("C", taxonomy=tax_a),
+    ]
+    cfg = {"phylo": {"coloring": {"ranks": ["genus", "subgenus"]}}}
+    out = _run_write(tmp_path, reps, cfg=cfg)
+    colors = _leaf_colors(out)
+    assert "#808080" not in colors            # genus + subgenus both present
+    assert len(set(colors)) == 2              # two subgenera → two hues
+    # A and C share a subgenus (one colour), B is the other — leaf order
+    # is ladderize-dependent, so assert on the count multiset.
+    assert sorted(Counter(colors).values()) == [1, 2]
 
 
 def test_empty_metadata_omitted_from_properties(tmp_path):

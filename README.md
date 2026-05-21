@@ -510,8 +510,19 @@ phyloXML with rich, browseable annotation:
 - Every leaf gets a formatted `<name>`, a `<taxonomy>` block with NCBI
   taxon id, a `<sequence>` block with the GenBank accession + title, and
   one repseq-namespaced `<property>` per per-leaf attribute (host,
-  collection_date, country, strain, isolate_id, year, species, genus,
-  subfamily, family — empties dropped).
+  collection_date, country, strain, isolate_id, year, plus the full
+  9-rank taxonomy ladder: species, subgenus, genus, subfamily, family,
+  suborder, order, subclass, class — empties dropped).
+- Leaf labels are **coloured by taxonomy** (default on, by genus): each
+  leaf carries a `<property ref="style:font_color" applies_to="node">`
+  hex colour that Archaeopteryx renders on the label. Configure under
+  `phylo.coloring` — one rank (`ranks: [genus]`) gives each value a
+  distinct hue; two ranks (`ranks: [genus, subgenus]`) shade each
+  subgenus within its genus's colour. Unresolved taxa show grey. The
+  same palette is shared across `--phylo` and every `--per-protein-phylo`
+  tree, so a genus is the same colour everywhere — which is what makes
+  cross-tree incongruence (reassortment) jump out visually. Set
+  `phylo.coloring.enabled: false` to turn it off.
 - Every annotated internal clade gets a `<name>` and a `<taxonomy>`
   block holding the LCA's scientific name + rank (`min_rank=genus` by
   default; the labeller keeps each monophyletic clade labelled at its

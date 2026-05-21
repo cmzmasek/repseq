@@ -51,6 +51,7 @@ from Bio import Phylo
 
 from .. import __version__ as REPSEQ_VERSION
 from ..models import Sequence
+from .coloring import ColorScheme, build_color_scheme
 from .labels import (
     _parse_year,
     format_leaf_label,
@@ -279,6 +280,7 @@ def _serialise_leaf(
     seq: Sequence,
     label: str,
     conf_type: str,
+    color_scheme: Optional[ColorScheme] = None,
 ) -> None:
     """Emit one terminal ``<clade>`` with rich annotation.
 
@@ -380,6 +382,22 @@ def _serialise_leaf(
         )
         prop.text = str(value)
 
+    # Taxonomy-driven leaf colour (Archaeopteryx node-styling property).
+    # Always emitted when colouring is active — color_for returns the
+    # missing-colour grey for leaves whose rank doesn't resolve. Uses
+    # applies_to="node" (the styling target) rather than "clade".
+    if color_scheme is not None:
+        prop = ET.SubElement(
+            clade,
+            "property",
+            {
+                "ref": "style:font_color",
+                "datatype": "xsd:token",
+                "applies_to": "node",
+            },
+        )
+        prop.text = color_scheme.color_for(seq)
+
 
 def _serialise_internal(
     parent: ET.Element,
@@ -387,6 +405,7 @@ def _serialise_internal(
     conf_type: str,
     seq_by_id: dict[str, Sequence],
     label_by_id: dict[str, str],
+    color_scheme: Optional[ColorScheme] = None,
 ) -> None:
     """Emit one internal ``<clade>`` and recurse into children."""
     clade = ET.SubElement(parent, "clade")
@@ -432,6 +451,7 @@ def _serialise_internal(
                 seq,
                 label=label_by_id.get(original, original),
                 conf_type=conf_type,
+                color_scheme=color_scheme,
             )
         else:
             _serialise_internal(
@@ -440,6 +460,7 @@ def _serialise_internal(
                 conf_type=conf_type,
                 seq_by_id=seq_by_id,
                 label_by_id=label_by_id,
+                color_scheme=color_scheme,
             )
 
 
@@ -586,6 +607,7 @@ def write_phyloxml(
     extra_tree_args: Optional[list[str]] = None,
     tree=None,
     rooting_method: Optional[str] = None,
+    color_scheme: Optional[ColorScheme] = None,
 ) -> None:
     """Render a tree to a richly-annotated phyloXML file at
     ``phyloxml_path``.
@@ -638,6 +660,13 @@ def write_phyloxml(
         tree_tool, phyloxml_cfg.get("confidence_type"),
     )
 
+    # When the caller didn't precompute a shared palette (direct callers,
+    # tests), build one from this tree's own leaves. The orchestrators
+    # pass a scheme built over the *full* representative set so colours
+    # stay consistent across 2E and every 2F tree.
+    if color_scheme is None:
+        color_scheme = build_color_scheme(representatives, cfg or {})
+
     root_attrs = {
         "xmlns": PHYLOXML_NS,
         "xmlns:xsi": XSI_NS,
@@ -684,6 +713,7 @@ def write_phyloxml(
         conf_type=conf_type,
         seq_by_id=seq_by_id,
         label_by_id=label_by_id,
+        color_scheme=color_scheme,
     )
 
     # Pretty-print: stdlib doesn't ship a pretty printer that handles

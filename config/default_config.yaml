@@ -464,6 +464,33 @@ phylo:
     # arguments). Override only if you've changed the tree arguments —
     # e.g. classical bootstrap → "bootstrap", IQ-TREE -alrt only → "sh_alrt".
     confidence_type: auto
+  # Taxonomy-driven leaf colouring of the phyloXML tree. Each external
+  # node gets a <property ref="style:font_color" datatype="xsd:token"
+  # applies_to="node">#RRGGBB</property> so viewers (Archaeopteryx) tint
+  # the leaf label by taxonomy. The palette is shared across the
+  # whole-genome tree (2E) and every per-protein tree (2F), so the same
+  # taxon is the same colour everywhere — which is what lets you spot
+  # incongruence across the per-protein trees by eye.
+  coloring:
+    # Master switch. Default ON.
+    enabled: true
+    # One or two ranks. ONE rank (e.g. [genus]) → each value gets a
+    # distinct hue, spaced around the wheel by the golden angle. TWO
+    # ranks [parent, child] (e.g. [genus, subgenus]) → the child's values
+    # fan out across a narrow band of hues around the parent's base
+    # colour, so each subgenus reads as a shade of its genus. List the
+    # coarser rank FIRST. Valid: species, subgenus, genus, subfamily,
+    # family, suborder, order, subclass, class, phylum, kingdom,
+    # superkingdom.
+    ranks: [genus]
+    # HSV saturation / value of the generated palette, in [0, 1].
+    saturation: 0.65
+    value: 0.90
+    # Leaves whose rank is empty / unknown / na / n/a / none / ? / -
+    # (case-insensitive) get this colour. Must be #RRGGBB. In two-rank
+    # mode a known parent with a missing child keeps the parent's base
+    # colour; only a missing parent goes grey.
+    missing_color: "#808080"
   # Per-protein trees (2F) — enabled per-run with --per-protein-phylo.
   # Builds one tree per declared HMM domain-architecture token (the same
   # `hmms:` you configure for QC under segment_markers / cluster_protein),

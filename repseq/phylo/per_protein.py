@@ -43,6 +43,7 @@ from typing import Any, Optional
 from ..config import get_virus_config
 from ..hmm.runner import cds_satisfies_token, parse_hmm_token
 from ..models import Sequence
+from .coloring import build_color_scheme
 from .pipeline import PhyloError, _build_tree
 
 logger = logging.getLogger(__name__)
@@ -226,6 +227,12 @@ def run_per_protein_phylogeny(
     built = 0
     sparse: list[str] = []
 
+    # Build the leaf-colour palette once over the FULL representative set
+    # (not each family's subset) so a taxon keeps the same colour across
+    # every per-protein tree and the whole-genome tree (2E) — what makes
+    # cross-tree incongruence legible at a glance.
+    color_scheme = build_color_scheme(representatives, cfg)
+
     for family_label, token, segment in specs:
         try:
             parsed = parse_hmm_token(token)
@@ -263,6 +270,7 @@ def run_per_protein_phylogeny(
                 out_dir=sub_dir,
                 file_prefix=family_label,
                 xml_name_prefix=f"{prefix}_{family_label}",
+                color_scheme=color_scheme,
             )
         except PhyloError as exc:
             logger.warning("[per-protein] family %s failed: %s", family_label, exc)

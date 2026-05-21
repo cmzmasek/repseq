@@ -56,6 +56,7 @@ from .lca import (
     keep_deepest_labels,
     suppress_same_species_pairs,
 )
+from .coloring import ColorScheme, build_color_scheme
 from .mafft import MafftError, run_mafft
 from .phyloxml_writer import write_phyloxml
 from .rooting import root_tree
@@ -240,6 +241,7 @@ def run_phylogeny(
         out_dir=out_dir,
         file_prefix=prefix,
         xml_name_prefix=prefix,
+        color_scheme=build_color_scheme(representatives, cfg),
     )
 
 
@@ -252,6 +254,7 @@ def _build_tree(
     out_dir: Path,
     file_prefix: str,
     xml_name_prefix: str,
+    color_scheme: Optional[ColorScheme] = None,
 ) -> list[Path]:
     """Build one MSA + tree + phyloXML from a list of leaves.
 
@@ -264,6 +267,9 @@ def _build_tree(
     Output files are ``{file_prefix}_{msa.fasta,tree.nwk,tree.xml,
     tree_id_map.tsv,iqtree_summary.txt}`` under ``out_dir``;
     ``xml_name_prefix`` becomes the phyloXML ``<phylogeny>`` name.
+    ``color_scheme`` (when given) is a shared taxonomy-colour palette
+    forwarded to the writer; passing the *same* scheme into every tree of
+    a run keeps a given taxon the same colour across 2E and all 2F trees.
     Raises :class:`PhyloError` on any binary/parse failure.
     """
     tree_tool = _pick_tree_tool(cfg, is_protein)
@@ -395,6 +401,7 @@ def _build_tree(
             extra_tree_args=extra_tree,
             tree=parsed_tree,
             rooting_method=rooting_method_used,
+            color_scheme=color_scheme,
         )
     except Exception as exc:
         raise PhyloError(f"Newick → phyloXML conversion failed: {exc}") from exc

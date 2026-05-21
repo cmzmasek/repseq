@@ -179,6 +179,23 @@ def test_render_summary_phylo_section_appears_when_phylo_ran(make_seq, tmp_path)
     assert "FastTree" in md
     # IQ-TREE row should still appear in the software table (chosen-or-not).
     assert "IQ-TREE" in md
+    # Colouring is on by default (genus mode).
+    assert "coloured by **genus**" in md
+
+
+def test_render_summary_coloring_two_rank_and_disabled(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {
+        "tool": "fasttree",
+        "coloring": {"enabled": True, "ranks": ["genus", "subgenus"]},
+    }
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "coloured by **genus**" in md
+    assert "**subgenus** shaded within its parent genus" in md
+
+    cfg["phylo"]["coloring"] = {"enabled": False}
+    md_off = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "Tree leaves were coloured" not in md_off
 
 
 def test_render_summary_per_protein_section_appears(make_seq, tmp_path):

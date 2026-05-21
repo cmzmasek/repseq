@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -327,6 +328,30 @@ DEFAULTS: dict[str, Any] = {
             # IQ-TREE ``-b`` for classical bootstrap, in which case use
             # ``bootstrap``; ``-alrt`` only, use ``sh_alrt``).
             "confidence_type": "auto",
+        },
+        # Taxonomy-driven leaf colouring of the phyloXML output. Each
+        # external node gets a <property ref="style:font_color"
+        # datatype="xsd:token" applies_to="node">#RRGGBB</property> so a
+        # viewer (Archaeopteryx) tints the leaf label by taxonomy. The
+        # palette is shared across the whole-genome tree (2E) and every
+        # per-protein tree (2F), so a taxon is the same colour everywhere.
+        "coloring": {
+            # Master switch. Default ON, colouring by genus.
+            "enabled": True,
+            # One or two taxonomy ranks (from the 9-rank ladder or
+            # phylum/kingdom/superkingdom). ONE rank → each value gets a
+            # distinct hue. TWO ranks [parent, child] → the child fans
+            # out across hues of its parent's base colour (e.g.
+            # [genus, subgenus]: subgenera as shades-of-genus). List the
+            # coarser rank first.
+            "ranks": ["genus"],
+            # HSV saturation / value for the generated palette, in [0,1].
+            # Defaults give legible mid-tone colours on a white canvas.
+            "saturation": 0.65,
+            "value": 0.90,
+            # Colour for leaves whose rank is empty / unknown / na / ? /
+            # etc. — a medium grey by default. Must be #RRGGBB.
+            "missing_color": "#808080",
         },
         # Per-protein trees (2F), triggered with --per-protein-phylo.
         # One tree per declared HMM domain-architecture token (the same
@@ -918,6 +943,40 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         errors.append(
             f"phylo.phyloxml.confidence_type '{ct}' is not supported "
             "(use 'auto', 'sh_like', 'sh_alrt', 'ufboot', or 'bootstrap')"
+        )
+
+    coloring_cfg = phylo_cfg.get("coloring", {}) or {}
+    if "enabled" in coloring_cfg and not isinstance(coloring_cfg["enabled"], bool):
+        errors.append("phylo.coloring.enabled must be a boolean")
+    # Ranks usable for colouring — the 9-rank ladder plus the coarse
+    # ranks TaxonomyInfo.get_rank answers from its named attributes.
+    valid_color_ranks = {
+        "species", "subgenus", "genus", "subfamily", "family",
+        "suborder", "order", "subclass", "class", "phylum",
+        "kingdom", "superkingdom",
+    }
+    cranks = coloring_cfg.get("ranks", ["genus"])
+    if not isinstance(cranks, list) or not (1 <= len(cranks) <= 2):
+        errors.append(
+            "phylo.coloring.ranks must be a list of one or two rank names "
+            "(one rank = distinct hue per value; two = [parent, child] with "
+            "the child shaded within its parent's hue)"
+        )
+    else:
+        for r in cranks:
+            if not isinstance(r, str) or r.lower() not in valid_color_ranks:
+                errors.append(
+                    f"phylo.coloring.ranks contains unsupported rank '{r}' "
+                    f"(use one of {sorted(valid_color_ranks)})"
+                )
+    for key in ("saturation", "value"):
+        v = coloring_cfg.get(key, 0.65 if key == "saturation" else 0.90)
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not (0 <= v <= 1):
+            errors.append(f"phylo.coloring.{key} must be a number between 0 and 1")
+    mc = coloring_cfg.get("missing_color", "#808080")
+    if not (isinstance(mc, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", mc)):
+        errors.append(
+            "phylo.coloring.missing_color must be a '#RRGGBB' hex colour string"
         )
 
     rooting_cfg = phylo_cfg.get("rooting", {}) or {}
