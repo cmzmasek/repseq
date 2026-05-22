@@ -260,6 +260,9 @@ def test_render_summary_per_protein_section_appears(make_seq, tmp_path):
     )
     assert "## Phylogenetic inference" in md
     assert "separate tree was built for each HMM" in md
+    # OR-of-architectures prose (one tree per spec, any token satisfies).
+    assert "alternative domain architectures" in md
+    assert "one tree per `hmms:` spec" in md
     assert "{prefix}_per_protein/" in md
     assert "reassortment" in md
     # MAFFT/tree-builder software rows show even though only 2F ran.

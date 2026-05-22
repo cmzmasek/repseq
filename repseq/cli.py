@@ -425,14 +425,16 @@ def _run_hmm_qc(sequences, cfg, qc_report, ncbi):
     Semantic: each ``hmms:`` list element is a TOKEN string ("Name" or
     "A--B--C" multidomain in N-to-C order). A CDS satisfies a token when
     every named HMM has a passing hit AND those hits appear in N-to-C
-    order along the protein. A segment passes when, for each token in
-    its spec, at least one CDS in the segment satisfies that token.
+    order along the protein. Tokens in one spec are ALTERNATIVE
+    architectures (OR): a segment passes when at least one CDS satisfies
+    ANY one of the spec's tokens, and fails only when none of them is.
 
     Drops:
         - Segmented: an isolate is dropped when ANY of its segments
           fails its spec. Counter: ``removed_hmm_failed`` (one bump per
           dropped isolate); ``removed_hmm_by_marker`` breaks down by
-          "{segment}:{first_failing_token}".
+          "{segment}:{unmatched-token(s)}" (the alternatives joined with
+          "|" when the spec declared more than one).
         - Non-segmented: a sequence is dropped when its spec has no
           satisfying CDS. Same counter, key = spec name.
 
@@ -503,21 +505,36 @@ def _resolve_segment_hmms(
 
 
 def _segment_fails_hmm_gate(seq, tokens: list[str]) -> Optional[str]:
-    """Return the first token unsatisfied by any CDS in this segment, or None."""
+    """Gate a segment against its ``hmms:`` token list. Return ``None`` when
+    the segment passes, or a token string naming what was expected when it
+    fails.
+
+    The tokens in one ``hmms:`` list are **alternative architectures (OR)**:
+    the segment passes as soon as *any* token is satisfied by some CDS, and
+    fails only when *none* of them is. On failure the returned string names
+    the unsatisfied alternative(s) — a single token, or the alternatives
+    joined with ``|`` when more than one was declared — for the
+    ``_qc_removed.tsv`` reason and the per-marker counter key.
+    """
     from .hmm.runner import cds_satisfies_token, parse_hmm_token
 
     proteins = seq.proteins or []
+    declared: list[str] = []
     for token in tokens:
         try:
             parsed = parse_hmm_token(token)
         except ValueError:
-            return token
-        if not any(
+            continue  # a malformed token can't be satisfied; skip as a candidate
+        declared.append(token)
+        if any(
             cds_satisfies_token(p.get("hmm_hits") or [], parsed) is not None
             for p in proteins
         ):
-            return token
-    return None
+            return None  # at least one alternative architecture present → pass
+    if not declared:
+        # Nothing parseable to satisfy → fail, naming whatever was declared.
+        return tokens[0] if tokens else "?"
+    return "|".join(declared) if len(declared) > 1 else declared[0]
 
 
 def _run_hmm_qc_segmented(sequences, cfg, qc_report):
@@ -615,10 +632,13 @@ def _run_hmm_qc_non_segmented(sequences, cfg, qc_report):
     """Per-sequence HMM QC for non-segmented runs.
 
     Each dict-form spec in ``clustering.cluster_protein`` that defines
-    ``hmms:`` becomes a required marker. The sequence passes when every
-    such spec has at least one CDS in the sequence satisfying any of its
-    tokens. Alias-only specs are ignored for QC (no HMM gate to enforce).
-    Specs with no ``hmms`` at all don't trigger this step.
+    ``hmms:`` becomes a required marker. Within one spec the tokens are
+    alternative architectures (OR): the sequence passes that spec when at
+    least one CDS satisfies *any* of its tokens. Across specs the rule is
+    AND — every HMM-defining spec is an independent required marker, so the
+    sequence must satisfy them all. Alias-only specs are ignored for QC (no
+    HMM gate to enforce). Specs with no ``hmms`` at all don't trigger this
+    step.
     """
     cluster_protein = cfg.get("clustering", {}).get("cluster_protein", []) or []
     hmm_specs: list[tuple[str, list[str]]] = []

@@ -13,13 +13,19 @@ hmms?}`` where ``hmms`` is a list of **token** strings:
     - ``"A--B--C"``      — multidomain token, HMMs listed in N-to-C
                            order (A most N-terminal, C most C-terminal)
 
-The semantic for v0.14.0 (hard cutover from v0.13.0's list-AND):
+The semantic:
 
     - A CDS satisfies a single-HMM token when that HMM has a passing
       hit on it.
     - A CDS satisfies a multidomain token when every named HMM has a
       passing hit AND the hits appear in N-to-C order on the protein
       (strict non-overlap). Extra domains on the same CDS are fine.
+    - Within one spec the tokens in ``hmms:`` are **alternative
+      architectures (OR)**: a CDS satisfies the spec when it satisfies
+      *any one* of the tokens. This lets a single marker cover divergent
+      architectures of the same protein — e.g. coronavirus Spike as
+      ``["CoV_S1--CoV_S2", "bCoV_S1_N--bCoV_S1_RBD--CoV_S2"]`` so alpha-
+      and beta-CoV Spikes are both accepted.
     - Per-spec: ``aliases`` and ``hmms`` are both consulted when both
       are set, BUT once an HMM tier is active and any spec defines
       ``hmms``, the HMM tier is AUTHORITATIVE for that spec — if no

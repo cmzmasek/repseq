@@ -113,9 +113,13 @@ def test_segment_fails_multidomain_when_only_one_domain_present(make_seq):
     assert failed == "Bunya_G2--Bunya_G1"
 
 
-def test_segment_passes_when_tokens_satisfied_by_different_cdses(make_seq):
-    """Permissive notation: 'Bunya_G1' and 'Bunya_G2' as separate tokens
-    can be satisfied by different CDSes (post-cleavage annotation)."""
+def test_segment_passes_when_any_alternative_token_satisfied(make_seq):
+    """Tokens in one list are ALTERNATIVES (OR): satisfying either passes.
+
+    Here both alternatives happen to be present (on different CDSes), which
+    of course passes — the key OR cases (only one present, neither present)
+    are the two tests below.
+    """
     seq = make_seq("seg1", "ACGT", segment="M")
     _attach_proteins(seq, [
         _cds("Gn", "M" * 400, protein_id="gn", hmm_hits=[_hit("Bunya_G1", 1, 300)]),
@@ -124,14 +128,26 @@ def test_segment_passes_when_tokens_satisfied_by_different_cdses(make_seq):
     assert _segment_fails_hmm_gate(seq, ["Bunya_G1", "Bunya_G2"]) is None
 
 
-def test_segment_fails_on_first_unsatisfied_token(make_seq):
-    """When multiple tokens, return the FIRST one that fails."""
+def test_segment_passes_when_only_one_alternative_present(make_seq):
+    """OR: a segment carrying just one of the alternative architectures
+    passes — the whole point of listing alternatives (e.g. a Spike that is
+    CoV_S1--CoV_S2 OR bCoV_S1_N--bCoV_S1_RBD--CoV_S2)."""
     seq = make_seq("seg1", "ACGT", segment="M")
     _attach_proteins(seq, [
         _cds("Gn", "M" * 400, hmm_hits=[_hit("Bunya_G1", 1, 300)]),
     ])
+    assert _segment_fails_hmm_gate(seq, ["Bunya_G1", "Bunya_G2"]) is None
+
+
+def test_segment_fails_when_no_alternative_present(make_seq):
+    """OR: only when NONE of the alternatives match does the segment fail;
+    the reason names the alternatives joined with '|'."""
+    seq = make_seq("seg1", "ACGT", segment="M")
+    _attach_proteins(seq, [
+        _cds("other", "M" * 400, hmm_hits=[_hit("WrongHMM", 1, 300)]),
+    ])
     failed = _segment_fails_hmm_gate(seq, ["Bunya_G1", "Bunya_G2"])
-    assert failed == "Bunya_G2"
+    assert failed == "Bunya_G1|Bunya_G2"
 
 
 # ---------------------------------------------------------------------------

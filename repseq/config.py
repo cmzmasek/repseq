@@ -559,9 +559,11 @@ def _validate_hmm_tokens(hmms: Any, path: str) -> tuple[list[str], list[str]]:
 
     Each token is either a single HMM name (``"Name"``) or a multidomain
     spec joined with ``--`` (``"A--B--C"``, HMMs listed in N-to-C order).
-    Returns ``(errors, validated_tokens)``. Invalid tokens are dropped
-    from ``validated_tokens`` so the caller can still check the
-    "at least one of aliases / hmms" invariant.
+    Multiple tokens in one list are **alternative architectures (OR)** — a
+    CDS satisfying any one of them satisfies the marker. Returns
+    ``(errors, validated_tokens)``. Invalid tokens are dropped from
+    ``validated_tokens`` so the caller can still check the "at least one of
+    aliases / hmms" invariant.
     """
     from .hmm.runner import parse_hmm_token
 
@@ -593,7 +595,8 @@ def _validate_marker_entry(entry: Any, path: str) -> list[str]:
     or a dict with required ``name`` and at least one of ``aliases``
     (list of non-empty strings) or ``hmms`` (list of HMM token strings,
     where a token is either a single HMM name like ``"Name"`` or a
-    multidomain spec like ``"A--B"`` in N-to-C order).
+    multidomain spec like ``"A--B"`` in N-to-C order; multiple tokens are
+    alternative architectures, OR).
     """
     errs: list[str] = []
     if isinstance(entry, str):

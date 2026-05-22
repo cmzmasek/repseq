@@ -517,8 +517,9 @@ binary. The trimal version + mode are recorded in the phyloXML
 
 For protein runs that use IQ-TREE, the whole-genome tree is built as a
 **partitioned supermatrix** rather than by gluing every marker into one
-string. Each declared marker family (the `hmms:` domain-architecture
-tokens you already use for QC) is aligned **separately** with MAFFT, the
+string. Each declared marker family (one per `hmms:` spec you already use
+for QC — alternative architectures within a spec collapse to one family)
+is aligned **separately** with MAFFT, the
 per-family alignments are concatenated **column-wise** into a supermatrix,
 and IQ-TREE fits a substitution model **per partition** (ModelFinder).
 This is the statistically correct multi-marker analysis: MAFFT is never
@@ -629,12 +630,16 @@ before quoting a model in a methods section.
 
 `--phylo` builds **one** tree from the whole representatives (the marker
 concat in segmented mode). `--per-protein-phylo` instead builds **one
-tree per declared HMM domain-architecture** — the same `hmms:` tokens you
-set for QC under `segment_markers` / `cluster_protein`. For each token
-(e.g. `Bunya_nucleocap`, or the multidomain `Bunya_G1--Bunya_G2`), repseq
-picks the CDS that satisfies it on every representative carrying that
-architecture and runs the *same* MAFFT → IQ-TREE/FastTree → root → LCA
-pipeline on those protein translations. The alignments use MAFFT
+tree per declared HMM marker** — one tree per `hmms:` spec you set for QC
+under `segment_markers` / `cluster_protein`. A spec's `hmms:` list holds
+**alternative domain architectures** (OR; see [Token
+notation](#token-notation)), so a marker such as
+coronavirus Spike — `["CoV_S1--CoV_S2", "bCoV_S1_N--bCoV_S1_RBD--CoV_S2"]`
+— builds a single tree spanning every representative whose Spike matches
+*either* architecture (alpha- and beta-CoV together). repseq picks the CDS
+that satisfies any of the spec's tokens on each carrying representative and
+runs the *same* MAFFT → IQ-TREE/FastTree → root → LCA pipeline on those
+protein translations. The alignments use MAFFT
 `--auto` by default (fast). For a high-accuracy publication run, set
 `phylo.per_protein.mafft.extra_args: ["--maxiterate", "1000",
 "--localpair"]` (L-INS-i) — affordable on these small single-gene
@@ -647,15 +652,17 @@ with an M-segment glycoprotein tree is the classic signature of
 **reassortment**, which the concatenated `--phylo` tree hides.
 
 Outputs land in a `{prefix}_per_protein/` subdirectory, one set per built
-family (`<family>` = the sanitised token, prefixed with the segment in
-segmented mode, e.g. `M_Bunya_G1--Bunya_G2`):
+family. `<family>` is the spec's `name:` when given (e.g. `Spike`), else
+its single token (e.g. `Bunya_nucleocap`), else the first token + `_altN`
+for an unnamed multi-architecture spec — prefixed with the segment in
+segmented mode (`M_Spike`, `S_Bunya_nucleocap`):
 
 ```
 {prefix}_per_protein/
-  M_Bunya_G1--Bunya_G2_msa.fasta
-  M_Bunya_G1--Bunya_G2_tree.nwk
-  M_Bunya_G1--Bunya_G2_tree.xml
-  M_Bunya_G1--Bunya_G2_tree_id_map.tsv
+  Spike_msa.fasta
+  Spike_tree.nwk
+  Spike_tree.xml
+  Spike_tree_id_map.tsv
   S_Bunya_nucleocap_msa.fasta
   …
   {prefix}_incongruence.tsv
@@ -1009,7 +1016,7 @@ nucleotides, HMM-QC still fires and drops isolates whose segments
 don't carry the expected proteins (this is a change from v0.13.0,
 which only ran HMMs on alphabet=protein runs).
 
-### Token notation (v0.14.0)
+### Token notation
 
 Each element of `hmms:` is a **token** string. A token is either:
 
@@ -1023,17 +1030,30 @@ Each element of `hmms:` is a **token** string. A token is either:
 **N-terminal** domain on the protein — the same direction molecular
 biology writes a protein sequence, so a token mirrors the domain
 architecture as you'd draw it (e.g. the coronavirus Spike is
-`"Corona_S1--Corona_S2"`: S1 N-terminal, S2 C-terminal). The named
+`"CoV_S1--CoV_S2"`: S1 N-terminal, S2 C-terminal). The named
 domains are compared against the hmmscan `ali_from`/`ali_to` columns
 in that order.
 
 **Extra domains are fine.** A CDS annotated as `A--B--HMMX` still
 satisfies the token `"A--B"` because `A` remains N-terminal to `B`.
 
-**Hard cutover from v0.13.0.** In v0.13.0, `hmms: [A, B]` meant "both
-A and B must hit the same CDS." In v0.14.0 that same YAML now means
-"two separate single-HMM tokens" (loose). To get the v0.13.0 strict
-multidomain semantic, write `hmms: ["A--B"]`.
+**Alternative architectures (OR).** Multiple tokens in one marker's
+`hmms:` list are *alternatives* — a CDS that satisfies **any one** of
+them satisfies the marker. This lets one marker span divergent forms of
+the same protein. For example, to verify Spike across alpha- and
+beta-coronaviruses in one run:
+
+```yaml
+- {name: Spike, aliases: ["spike", "surface glycoprotein"],
+   hmms: ["CoV_S1--CoV_S2", "bCoV_S1_N--bCoV_S1_RBD--CoV_S2"]}
+```
+
+A sequence passes the Spike marker when its Spike CDS matches *either*
+the `CoV_S1--CoV_S2` architecture *or* the
+`bCoV_S1_N--bCoV_S1_RBD--CoV_S2` architecture. (Across *different*
+markers — separate dict entries — the rule is AND: each is an
+independent marker that must be present. The OR applies only within one
+marker's token list.)
 
 ### How the gate works
 
@@ -1048,16 +1068,18 @@ For a marker spec that includes `hmms: [<token>, <token>, ...]`:
    - **Coverage:** the alignment span covers at least
      `hmm.relative_length_cutoff` (default `0.5`) of the HMM model
      length.
-3. A **segment / sequence passes QC** when, for each token in the
-   spec, at least one CDS in the segment satisfies that token. (Tokens
-   in the same `hmms:` list are AND — every token must be satisfied.
-   Tokens are independent of each other: the same CDS can satisfy
-   multiple tokens, or different CDSes can each satisfy one.)
-4. If any token has no satisfying CDS, the segment fails. In segmented
-   mode the entire isolate is then dropped (one bad segment fails the
-   whole isolate, counted under `removed_hmm_failed` with a per-marker
-   breakdown in `removed_hmm_by_marker`). In non-segmented mode the
-   single sequence is dropped.
+3. A **segment / sequence passes a marker** when at least one CDS
+   satisfies **any one** of that marker's tokens. (Tokens in the same
+   `hmms:` list are OR — alternative architectures; satisfying one is
+   enough. Across *separate* marker specs the rule is AND — each is an
+   independent marker that must be present.)
+4. If a marker has no satisfying CDS (none of its alternative tokens
+   matched), the segment fails. In segmented mode the entire isolate is
+   then dropped (one bad segment fails the whole isolate, counted under
+   `removed_hmm_failed` with a per-marker breakdown in
+   `removed_hmm_by_marker`; the reason names the unmatched alternatives
+   joined with `|`). In non-segmented mode the single sequence is
+   dropped.
 5. For protein-alphabet clustering, the marker CDS of each surviving
    segment / sequence is then the **longest** CDS that satisfies any
    token in the spec.

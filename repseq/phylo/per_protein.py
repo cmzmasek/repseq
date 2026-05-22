@@ -1,20 +1,23 @@
-"""2F — one phylogenetic tree per declared HMM domain-architecture token.
+"""2F — one phylogenetic tree per declared HMM marker family.
 
 Where :func:`repseq.phylo.pipeline.run_phylogeny` (2E) builds a *single*
 tree from each representative's whole sequence (or marker-protein concat),
-this module builds *one tree per protein family*, where a "family" is an
-HMM domain-architecture **token** the user already declared for QC
-(``virus.segment_markers[seg].hmms`` / ``virus.cluster_protein[seg].hmms``
-for segmented runs, ``clustering.cluster_protein[*].hmms`` otherwise).
+this module builds *one tree per protein family*, where a "family" is a
+marker **spec** the user already declared for QC
+(``virus.segment_markers[seg]`` / ``virus.cluster_protein[seg]`` for
+segmented runs, an entry of ``clustering.cluster_protein`` otherwise).
 
-For each token we walk the selected representatives, find the CDS that
-satisfies the token (via :func:`repseq.hmm.runner.cds_satisfies_token` —
-so ``Bunya_G1--Bunya_G2`` is one family and intervening/extra domains are
-tolerated exactly as the QC gate tolerates them), and build an MSA + tree
-+ phyloXML on those protein translations. The heavy lifting (MAFFT →
-IQ-TREE/FastTree → root → LCA → phyloXML) is the same
-:func:`repseq.phylo.pipeline._build_tree` engine 2E uses, so rooting, LCA
-labelling, ``phylo.tool``, and per-leaf annotation all carry over.
+A spec's ``hmms:`` list holds **alternative domain architectures (OR)** —
+e.g. coronavirus Spike as ``["CoV_S1--CoV_S2",
+"bCoV_S1_N--bCoV_S1_RBD--CoV_S2"]`` so alpha- and beta-CoV Spikes land in
+*one* tree. For each representative we take the CDS that satisfies *any*
+of the spec's tokens (via :func:`repseq.hmm.runner.cds_satisfies_token` —
+intervening/extra domains tolerated exactly as the QC gate tolerates
+them), and build an MSA + tree + phyloXML on those protein translations.
+The heavy lifting (MAFFT → IQ-TREE/FastTree → root → LCA → phyloXML) is
+the same :func:`repseq.phylo.pipeline._build_tree` engine 2E uses, so
+rooting, LCA labelling, ``phylo.tool``, and per-leaf annotation all carry
+over.
 
 Requirements (soft-fail, mirroring ``--plot`` / ``--phylo``):
   * The HMM tier must have run this session (``hmm.enabled`` + configured
@@ -28,9 +31,10 @@ Outputs land in a ``{prefix}_per_protein/`` subdirectory, one set per
 built family: ``<family>_msa.fasta``, ``<family>_tree.nwk``,
 ``<family>_tree.xml``, ``<family>_tree_id_map.tsv`` (+
 ``<family>_iqtree_summary.txt`` for IQ-TREE). The family name is the
-sanitised token, prefixed with the segment in segmented mode
-(``S_Bunya_nucleocap``) so two segments declaring the same token never
-collide.
+spec's ``name:`` when given (``Spike``), else the single token, else the
+first token + ``_altN`` for an unnamed multi-architecture spec; in
+segmented mode it is prefixed with the segment (``S_Bunya_nucleocap``,
+``M_Spike``) so two segments declaring the same marker never collide.
 """
 
 from __future__ import annotations
@@ -59,41 +63,83 @@ def _sanitize(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", (name or "").strip()).strip("_") or "family"
 
 
-def _resolve_segment_tokens(
+def _dedup(items: list[str]) -> list[str]:
+    """Order-preserving de-duplication of a token list."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for it in items:
+        if it not in seen:
+            seen.add(it)
+            out.append(it)
+    return out
+
+
+def _resolve_segment_marker(
     seg_name: str,
     segment_markers: dict,
     cluster_protein_per_seg: dict,
-) -> list[str]:
-    """Tokens gating a segment — mirrors ``cli._resolve_segment_hmms``.
+) -> tuple[Optional[str], list[str]]:
+    """``(spec_name, tokens)`` gating a segment — mirrors ``cli._resolve_segment_hmms``.
 
     Replicated here (rather than imported) because ``cli`` imports the
     phylo package, so importing back would be circular. Lookup order:
     ``segment_markers[seg]`` first (v0.13+ HMM-aware form), then any
-    dict-form ``cluster_protein[seg]`` entry's ``hmms``.
+    dict-form ``cluster_protein[seg]`` entry's ``hmms``. The spec name —
+    when present on the marker dict — is used for the family label;
+    ``segment_markers`` entries usually have none (the segment is the
+    identity), so the segment prefix carries the meaning.
     """
     if seg_name in segment_markers:
         spec = segment_markers[seg_name] or {}
-        return list(spec.get("hmms") or [])
+        return spec.get("name"), list(spec.get("hmms") or [])
     if seg_name in cluster_protein_per_seg:
         tokens: list[str] = []
+        name: Optional[str] = None
         for entry in cluster_protein_per_seg[seg_name] or []:
             if isinstance(entry, dict):
+                name = name or entry.get("name")
                 tokens.extend(entry.get("hmms") or [])
-        return tokens
-    return []
+        return name, tokens
+    return None, []
 
 
-def collect_family_specs(cfg: dict[str, Any]) -> list[tuple[str, str, Optional[str]]]:
-    """Return ``[(family_label, token, segment_or_None), …]`` for the run.
+def _family_label(
+    name: Optional[str], tokens: list[str], segment: Optional[str]
+) -> str:
+    """Filesystem-safe family label, name-first.
 
-    ``segment`` scopes the CDS search: in segmented mode a token declared
-    on segment ``S`` only ever pulls CDS from the ``S`` segment of each
-    isolate; ``None`` (non-segmented) searches the representative's own
-    proteins. Duplicate ``(segment, token)`` pairs are dropped, first
-    occurrence wins, declaration order is preserved.
+    Priority: the spec ``name:`` when given (``Spike``), else the single
+    token verbatim (``CoV_S1--CoV_S2``), else — for an unnamed spec with
+    several alternative architectures — the first token plus an ``_altN``
+    suffix (``CoV_S1--CoV_S2_alt2``), so we never glue whole architectures
+    into one unwieldy filename. Segmented families are prefixed with the
+    segment so two segments declaring the same marker never collide.
     """
-    specs: list[tuple[str, str, Optional[str]]] = []
-    seen: set[tuple[Optional[str], str]] = set()
+    if name and name.strip():
+        base = _sanitize(name)
+    elif len(tokens) == 1:
+        base = _sanitize(tokens[0])
+    else:
+        base = f"{_sanitize(tokens[0])}_alt{len(tokens)}"
+    if segment is not None:
+        return f"{_sanitize(segment)}_{base}"
+    return base
+
+
+def collect_family_specs(
+    cfg: dict[str, Any],
+) -> list[tuple[str, list[str], Optional[str]]]:
+    """Return ``[(family_label, tokens, segment_or_None), …]``, one per spec.
+
+    A "family" is a marker **spec**, not a single token: the tokens in one
+    spec's ``hmms:`` list are alternative architectures (OR) that all feed
+    one tree. ``segment`` scopes the CDS search: in segmented mode a spec
+    declared on segment ``S`` only ever pulls CDS from the ``S`` segment of
+    each isolate; ``None`` (non-segmented) searches the representative's own
+    proteins. Declaration order is preserved; tokens are de-duplicated
+    within a spec.
+    """
+    specs: list[tuple[str, list[str], Optional[str]]] = []
 
     segmented = bool((cfg.get("segmented", {}) or {}).get("enabled"))
     if segmented:
@@ -106,23 +152,21 @@ def collect_family_specs(cfg: dict[str, Any]) -> list[tuple[str, str, Optional[s
             if extra not in segments:
                 segments.append(extra)
         for seg in segments:
-            for tok in _resolve_segment_tokens(seg, segment_markers, cluster_protein):
-                key = (seg, tok)
-                if key in seen:
-                    continue
-                seen.add(key)
-                label = f"{_sanitize(seg)}_{_sanitize(tok)}"
-                specs.append((label, tok, seg))
+            name, tokens = _resolve_segment_marker(
+                seg, segment_markers, cluster_protein
+            )
+            tokens = _dedup(tokens)
+            if not tokens:
+                continue
+            specs.append((_family_label(name, tokens, seg), tokens, seg))
     else:
         for entry in (cfg.get("clustering", {}) or {}).get("cluster_protein", []) or []:
             if not isinstance(entry, dict):
                 continue
-            for tok in entry.get("hmms") or []:
-                key = (None, tok)
-                if key in seen:
-                    continue
-                seen.add(key)
-                specs.append((_sanitize(tok), tok, None))
+            tokens = _dedup(list(entry.get("hmms") or []))
+            if not tokens:
+                continue
+            specs.append((_family_label(entry.get("name"), tokens, None), tokens, None))
     return specs
 
 
@@ -144,28 +188,46 @@ def _segment_proteins(rep: Sequence, segment: Optional[str]) -> list[dict]:
     return []
 
 
-def _best_satisfying_cds(proteins: list[dict], token_hmms: list[str]) -> Optional[dict]:
-    """The CDS in ``proteins`` that best satisfies the token, or None.
+def _best_satisfying_cds_any(
+    proteins: list[dict], parsed_tokens: list[list[str]]
+) -> Optional[dict]:
+    """The CDS that best satisfies **any** of the alternative tokens (OR).
 
-    "Best" = longest translation (mirrors ``select_marker_protein``'s
-    default), tie-broken by the lowest worst-domain E-value the token
-    matching reports. Proteins without a translation can't seed a tree
-    leaf and are skipped.
+    ``parsed_tokens`` is a list of already-parsed token HMM-lists (the
+    spec's alternative architectures). A CDS qualifies when it satisfies at
+    least one of them; its score is the best (lowest) worst-domain E-value
+    across the tokens it satisfies. "Best" CDS = longest translation
+    (mirrors ``select_marker_protein``'s default), tie-broken by that
+    score. Proteins without a translation can't seed a tree leaf and are
+    skipped.
     """
     candidates: list[tuple[dict, float]] = []
     for prot in proteins:
         seq = prot.get("sequence")
         if not seq:
             continue
-        worst_e = cds_satisfies_token(prot.get("hmm_hits") or [], token_hmms)
-        if worst_e is not None:
-            candidates.append((prot, worst_e))
+        hits = prot.get("hmm_hits") or []
+        best_e: Optional[float] = None
+        for token_hmms in parsed_tokens:
+            worst_e = cds_satisfies_token(hits, token_hmms)
+            if worst_e is not None:
+                best_e = worst_e if best_e is None else min(best_e, worst_e)
+        if best_e is not None:
+            candidates.append((prot, best_e))
     if not candidates:
         return None
     candidates.sort(
         key=lambda pe: (-(pe[0].get("length") or len(pe[0]["sequence"])), pe[1])
     )
     return candidates[0][0]
+
+
+def _best_satisfying_cds(proteins: list[dict], token_hmms: list[str]) -> Optional[dict]:
+    """Single-token convenience wrapper over :func:`_best_satisfying_cds_any`.
+
+    Kept for direct callers / unit tests that pass one parsed token.
+    """
+    return _best_satisfying_cds_any(proteins, [token_hmms])
 
 
 def _min_taxa(cfg: dict[str, Any]) -> int:
@@ -261,11 +323,16 @@ def run_per_protein_phylogeny(
     pp_cfg = ((cfg or {}).get("phylo", {}) or {}).get("per_protein", {}) or {}
     emit_domains = bool(pp_cfg.get("domain_architecture", True))
 
-    for family_label, token, segment in specs:
-        try:
-            parsed = parse_hmm_token(token)
-        except ValueError as exc:
-            logger.warning("[per-protein] skipping malformed token %r: %s", token, exc)
+    for family_label, tokens, segment in specs:
+        parsed_tokens: list[list[str]] = []
+        for token in tokens:
+            try:
+                parsed_tokens.append(parse_hmm_token(token))
+            except ValueError as exc:
+                logger.warning(
+                    "[per-protein] skipping malformed token %r: %s", token, exc
+                )
+        if not parsed_tokens:
             continue
 
         leaf_reps: list[Sequence] = []
@@ -274,7 +341,9 @@ def run_per_protein_phylogeny(
         # only the CDS that actually fed this family's tree.
         leaf_protein_ids: dict[str, set[str]] = {}
         for rep in representatives:
-            cds = _best_satisfying_cds(_segment_proteins(rep, segment), parsed)
+            cds = _best_satisfying_cds_any(
+                _segment_proteins(rep, segment), parsed_tokens
+            )
             if cds is None:
                 continue
             leaf_reps.append(rep)

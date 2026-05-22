@@ -132,13 +132,14 @@ segmented:
   #         hmms: [<token>, <token>]           #   strings: "Name" for single-HMM, or
   #                                            #   "A--B--C" for multidomain (HMMs in
   #                                            #   N-to-C order — A is N-terminal, C
-  #                                            #   C-terminal). Each token must be
-  #                                            #   satisfied by at least one CDS in
-  #                                            #   the segment for QC to pass; the
-  #                                            #   marker (longest satisfying CDS) is
-  #                                            #   then chosen if alphabet=protein.
-  #                                            #   See the top-level `hmm:` block for
-  #                                            #   gate behaviour and cutoffs.
+  #                                            #   C-terminal). Multiple tokens are
+  #                                            #   ALTERNATIVE architectures (OR): the
+  #                                            #   segment passes QC when SOME CDS
+  #                                            #   satisfies ANY one token; the marker
+  #                                            #   (longest satisfying CDS) is then
+  #                                            #   chosen if alphabet=protein. See the
+  #                                            #   top-level `hmm:` block for gate
+  #                                            #   behaviour and cutoffs.
   # See config/examples/influenza_a.yaml for a worked example with
   # strain-aware list-valued counts.
   viruses: {}
@@ -202,9 +203,10 @@ clustering:
   #         ["polymerase", "RNA-dependent RNA polymerase"]
   #   • a dict with HMM support (recommended when HMMs are available):
   #         - {name: "RdRp",  aliases: ["polymerase"],  hmms: ["RdRp_4"]}
-  #         - {name: "Spike", aliases: ["spike"],       hmms: ["Corona_S1--Corona_S2"]}
+  #         - {name: "Spike", aliases: ["spike"],
+  #            hmms: ["CoV_S1--CoV_S2", "bCoV_S1_N--bCoV_S1_RBD--CoV_S2"]}
   #
-  # The `hmms:` field is a list of TOKEN strings (v0.14.0+ semantic):
+  # The `hmms:` field is a list of TOKEN strings:
   #   • "Name"       — single-HMM token, satisfied by any CDS whose hit
   #                    to that HMM passes the configured cutoffs.
   #   • "A--B--C"    — multidomain token, satisfied only when a single
@@ -216,23 +218,28 @@ clustering:
   # N-to-C convention: the order in "A--B--C" reads N-to-C left-to-right,
   # the same direction molecular biology writes a protein sequence — so a
   # token mirrors the domain architecture as you'd draw it (e.g. the
-  # coronavirus Spike is "Corona_S1--Corona_S2": S1 N-terminal, S2
-  # C-terminal). The named domains are matched against the hmmscan
-  # `ali_from`/`ali_to` columns in that order.
+  # coronavirus Spike is "CoV_S1--CoV_S2": S1 N-terminal, S2 C-terminal).
+  # The named domains are matched against the hmmscan `ali_from`/`ali_to`
+  # columns in that order.
+  #
+  # ALTERNATIVE ARCHITECTURES (OR): multiple tokens in ONE marker's `hmms:`
+  # list are alternatives — a CDS that satisfies ANY one of them satisfies
+  # the marker. This lets a single marker span divergent forms of the same
+  # protein, e.g. the Spike example above accepts the alpha-CoV
+  # "CoV_S1--CoV_S2" architecture OR the beta-CoV
+  # "bCoV_S1_N--bCoV_S1_RBD--CoV_S2" architecture, so alpha and beta
+  # coronaviruses can be analysed together under one Spike marker.
   #
   # When `hmms` is set AND `hmm.enabled=true` AND `hmmscan` is on PATH,
   # the HMM gate is AUTHORITATIVE for that marker: an upstream HMM-QC
-  # step (new in v0.14.0) drops sequences/segments where any required
-  # token has no satisfying CDS, regardless of clustering alphabet.
-  # In a non-segmented run with multiple HMM-defining specs in this
-  # list, the sequence must satisfy EVERY such spec (each spec is an
-  # independent marker the user wants verified). Specs that only define
-  # `aliases:` (no `hmms:`) are advisory selection hints; they do not
-  # gate QC.
-  #
-  # HARD CUTOVER from v0.13.0: ``hmms: [A, B]`` no longer means "A AND B
-  # on the same CDS" — that's now two separate single-HMM tokens (loose).
-  # To get the v0.13.0 strict-AND semantic, write ``hmms: ["A--B"]``.
+  # step drops sequences/segments where the marker has NO satisfying CDS
+  # (none of its alternative tokens matched), regardless of clustering
+  # alphabet. In a non-segmented run with multiple HMM-defining specs in
+  # this list, the sequence must satisfy EVERY such spec — across specs the
+  # rule is AND (each spec is an independent marker to verify), while within
+  # one spec's token list it is OR (alternative architectures). Specs that
+  # only define `aliases:` (no `hmms:`) are advisory selection hints; they
+  # do not gate QC.
   cluster_protein: []
 
   # Diagnostic "diversity curve" reporting. For each stratum where the
@@ -312,9 +319,10 @@ representative:
 #   1. Auto-fetches CDS proteins from GenBank if not already cached.
 #   2. Runs `hmmscan` against the configured HMM database in one batch.
 #   3. For each segment/sequence, checks every configured marker spec
-#      that defines `hmms:`. If any token in a spec has no satisfying
-#      CDS, the segment/sequence fails QC; for segmented runs the whole
-#      isolate is then dropped.
+#      that defines `hmms:`. A spec's tokens are alternatives (OR): the
+#      spec passes when SOME CDS satisfies ANY one of its tokens, and the
+#      segment/sequence fails QC only when a spec has no satisfying CDS at
+#      all; for segmented runs the whole isolate is then dropped.
 #   4. Stashes hit data for downstream consumers (marker selection
 #      when alphabet=protein, the `hmmscan` TSV column, the FASTA tag).
 #
@@ -539,12 +547,17 @@ phylo:
     # colour; only a missing parent goes grey.
     missing_color: "#808080"
   # Per-protein trees (2F) — enabled per-run with --per-protein-phylo.
-  # Builds one tree per declared HMM domain-architecture token (the same
-  # `hmms:` you configure for QC under segment_markers / cluster_protein),
-  # written into the {prefix}_per_protein/ subdirectory. Requires the HMM
-  # tier to have run (hmm.enabled + configured hmms:).
+  # Builds one tree per declared HMM marker (one tree per `hmms:` spec you
+  # configure for QC under segment_markers / cluster_protein), written into
+  # the {prefix}_per_protein/ subdirectory. A spec's `hmms:` tokens are
+  # alternative architectures (OR): a representative whose CDS satisfies ANY
+  # one of them becomes a leaf, so divergent forms of the same protein
+  # (e.g. alpha- and beta-CoV Spike) share one tree. Each tree is named
+  # after the spec's `name:` (e.g. "Spike"), or its token when unnamed,
+  # segment-prefixed in segmented mode. Requires the HMM tier to have run
+  # (hmm.enabled + configured hmms:).
   per_protein:
-    # A family (token) is only built into a tree when at least this many
+    # A family (marker) is only built into a tree when at least this many
     # representatives carry the architecture. Clamped to a floor of 3
     # (neither IQ-TREE nor FastTree builds a tree on fewer).
     min_taxa: 3

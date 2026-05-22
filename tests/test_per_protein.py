@@ -16,6 +16,7 @@ from repseq.models import Sequence, SequenceType
 from repseq.phylo.pipeline import PhyloError
 from repseq.phylo.per_protein import (
     _best_satisfying_cds,
+    _best_satisfying_cds_any,
     _segment_proteins,
     collect_family_specs,
     run_per_protein_phylogeny,
@@ -96,20 +97,54 @@ def test_collect_family_specs_segmented_scopes_and_prefixes():
         "M": {"hmms": ["Bunya_G2--Bunya_G1"]},
     })
     specs = collect_family_specs(cfg)
+    # One family per segment-spec; tokens are a list (the alternatives).
     assert specs == [
-        ("M_Bunya_G2--Bunya_G1", "Bunya_G2--Bunya_G1", "M"),
-        ("S_Bunya_nucleocap", "Bunya_nucleocap", "S"),
+        ("M_Bunya_G2--Bunya_G1", ["Bunya_G2--Bunya_G1"], "M"),
+        ("S_Bunya_nucleocap", ["Bunya_nucleocap"], "S"),
     ]
 
 
-def test_collect_family_specs_non_segmented_from_cluster_protein():
+def test_collect_family_specs_segmented_name_first_label():
+    """A named segment marker labels the family by name (segment-prefixed),
+    not by token — and multiple tokens collapse into ONE family (OR)."""
+    cfg = _seg_cfg({
+        "M": {"name": "Spike", "hmms": ["CoV_S1--CoV_S2",
+                                        "bCoV_S1_N--bCoV_S1_RBD--CoV_S2"]},
+    })
+    specs = collect_family_specs(cfg)
+    assert specs == [
+        ("M_Spike", ["CoV_S1--CoV_S2", "bCoV_S1_N--bCoV_S1_RBD--CoV_S2"], "M"),
+    ]
+
+
+def test_collect_family_specs_non_segmented_name_first():
     cfg = {"segmented": {"enabled": False}, "clustering": {"cluster_protein": [
-        {"name": "RdRp", "hmms": ["RdRp_4"]},
+        # Named spec → label is the NAME (Spike), not a token; two
+        # alternative architectures feed ONE family (OR).
+        {"name": "Spike", "aliases": ["spike"],
+         "hmms": ["CoV_S1--CoV_S2", "bCoV_S1_N--bCoV_S1_RBD--CoV_S2"]},
+        # Unnamed single-token spec → label is the token.
         {"hmms": ["Nucleocap"]},
         ["polymerase"],  # alias-only legacy entry: no hmms → ignored
     ]}}
     specs = collect_family_specs(cfg)
-    assert specs == [("RdRp_4", "RdRp_4", None), ("Nucleocap", "Nucleocap", None)]
+    assert specs == [
+        ("Spike", ["CoV_S1--CoV_S2", "bCoV_S1_N--bCoV_S1_RBD--CoV_S2"], None),
+        ("Nucleocap", ["Nucleocap"], None),
+    ]
+
+
+def test_collect_family_specs_unnamed_multi_token_uses_alt_suffix():
+    """Unnamed spec with >1 architecture → first token + _altN, never a
+    glued-together filename."""
+    cfg = {"segmented": {"enabled": False}, "clustering": {"cluster_protein": [
+        {"hmms": ["CoV_S1--CoV_S2", "bCoV_S1_N--bCoV_S1_RBD--CoV_S2"]},
+    ]}}
+    specs = collect_family_specs(cfg)
+    assert specs == [
+        ("CoV_S1--CoV_S2_alt2",
+         ["CoV_S1--CoV_S2", "bCoV_S1_N--bCoV_S1_RBD--CoV_S2"], None),
+    ]
 
 
 def test_collect_family_specs_empty_when_no_tokens():
@@ -132,6 +167,29 @@ def test_best_satisfying_cds_picks_longest():
 def test_best_satisfying_cds_none_when_unsatisfied():
     p = _prot("p1", "x", "M" * 100, [_hit("Bunya_nucleocap", passing=False)])
     assert _best_satisfying_cds([p], ["Bunya_nucleocap"]) is None
+
+
+def test_best_satisfying_cds_any_matches_either_architecture():
+    """OR across alternative tokens: a CDS carrying just one architecture
+    qualifies, and the longest qualifier across both wins."""
+    arch_a = _prot("a", "spike", "M" * 200, [_hit("CoV_S1"), _hit("CoV_S2")])
+    arch_b = _prot("b", "spike", "M" * 400, [_hit("bCoV_S1_N"), _hit("CoV_S2")])
+    miss = _prot("c", "n", "M" * 999, [_hit("Other")])
+    # bCoV token needs S1_N N-terminal to S2; default _hit() spans 1..100 so
+    # give them distinct spans for the multidomain order check.
+    arch_b = _prot("b", "spike", "M" * 400, [
+        _hit("bCoV_S1_N", ali_from=1, ali_to=100),
+        _hit("CoV_S2", ali_from=200, ali_to=300),
+    ])
+    parsed = [["CoV_S1", "CoV_S2"], ["bCoV_S1_N", "CoV_S2"]]
+    chosen = _best_satisfying_cds_any([arch_a, miss, arch_b], parsed)
+    assert chosen["protein_id"] == "b"  # longest qualifier
+
+
+def test_best_satisfying_cds_any_none_when_no_alternative():
+    p = _prot("p1", "x", "M" * 100, [_hit("Other")])
+    parsed = [["CoV_S1", "CoV_S2"], ["bCoV_S1_N", "CoV_S2"]]
+    assert _best_satisfying_cds_any([p], parsed) is None
 
 
 def test_segment_proteins_scopes_to_named_segment():
@@ -189,6 +247,49 @@ def test_builds_one_tree_per_token(tmp_path):
             assert (sub / f"{fam}{ext}").exists()
     assert all(str(f).startswith(str(sub)) for f in files)
     assert any("M_Bunya_G2--Bunya_G1_tree.xml" in n for n in names)
+
+
+def test_or_alternatives_collapse_into_one_tree(tmp_path):
+    """A non-segmented Spike spec with two alternative architectures builds
+    ONE tree spanning reps that carry EITHER — the alpha+beta CoV use case."""
+    def _arch_a(acc):  # CoV_S1 (N) --> CoV_S2 (C)
+        prots = [_prot("s", "spike", "M" * 200, [
+            _hit("CoV_S1", ali_from=1, ali_to=100),
+            _hit("CoV_S2", ali_from=200, ali_to=300),
+        ])]
+        return Sequence(id=acc, header=acc, sequence="ACGT" * 60,
+                        seq_type=SequenceType.NUCLEOTIDE, accession=acc,
+                        proteins=prots)
+
+    def _arch_b(acc):  # bCoV_S1_N (N) --> bCoV_S1_RBD --> CoV_S2 (C)
+        prots = [_prot("s", "spike", "M" * 250, [
+            _hit("bCoV_S1_N", ali_from=1, ali_to=100),
+            _hit("bCoV_S1_RBD", ali_from=150, ali_to=250),
+            _hit("CoV_S2", ali_from=300, ali_to=400),
+        ])]
+        return Sequence(id=acc, header=acc, sequence="ACGT" * 75,
+                        seq_type=SequenceType.NUCLEOTIDE, accession=acc,
+                        proteins=prots)
+
+    cfg = {
+        "phylo": {"tool": "fasttree", "per_protein": {"min_taxa": 3}},
+        "segmented": {"enabled": False},
+        "clustering": {"cluster_protein": [
+            {"name": "Spike", "aliases": ["spike"],
+             "hmms": ["CoV_S1--CoV_S2", "bCoV_S1_N--bCoV_S1_RBD--CoV_S2"]},
+        ]},
+        "_hmm_runtime": {"active": True},
+    }
+    reps = [_arch_a("alpha1"), _arch_a("alpha2"), _arch_b("beta1"), _arch_b("beta2")]
+    files = _run(reps, cfg, tmp_path, prefix="cov")
+    sub = tmp_path / "cov_per_protein"
+    # Exactly one family, named after the spec (name-first), not the tokens.
+    assert (sub / "Spike_tree.xml").exists()
+    assert not any("CoV_S1--CoV_S2" in f.name for f in files)
+    # All four reps (both architectures) became leaves of the one tree.
+    id_map = (sub / "Spike_tree_id_map.tsv").read_text()
+    for acc in ("alpha1", "alpha2", "beta1", "beta2"):
+        assert acc in id_map
 
 
 def test_family_below_min_taxa_is_skipped(tmp_path):

@@ -55,7 +55,7 @@ from .mafft import MafftError, run_mafft
 from . import trimal as trimal_mod
 from .trimal import maybe_trim
 from .per_protein import (
-    _best_satisfying_cds,
+    _best_satisfying_cds_any,
     _hmm_tier_ran,
     _segment_proteins,
     collect_family_specs,
@@ -251,15 +251,20 @@ def build_partitioned_phylogeny(
     # families carried by >= 2 reps (a partition needs >= 2 sequences to be
     # alignable / informative).
     fam_bodies: list[tuple[str, dict[str, str]]] = []
-    for family_label, token, segment in specs:
-        try:
-            parsed = parse_hmm_token(token)
-        except ValueError as exc:
-            logger.warning("[phylo] partition: skipping token %r: %s", token, exc)
+    for family_label, tokens, segment in specs:
+        parsed_tokens: list[list[str]] = []
+        for token in tokens:
+            try:
+                parsed_tokens.append(parse_hmm_token(token))
+            except ValueError as exc:
+                logger.warning("[phylo] partition: skipping token %r: %s", token, exc)
+        if not parsed_tokens:
             continue
         bodies: dict[str, str] = {}
         for rep in representatives:
-            cds = _best_satisfying_cds(_segment_proteins(rep, segment), parsed)
+            cds = _best_satisfying_cds_any(
+                _segment_proteins(rep, segment), parsed_tokens
+            )
             if cds and cds.get("sequence"):
                 bodies[rep.id] = cds["sequence"]
         if len(bodies) >= 2:
