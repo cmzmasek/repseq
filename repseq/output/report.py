@@ -131,19 +131,32 @@ def write_representative_sequences_tsv(
 ) -> None:
     """Write metadata for non-segmented representative sequences to TSV.
 
-    One row per representative sequence. Taxonomic ranks use the shared
-    :data:`_TAX_RANKS` ladder so this file and
-    ``_isolate_proteins.tsv`` are joinable on the same column names.
-    Sub-ranks (``subgenus``, ``subfamily``, ``suborder``, ``subclass``)
-    only populate when the resolver's lineage map carries them —
-    commonly blank for viruses.
+    One row per representative sequence. **Column-identical to**
+    ``write_representative_isolates_tsv`` (the segmented rep table) so
+    the two files are schema-compatible across modes — a downstream
+    consumer reads the same columns regardless of which mode ran. The
+    isolate-only columns are blanked or remapped to their per-sequence
+    meaning:
+
+    - ``isolate_id``, ``isolate_id_source``, ``n_segments``, ``segments``
+      → blank (no isolate / multi-segment concept in non-segmented mode);
+    - ``accessions`` → the sequence's single accession;
+    - ``total_length_nt`` → the sequence's NT length.
+
+    The per-sequence-only columns the old schema carried (``description``,
+    ``segment``, ``molecule_type``, ``length_nt`` under that name) are
+    intentionally absent — they have no slot in the shared isolates
+    schema. Taxonomic ranks use the shared :data:`_TAX_RANKS` ladder;
+    sub-ranks (``subgenus``, ``subfamily``, ``suborder``, ``subclass``)
+    only populate when the resolver's lineage map carries them — commonly
+    blank for viruses.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = [
-        "accession", "organism", "description", "strain",
-        "host", "collection_date", "country", "segment", "isolate_id",
-        "molecule_type", "length_nt", "is_refseq", "is_reviewed",
-        "ncbi_taxon_id", *_TAX_RANKS,
+        "isolate_id", "isolate_id_source", "organism", "strain", "host",
+        "collection_date", "country", "n_segments", "segments", "accessions",
+        "total_length_nt", "is_refseq", "is_reviewed", "ncbi_taxon_id",
+        *_TAX_RANKS,
     ]
     with open(path, "w") as fh:
         fh.write("\t".join(columns) + "\n")
@@ -154,17 +167,17 @@ def write_representative_sequences_tsv(
                 for r in _TAX_RANKS
             ]
             row = [
-                _tsv_safe(seq.accession),
+                "",  # isolate_id — no isolate concept in non-segmented mode
+                "",  # isolate_id_source
                 _tsv_safe(seq.organism),
-                _tsv_safe(seq.description),
                 _tsv_safe(seq.strain),
                 _tsv_safe(seq.host),
                 _tsv_safe(seq.collection_date),
                 _tsv_safe(seq.country),
-                _tsv_safe(seq.segment),
-                _tsv_safe(seq.isolate_id),
-                _tsv_safe(seq.seq_type.value),
-                _tsv_safe(seq.length),
+                "",  # n_segments
+                "",  # segments
+                _tsv_safe(seq.accession or seq.id),  # accessions (the one)
+                _tsv_safe(seq.length),  # total_length_nt
                 _tsv_bool(seq.is_refseq),
                 _tsv_bool(seq.is_reviewed),
                 _tsv_safe(tax.taxid) if tax and tax.taxid else "",
@@ -495,6 +508,77 @@ def write_isolate_proteins_tsv(
     return True
 
 
+def write_sequence_proteins_tsv(
+    sequences: list[Sequence],
+    path: Path,
+    representative_ids: Optional[set[str]] = None,
+) -> bool:
+    """Write proteins per non-segmented sequence, one row per protein.
+
+    The non-segmented counterpart of :func:`write_isolate_proteins_tsv`,
+    emitting the **identical column schema** so the per-CDS protein tables
+    are joinable / processed the same way across modes:
+    ``protein_id``, ``product``, ``length_aa``, ``isolate_id``,
+    ``isolate_id_source``, ``segment``, ``segment_length_nt``,
+    ``accession``, ``representative``, ``hmmscan``, then the nine
+    :data:`_TAX_RANKS`.
+
+    Columns with no non-segmented meaning are blanked: ``isolate_id``,
+    ``isolate_id_source``, ``segment``. ``segment_length_nt`` is populated
+    with the parent sequence's NT length (in non-segmented mode the whole
+    sequence is the "segment"), and ``accession`` is the parent
+    sequence's accession.
+
+    ``representative_ids`` is the set of representative sequence ids
+    (``Sequence.id``); a row's ``representative`` cell is ``TRUE`` when its
+    parent sequence's id is in that set. When ``None`` every cell is
+    ``FALSE``.
+
+    Only emits a file when at least one sequence has populated
+    ``proteins``. Returns True if written, False if skipped.
+    """
+    has_any = any(seq.proteins for seq in sequences)
+    if not has_any:
+        return False
+
+    rep_ids = representative_ids or set()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        "protein_id\tproduct\tlength_aa\tisolate_id\tisolate_id_source\t"
+        "segment\tsegment_length_nt\taccession\trepresentative\thmmscan\t"
+        + "\t".join(_TAX_RANKS) + "\n"
+    )
+    with open(path, "w") as fh:
+        fh.write(header)
+        for seq in sequences:
+            if not seq.proteins:
+                continue
+            is_rep = _tsv_bool(seq.id in rep_ids)
+            tax = seq.taxonomy
+            tax_cells = "\t".join(
+                _tsv_safe(tax.get_rank(r) if tax else None)
+                for r in _TAX_RANKS
+            )
+            acc_cell = _tsv_safe(seq.accession or seq.id)
+            seg_len_cell = _tsv_safe(seq.length)
+            for prot in seq.proteins:
+                fh.write(
+                    f"{_tsv_safe(prot.get('protein_id'))}\t"
+                    f"{_tsv_safe(prot.get('product'))}\t"
+                    f"{_tsv_safe(prot.get('length'))}\t"
+                    f"\t"  # isolate_id — no isolate concept here
+                    f"\t"  # isolate_id_source
+                    f"\t"  # segment
+                    f"{seg_len_cell}\t"
+                    f"{acc_cell}\t"
+                    f"{is_rep}\t"
+                    f"{_format_hmmscan_cell(prot)}\t"
+                    f"{tax_cells}\n"
+                )
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Cluster summary TSV
 # ---------------------------------------------------------------------------
@@ -708,6 +792,7 @@ def write_all_reports(
     input_paths: list[str],
     output_files: list[Path],
     complete_isolates: Optional[dict[str, list[Sequence]]] = None,
+    pre_clustering_sequences: Optional[list[Sequence]] = None,
 ) -> None:
     out_dir = Path(cfg.get("output", {}).get("dir", "./repseq_output"))
     prefix = cfg.get("output", {}).get("prefix", "repseq")
@@ -728,6 +813,23 @@ def write_all_reports(
         write_representative_sequences_tsv(
             result.representatives,
             out_dir / f"{prefix}_representative_sequences.tsv",
+        )
+        # Per-CDS protein tables — non-segmented counterparts of the
+        # segmented _isolate_proteins.tsv / _representative_isolate_proteins.tsv
+        # pair, sharing their exact column schema. The "all post-QC" file
+        # needs the pre-clustering pool; the rep-only file is filtered from
+        # result.representatives.
+        rep_seq_ids: set[str] = {seq.id for seq in result.representatives}
+        if pre_clustering_sequences is not None:
+            write_sequence_proteins_tsv(
+                pre_clustering_sequences,
+                out_dir / f"{prefix}_sequence_proteins.tsv",
+                representative_ids=rep_seq_ids,
+            )
+        write_sequence_proteins_tsv(
+            result.representatives,
+            out_dir / f"{prefix}_representative_sequence_proteins.tsv",
+            representative_ids=rep_seq_ids,
         )
     write_cluster_tsv(result, out_dir / f"{prefix}_clusters.tsv")
     write_group_counts_tsv(result, out_dir / f"{prefix}_group_counts.tsv")

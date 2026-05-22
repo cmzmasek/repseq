@@ -307,6 +307,41 @@ def _any_marker_has_hmms(cfg: dict) -> bool:
     return False
 
 
+def _collect_config_hmm_names(cfg: dict) -> set[str]:
+    """Return the set of individual HMM profile names referenced in config tokens.
+
+    Splits every token string (single ``"Name"`` or multidomain ``"A--B--C"``)
+    into its component names so callers can cross-check against the DB.
+    Malformed tokens are silently skipped (config validation already flagged them).
+    """
+    from .hmm.runner import parse_hmm_token
+
+    names: set[str] = set()
+
+    def _add_tokens(token_list):
+        for token in token_list or []:
+            if not isinstance(token, str):
+                continue
+            try:
+                names.update(parse_hmm_token(token))
+            except ValueError:
+                pass
+
+    for entry in (cfg.get("clustering", {}).get("cluster_protein", []) or []):
+        if isinstance(entry, dict):
+            _add_tokens(entry.get("hmms", []))
+    virus_cfg = get_virus_config(cfg)
+    if virus_cfg:
+        for entries in (virus_cfg.get("cluster_protein") or {}).values():
+            for entry in (entries or []):
+                if isinstance(entry, dict):
+                    _add_tokens(entry.get("hmms", []))
+        for spec in (virus_cfg.get("segment_markers") or {}).values():
+            if isinstance(spec, dict):
+                _add_tokens(spec.get("hmms", []))
+    return names
+
+
 def _run_hmm_scan(sequences, cfg, ncbi) -> None:
     """Run hmmscan over every CDS protein and stash results on cfg.
 
@@ -372,6 +407,16 @@ def _run_hmm_scan(sequences, cfg, ncbi) -> None:
             err=True,
         )
         return
+
+    unknown_hmms = sorted(_collect_config_hmm_names(cfg) - set(ga_cutoffs.keys()))
+    if unknown_hmms:
+        click.echo(
+            f"[hmm] WARNING: {len(unknown_hmms)} HMM name(s) referenced in config "
+            "are not present in the database — they will never match any CDS "
+            "(check for typos):\n"
+            + "\n".join(f"  {n}" for n in unknown_hmms),
+            err=True,
+        )
 
     # Annotate each hit with a `passing: bool` once here so downstream
     # consumers (marker selector, isolate_proteins TSV/FASTA writers,
@@ -1271,6 +1316,7 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
     write_all_reports(
         result, qc_report, cfg, list(input_paths), out_files,
         complete_isolates=complete_isolates,
+        pre_clustering_sequences=pre_clustering_sequences,
     )
     # Taxonomic diversity report — distinct taxa per rank before/after
     # clustering, plus a per-taxon breakdown for low-diversity ranks. The

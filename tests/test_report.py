@@ -185,10 +185,13 @@ def test_write_representative_isolates_tsv_emits_isolate_columns(tmp_path):
     assert row["is_refseq"] == "FALSE"
 
 
-def test_write_representative_sequences_tsv_keeps_per_sequence_schema(tmp_path):
-    """Non-segmented writer keeps the original per-sequence columns
-    including `accession`, `segment`, `description`, `molecule_type`,
-    `length_nt`."""
+def test_write_representative_sequences_tsv_matches_isolates_schema(tmp_path):
+    """Non-segmented rep table is column-identical to the segmented
+    isolates table: isolate-style columns present, per-sequence-only
+    columns (accession, segment, description, molecule_type, length_nt)
+    absent. Per-sequence values map onto the isolate schema: accessions =
+    the single accession, total_length_nt = the sequence NT length, and
+    the isolate-only cells are blank."""
     rep = Sequence(
         id="ACC.1", header=">ACC.1", sequence="ACGT" * 100,
         accession="ACC.1", organism="Some virus",
@@ -197,13 +200,126 @@ def test_write_representative_sequences_tsv_keeps_per_sequence_schema(tmp_path):
     path = tmp_path / "x_representative_sequences.tsv"
     write_representative_sequences_tsv([rep], path)
 
-    header = path.read_text().splitlines()[0].split("\t")
+    lines = path.read_text().splitlines()
+    header = lines[0].split("\t")
+    # Schema-identical to write_representative_isolates_tsv.
+    for col in ("isolate_id", "isolate_id_source", "n_segments", "segments",
+                "accessions", "total_length_nt"):
+        assert col in header
+    # Per-sequence-only columns must NOT appear (no slot in the shared schema).
     for col in ("accession", "segment", "description", "molecule_type",
                 "length_nt"):
-        assert col in header
-    # Isolate-only columns must NOT appear.
-    for col in ("n_segments", "segments", "accessions", "total_length_nt"):
         assert col not in header
+
+    row = dict(zip(header, lines[1].split("\t")))
+    assert row["isolate_id"] == ""
+    assert row["isolate_id_source"] == ""
+    assert row["n_segments"] == ""
+    assert row["segments"] == ""
+    assert row["accessions"] == "ACC.1"
+    assert row["total_length_nt"] == str(len("ACGT" * 100))
+    assert row["organism"] == "Some virus"
+
+
+def test_write_sequence_proteins_tsv_non_segmented_schema(tmp_path):
+    """The non-segmented per-CDS protein TSV must (a) share the exact
+    column schema of _isolate_proteins.tsv, (b) blank the columns with no
+    non-segmented meaning, (c) populate segment_length_nt with the parent
+    sequence NT length and accession with the parent accession, and (d)
+    set `representative` from the supplied id set."""
+    from repseq.output.report import write_sequence_proteins_tsv
+
+    rep = Sequence(
+        id="R1", header=">R1", sequence="ACGT" * 50,
+        accession="R1.1", organism="Some virus",
+        seq_type=SequenceType.NUCLEOTIDE,
+    )
+    rep.proteins = [
+        {"protein_id": "YP_1", "product": "polymerase", "length": 660},
+    ]
+    nonrep = Sequence(
+        id="N1", header=">N1", sequence="ACGT" * 40,
+        accession="N1.1", seq_type=SequenceType.NUCLEOTIDE,
+    )
+    nonrep.proteins = [
+        {"protein_id": "YP_2", "product": "polymerase", "length": 500},
+    ]
+    path = tmp_path / "x_sequence_proteins.tsv"
+    written = write_sequence_proteins_tsv(
+        [rep, nonrep], path, representative_ids={"R1"}
+    )
+    assert written is True
+
+    lines = path.read_text().splitlines()
+    header = lines[0].split("\t")
+    # Identical to _isolate_proteins.tsv column schema.
+    assert header[:10] == [
+        "protein_id", "product", "length_aa", "isolate_id",
+        "isolate_id_source", "segment", "segment_length_nt", "accession",
+        "representative", "hmmscan",
+    ]
+    rows = {ln.split("\t")[0]: dict(zip(header, ln.split("\t")))
+            for ln in lines[1:]}
+    r = rows["YP_1"]
+    assert r["isolate_id"] == "" and r["isolate_id_source"] == ""
+    assert r["segment"] == ""
+    assert r["segment_length_nt"] == str(len("ACGT" * 50))
+    assert r["accession"] == "R1.1"
+    assert r["representative"] == "TRUE"
+    assert rows["YP_2"]["representative"] == "FALSE"
+
+
+def test_write_sequence_proteins_tsv_skips_when_no_proteins(tmp_path):
+    """No file when nothing carries proteins (returns False)."""
+    from repseq.output.report import write_sequence_proteins_tsv
+
+    seq = Sequence(
+        id="R1", header=">R1", sequence="ACGT", accession="R1.1",
+        seq_type=SequenceType.NUCLEOTIDE,
+    )
+    path = tmp_path / "x_sequence_proteins.tsv"
+    assert write_sequence_proteins_tsv([seq], path) is False
+    assert not path.exists()
+
+
+def test_write_all_reports_emits_non_segmented_protein_tsvs(tmp_path):
+    """Non-segmented run emits both _sequence_proteins.tsv (all post-QC,
+    representative TRUE/FALSE) and _representative_sequence_proteins.tsv
+    (reps only, all TRUE), sharing one header."""
+    rep = Sequence(
+        id="R1", header=">R1", sequence="ACGT" * 50, accession="R1.1",
+        seq_type=SequenceType.NUCLEOTIDE,
+    )
+    rep.proteins = [{"protein_id": "YP_1", "product": "pol", "length": 660}]
+    dropped = Sequence(
+        id="N1", header=">N1", sequence="ACGT" * 40, accession="N1.1",
+        seq_type=SequenceType.NUCLEOTIDE,
+    )
+    dropped.proteins = [{"protein_id": "YP_2", "product": "pol", "length": 500}]
+    result = RunResult(mode="global", representatives=[rep], clusters=[])
+
+    cfg = {"output": {"dir": str(tmp_path), "prefix": "x"}}
+    write_all_reports(
+        result, QCReport(), cfg, [], [],
+        pre_clustering_sequences=[rep, dropped],
+    )
+
+    full = tmp_path / "x_sequence_proteins.tsv"
+    subset = tmp_path / "x_representative_sequence_proteins.tsv"
+    assert full.exists() and subset.exists()
+
+    full_lines = full.read_text().splitlines()
+    subset_lines = subset.read_text().splitlines()
+    assert full_lines[0] == subset_lines[0]  # same schema
+    assert len(full_lines) == 3   # both proteins
+    assert len(subset_lines) == 2  # rep only
+
+    header = full_lines[0].split("\t")
+    rep_col = header.index("representative")
+    full_reps = {ln.split("\t")[0]: ln.split("\t")[rep_col]
+                 for ln in full_lines[1:]}
+    assert full_reps == {"YP_1": "TRUE", "YP_2": "FALSE"}
+    assert subset_lines[1].split("\t")[rep_col] == "TRUE"
 
 
 def test_write_all_reports_emits_representative_isolate_proteins_subset(

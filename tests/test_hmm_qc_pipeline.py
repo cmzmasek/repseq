@@ -8,6 +8,7 @@ so these tests run without hmmscan installed and without network.
 from __future__ import annotations
 
 from repseq.cli import (
+    _collect_config_hmm_names,
     _run_hmm_qc_non_segmented,
     _run_hmm_qc_segmented,
     _resolve_segment_hmms,
@@ -393,3 +394,46 @@ def test_non_segmented_no_hmm_specs_is_noop(make_seq):
     kept = _run_hmm_qc_non_segmented([s], cfg, qc)
     assert kept == [s]
     assert qc.removed_hmm_failed == 0
+
+
+# ---------------------------------------------------------------------------
+# _collect_config_hmm_names
+# ---------------------------------------------------------------------------
+
+def test_collect_config_hmm_names_non_segmented():
+    cfg = _non_segmented_cfg([
+        {"name": "RdRp", "aliases": ["polymerase"], "hmms": ["RdRP_4"]},
+        {"name": "Spike", "hmms": ["CoV_S1--CoV_S2", "bCoV_S1_N--bCoV_S1_RBD--CoV_S2"]},
+    ])
+    names = _collect_config_hmm_names(cfg)
+    assert names == {"RdRP_4", "CoV_S1", "CoV_S2", "bCoV_S1_N", "bCoV_S1_RBD"}
+
+
+def test_collect_config_hmm_names_segmented():
+    cfg = _segmented_cfg()
+    names = _collect_config_hmm_names(cfg)
+    # _segmented_cfg() uses Bunya_nucleocap (S), Bunya_G1--Bunya_G2 (M)
+    assert "Bunya_nucleocap" in names
+    assert "Bunya_G1" in names
+    assert "Bunya_G2" in names
+
+
+def test_collect_config_hmm_names_empty():
+    cfg = _non_segmented_cfg([])
+    assert _collect_config_hmm_names(cfg) == set()
+
+
+def test_collect_config_hmm_names_alias_only_spec():
+    """Alias-only specs (no hmms key) contribute nothing."""
+    cfg = _non_segmented_cfg([{"name": "RdRp", "aliases": ["polymerase"]}])
+    assert _collect_config_hmm_names(cfg) == set()
+
+
+def test_collect_config_hmm_names_skips_malformed_tokens():
+    """Malformed tokens (empty component) are silently skipped."""
+    cfg = _non_segmented_cfg([
+        {"name": "X", "hmms": ["Good_HMM", "Bad----Token"]},
+    ])
+    names = _collect_config_hmm_names(cfg)
+    assert "Good_HMM" in names
+    assert "Bad" not in names
