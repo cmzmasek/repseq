@@ -57,9 +57,9 @@ def _concat_rep(iso, seg_to_proteins):
     )
 
 
-# A nucleocapsid hit (single-HMM token) and an ordered G1+G2 pair
-# (multidomain token "Bunya_G1--Bunya_G2": G1 must sit C-terminal to G2,
-# i.e. G1.ali_from > G2.ali_to).
+# A nucleocapsid hit (single-HMM token) and an ordered G2+G1 pair
+# (multidomain token "Bunya_G2--Bunya_G1": G2 sits N-terminal to G1,
+# i.e. G2.ali_to < G1.ali_from).
 def _S_proteins():
     return [_prot("S_N", "nucleoprotein", "M" * 200, [_hit("Bunya_nucleocap")])]
 
@@ -93,11 +93,11 @@ def _seg_cfg(segment_markers):
 def test_collect_family_specs_segmented_scopes_and_prefixes():
     cfg = _seg_cfg({
         "S": {"hmms": ["Bunya_nucleocap"]},
-        "M": {"hmms": ["Bunya_G1--Bunya_G2"]},
+        "M": {"hmms": ["Bunya_G2--Bunya_G1"]},
     })
     specs = collect_family_specs(cfg)
     assert specs == [
-        ("M_Bunya_G1--Bunya_G2", "Bunya_G1--Bunya_G2", "M"),
+        ("M_Bunya_G2--Bunya_G1", "Bunya_G2--Bunya_G1", "M"),
         ("S_Bunya_nucleocap", "Bunya_nucleocap", "S"),
     ]
 
@@ -174,7 +174,7 @@ def _run(reps, cfg, tmp_path, prefix="bunya"):
 def test_builds_one_tree_per_token(tmp_path):
     cfg = _seg_cfg({
         "S": {"hmms": ["Bunya_nucleocap"]},
-        "M": {"hmms": ["Bunya_G1--Bunya_G2"]},
+        "M": {"hmms": ["Bunya_G2--Bunya_G1"]},
     })
     reps = [
         _concat_rep(f"iso{i}", {"S": _S_proteins(), "M": _M_proteins()})
@@ -184,17 +184,17 @@ def test_builds_one_tree_per_token(tmp_path):
     names = sorted(f.name for f in files)
     sub = tmp_path / "bunya_per_protein"
     # Both families clear min_taxa=3.
-    for fam in ("M_Bunya_G1--Bunya_G2", "S_Bunya_nucleocap"):
+    for fam in ("M_Bunya_G2--Bunya_G1", "S_Bunya_nucleocap"):
         for ext in ("_msa.fasta", "_tree.nwk", "_tree.xml", "_tree_id_map.tsv"):
             assert (sub / f"{fam}{ext}").exists()
     assert all(str(f).startswith(str(sub)) for f in files)
-    assert any("M_Bunya_G1--Bunya_G2_tree.xml" in n for n in names)
+    assert any("M_Bunya_G2--Bunya_G1_tree.xml" in n for n in names)
 
 
 def test_family_below_min_taxa_is_skipped(tmp_path):
     cfg = _seg_cfg({
         "S": {"hmms": ["Bunya_nucleocap"]},
-        "M": {"hmms": ["Bunya_G1--Bunya_G2"]},
+        "M": {"hmms": ["Bunya_G2--Bunya_G1"]},
     })
     # 3 isolates carry S; only 2 carry the full M architecture (the third
     # M CDS is missing the G1 domain).
@@ -209,7 +209,7 @@ def test_family_below_min_taxa_is_skipped(tmp_path):
     files = _run(reps, cfg, tmp_path)
     sub = tmp_path / "bunya_per_protein"
     assert (sub / "S_Bunya_nucleocap_tree.xml").exists()
-    assert not (sub / "M_Bunya_G1--Bunya_G2_tree.xml").exists()
+    assert not (sub / "M_Bunya_G2--Bunya_G1_tree.xml").exists()
 
 
 def test_per_protein_uses_linsi_mafft_without_auto(tmp_path):
@@ -270,7 +270,7 @@ def test_per_protein_leaf_shows_only_family_protein(tmp_path):
 
     cfg = _seg_cfg({
         "S": {"hmms": ["Bunya_nucleocap"]},
-        "M": {"hmms": ["Bunya_G1--Bunya_G2"]},
+        "M": {"hmms": ["Bunya_G2--Bunya_G1"]},
     })
     reps = [
         _concat_rep(f"iso{i}", {"S": _S_proteins(), "M": _M_proteins()})
@@ -333,7 +333,7 @@ def test_per_protein_domain_architecture_can_be_disabled(tmp_path):
 def test_incongruence_table_written_for_two_families(tmp_path):
     cfg = _seg_cfg({
         "S": {"hmms": ["Bunya_nucleocap"]},
-        "M": {"hmms": ["Bunya_G1--Bunya_G2"]},
+        "M": {"hmms": ["Bunya_G2--Bunya_G1"]},
     })
     reps = [
         _concat_rep(f"iso{i}", {"S": _S_proteins(), "M": _M_proteins()})
@@ -354,7 +354,7 @@ def test_incongruence_table_written_for_two_families(tmp_path):
 def test_incongruence_table_skipped_when_disabled(tmp_path):
     cfg = _seg_cfg({
         "S": {"hmms": ["Bunya_nucleocap"]},
-        "M": {"hmms": ["Bunya_G1--Bunya_G2"]},
+        "M": {"hmms": ["Bunya_G2--Bunya_G1"]},
     })
     cfg["phylo"]["per_protein"]["incongruence"] = False
     reps = [

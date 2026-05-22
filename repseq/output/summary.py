@@ -637,7 +637,7 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
         paragraphs.append(
             f"In addition, a **separate tree was built for each HMM "
             f"domain-architecture marker** declared for quality control "
-            f"(the `hmms:` tokens; e.g. `Bunya_G1--Bunya_G2`). For every "
+            f"(the `hmms:` tokens; e.g. `Bunya_G2--Bunya_G1`). For every "
             f"marker, the satisfying CDS translation was taken from each "
             f"representative that carries that architecture and {align_sentence}, "
             f"with the same rooting and "

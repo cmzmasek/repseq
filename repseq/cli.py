@@ -11,6 +11,7 @@ import yaml
 
 from . import __version__
 from .config import load_config, validate_config, get_virus_config
+from .errors import InputError, RepseqError
 from .io.fasta import read_fasta
 from .models import SequenceSource
 from .models import RunResult
@@ -168,8 +169,65 @@ _SOURCE_MAP = {
 }
 
 
+def _preflight_input(path: str) -> None:
+    """Fail fast with a friendly message on a bad input FASTA path.
+
+    Catches the mistakes that would otherwise surface as a raw traceback
+    from ``open()`` deep inside ``read_fasta`` — a missing file, a
+    directory, a permission problem, an empty file, or a file that plainly
+    isn't FASTA. Raises :class:`~repseq.errors.InputError` (rendered without
+    a traceback at the CLI boundary).
+    """
+    p = Path(path)
+    if not p.exists():
+        raise InputError(
+            f"Input file not found: {path}\n"
+            f"       Check the path(s) you passed to -i/--input."
+        )
+    if p.is_dir():
+        raise InputError(
+            f"Input path is a directory, not a FASTA file: {path}\n"
+            f"       Pass the FASTA file itself (repeat -i for multiple files)."
+        )
+    try:
+        if p.stat().st_size == 0:
+            raise InputError(
+                f"Input file is empty: {path}\n"
+                f"       It contains no sequences — check that the download or "
+                f"export actually produced data."
+            )
+        with open(p) as fh:
+            head = fh.read(4096)
+    except PermissionError as e:
+        raise InputError(
+            f"Input file is not readable (permission denied): {path}\n"
+            f"       Check the file's permissions."
+        ) from e
+    except UnicodeDecodeError as e:
+        raise InputError(
+            f"Input file is not plain-text FASTA: {path}\n"
+            f"       If it is gzip-compressed (.gz), decompress it first "
+            f"(repseq reads uncompressed FASTA)."
+        ) from e
+    except OSError as e:
+        raise InputError(
+            f"Could not read input file {path}: {e.strerror or e}."
+        ) from e
+    stripped = head.lstrip()
+    if not stripped.startswith(">"):
+        raise InputError(
+            f"Input file does not look like FASTA (no '>' header found): {path}\n"
+            f"       repseq reads FASTA. If this is a different format (or a "
+            f"gzip-compressed .gz file), convert or decompress it first."
+        )
+
+
 def _load_sequences(input_paths: tuple[str, ...], source_override: str = "auto") -> list:
     override = _SOURCE_MAP.get(source_override)  # None when "auto"
+    # Validate every path up front so we don't print "Reading ..." for the
+    # first file and then crash on the second.
+    for path in input_paths:
+        _preflight_input(path)
     sequences = []
     for path in input_paths:
         click.echo(f"Reading {path} ...")
@@ -365,8 +423,8 @@ def _run_hmm_qc(sequences, cfg, qc_report, ncbi):
     Auto-fetches proteins from GenBank if not already attached.
 
     Semantic: each ``hmms:`` list element is a TOKEN string ("Name" or
-    "A--B--C" multidomain in C-to-N order). A CDS satisfies a token when
-    every named HMM has a passing hit AND those hits appear in C-to-N
+    "A--B--C" multidomain in N-to-C order). A CDS satisfies a token when
+    every named HMM has a passing hit AND those hits appear in N-to-C
     order along the protein. A segment passes when, for each token in
     its spec, at least one CDS in the segment satisfies that token.
 
@@ -1323,7 +1381,54 @@ def _final_summary(result, qc_report, cfg) -> None:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-@click.group()
+def _as_external_tool_error(exc: BaseException) -> Optional[BaseException]:
+    """Return ``exc`` when it's a known missing/failed external-tool error,
+    else ``None``.
+
+    Only the clustering-backend errors can reach the top-level boundary
+    uncaught — the phylo / HMM / plot tools already soft-fail inside
+    ``_write_output`` and ``_run_hmm_scan``. Imported lazily so a broken
+    optional dependency never breaks plain ``repseq --help``.
+    """
+    try:
+        from .clustering.cdhit import CDHitError
+        from .clustering.mmseqs2 import MMseqs2Error
+    except Exception:
+        return None
+    return exc if isinstance(exc, (MMseqs2Error, CDHitError)) else None
+
+
+class _RepseqGroup(click.Group):
+    """Click group that renders known user errors as friendly one-liners.
+
+    A :class:`~repseq.errors.RepseqError` (config / input problems) or a
+    missing-external-tool failure (MMseqs2 / cd-hit not on PATH) is printed
+    as a single ``Error: ...`` line to stderr and exits 1, with **no**
+    traceback. Every other exception propagates unchanged — those are
+    either click's own ``UsageError`` (already friendly) or a genuine bug
+    whose traceback we deliberately keep so it gets reported.
+    """
+
+    def main(self, *args, **kwargs):  # type: ignore[override]
+        try:
+            return super().main(*args, **kwargs)
+        except RepseqError as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        except Exception as e:  # noqa: BLE001 — narrowed immediately below
+            tool_err = _as_external_tool_error(e)
+            if tool_err is None:
+                raise  # genuine bug → full traceback (by design)
+            click.echo(f"Error: {tool_err}", err=True)
+            click.echo(
+                "       Run 'repseq doctor' to check which external tools "
+                "are installed and on your PATH.",
+                err=True,
+            )
+            sys.exit(1)
+
+
+@click.group(cls=_RepseqGroup)
 @click.version_option(version=__version__, prog_name="repseq")
 def main():
     """repseq — representative sequence selection for large bioinformatics datasets."""

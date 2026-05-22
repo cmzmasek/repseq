@@ -362,7 +362,7 @@ def test_render_summary_mentions_hmm_tier_when_active(make_seq, tmp_path):
     cfg["_hmm_runtime"] = {"active": True, "ga_cutoffs": {}, "hmm_cfg": cfg.get("hmm", {})}
     qc = _qc()
     qc.removed_hmm_failed = 5
-    qc.removed_hmm_by_marker = {"L:RdRP_4": 3, "M:Bunya_G1--Bunya_G2": 2}
+    qc.removed_hmm_by_marker = {"L:RdRP_4": 3, "M:Bunya_G2--Bunya_G1": 2}
     md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"])
     # Selection section references the upstream QC step.
     assert "HMMER hmmscan" in md

@@ -100,17 +100,17 @@ def test_segment_passes_multidomain_token(make_seq):
             _hit("Bunya_G1", 500, 1000),    # C-terminal
         ]),
     ])
-    # Token 'Bunya_G1--Bunya_G2' → G1 C-terminal, G2 N-terminal.
-    assert _segment_fails_hmm_gate(seq, ["Bunya_G1--Bunya_G2"]) is None
+    # Token 'Bunya_G2--Bunya_G1' → G2 N-terminal, G1 C-terminal.
+    assert _segment_fails_hmm_gate(seq, ["Bunya_G2--Bunya_G1"]) is None
 
 
 def test_segment_fails_multidomain_when_only_one_domain_present(make_seq):
     seq = make_seq("seg1", "ACGT", segment="M")
     _attach_proteins(seq, [
-        _cds("partial gly", "M" * 500, hmm_hits=[_hit("Bunya_G1", 1, 300)]),
+        _cds("partial gly", "M" * 500, hmm_hits=[_hit("Bunya_G2", 1, 300)]),
     ])
-    failed = _segment_fails_hmm_gate(seq, ["Bunya_G1--Bunya_G2"])
-    assert failed == "Bunya_G1--Bunya_G2"
+    failed = _segment_fails_hmm_gate(seq, ["Bunya_G2--Bunya_G1"])
+    assert failed == "Bunya_G2--Bunya_G1"
 
 
 def test_segment_passes_when_tokens_satisfied_by_different_cdses(make_seq):
@@ -149,7 +149,7 @@ def _segmented_cfg():
                     "segments": ["S", "M", "L"],
                     "segment_markers": {
                         "S": {"hmms": ["Bunya_nucleocap"]},
-                        "M": {"hmms": ["Bunya_G1--Bunya_G2"]},
+                        "M": {"hmms": ["Bunya_G2--Bunya_G1"]},
                         # L deliberately omitted — phased rollout case.
                     },
                 },
@@ -202,8 +202,8 @@ def test_segmented_qc_drops_isolate_when_one_segment_fails(make_seq):
     assert kept == []
     assert qc.removed_hmm_failed == 1
     # Per-marker breakdown: M segment's multidomain token failed.
-    assert "M:Bunya_G1--Bunya_G2" in qc.removed_hmm_by_marker
-    assert qc.removed_hmm_by_marker["M:Bunya_G1--Bunya_G2"] == 1
+    assert "M:Bunya_G2--Bunya_G1" in qc.removed_hmm_by_marker
+    assert qc.removed_hmm_by_marker["M:Bunya_G2--Bunya_G1"] == 1
 
 
 def test_segmented_qc_records_per_segment_reasons_in_qc_removed(make_seq):
@@ -270,10 +270,10 @@ def test_segmented_qc_mixed_isolates(make_seq):
     iso_bad_m = _isolate_segs(
         make_seq, "bad_m",
         s_hits=[_hit("Bunya_nucleocap", 1, 200)],
-        # M domains in wrong order → multidomain token fails.
+        # M domains in wrong order for 'G2--G1' → multidomain token fails.
         m_hits=[
-            _hit("Bunya_G1", 1, 300),     # G1 too N-terminal
-            _hit("Bunya_G2", 500, 1000),  # G2 C-terminal
+            _hit("Bunya_G1", 1, 300),     # G1 N-terminal (should be C-term)
+            _hit("Bunya_G2", 500, 1000),  # G2 C-terminal (should be N-term)
         ],
     )
     all_seqs = iso_good + iso_bad_s + iso_bad_m

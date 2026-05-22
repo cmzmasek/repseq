@@ -4,4 +4,4 @@
 # version from this attribute (see [tool.setuptools.dynamic]), and the CLI
 # reads it directly — so `repseq --version` is always correct without a
 # reinstall, even in an editable install.
-__version__ = "0.20.0"
+__version__ = "0.20.1"

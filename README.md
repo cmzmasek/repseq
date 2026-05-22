@@ -1016,18 +1016,19 @@ Each element of `hmms:` is a **token** string. A token is either:
 | Form | Meaning |
 | --- | --- |
 | `"Name"`         | Single HMM. A CDS satisfies the token if it has a passing hit to `Name`. |
-| `"A--B"`         | Multidomain. A CDS satisfies the token only when it has passing hits to **both** `A` and `B`, with `A` lying C-terminal to `B` (strict non-overlap). |
-| `"A--B--C"`      | Same idea, three domains: `A` most C-terminal, `C` most N-terminal. |
+| `"A--B"`         | Multidomain. A CDS satisfies the token only when it has passing hits to **both** `A` and `B`, with `A` lying N-terminal to `B` (strict non-overlap). |
+| `"A--B--C"`      | Same idea, three domains: `A` most N-terminal, `C` most C-terminal. |
 
-**C-to-N order**. The first HMM in a multidomain token is the most
-**C-terminal** domain on the protein. Most molecular-biology notation
-reads N-to-C left-to-right; this is the opposite. Check your token
-order against the actual domain architecture before running. The
-convention exists so multidomain tokens can be compared directly
-against the hmmscan `ali_from`/`ali_to` columns.
+**N-to-C order**. The first HMM in a multidomain token is the most
+**N-terminal** domain on the protein — the same direction molecular
+biology writes a protein sequence, so a token mirrors the domain
+architecture as you'd draw it (e.g. the coronavirus Spike is
+`"Corona_S1--Corona_S2"`: S1 N-terminal, S2 C-terminal). The named
+domains are compared against the hmmscan `ali_from`/`ali_to` columns
+in that order.
 
-**Extra domains are fine.** A CDS annotated as `HMMX--A--B` still
-satisfies the token `"A--B"` because `A` remains C-terminal to `B`.
+**Extra domains are fine.** A CDS annotated as `A--B--HMMX` still
+satisfies the token `"A--B"` because `A` remains N-terminal to `B`.
 
 **Hard cutover from v0.13.0.** In v0.13.0, `hmms: [A, B]` meant "both
 A and B must hit the same CDS." In v0.14.0 that same YAML now means
@@ -1116,10 +1117,10 @@ segmented:
         # post-cleavage Gn/Gc annotation case).
         M: {hmms: ["Bunya_G1", "Bunya_G2"]}
         # OR — strict polyprotein form: a single CDS must carry both
-        # domains in C-to-N order (Bunya_G1 C-terminal, Bunya_G2
-        # N-terminal). Use this when you want to reject post-cleavage
+        # domains in N-to-C order (Bunya_G2/Gn N-terminal, Bunya_G1/Gc
+        # C-terminal). Use this when you want to reject post-cleavage
         # annotations as inconsistent.
-        # M: {hmms: ["Bunya_G1--Bunya_G2"]}
+        # M: {hmms: ["Bunya_G2--Bunya_G1"]}
         L: {hmms: ["RdRP_4"]}
 ```
 

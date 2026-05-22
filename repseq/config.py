@@ -10,6 +10,8 @@ from typing import Any, Optional
 
 import yaml
 
+from .errors import ConfigError
+
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -495,15 +497,51 @@ def _expand_paths(cfg: dict) -> dict:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _format_yaml_error(path: Path, err: yaml.YAMLError) -> str:
+    """Turn a PyYAML parse error into a one-glance, line-located message."""
+    mark = getattr(err, "problem_mark", None)
+    loc = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+    problem = getattr(err, "problem", None) or str(err).splitlines()[0]
+    return (
+        f"Config file {path} is not valid YAML{loc}: {problem}.\n"
+        f"       Check the indentation (use spaces, not tabs) and quoting."
+    )
+
+
 def load_config(path: Optional[str | Path] = None) -> dict[str, Any]:
-    """Load config from YAML file, merging over defaults."""
+    """Load config from YAML file, merging over defaults.
+
+    Raises :class:`~repseq.errors.ConfigError` (rendered without a traceback
+    at the CLI boundary) for the mistakes a user is likely to make: a path
+    that doesn't exist, a file that isn't valid YAML, or a top level that
+    isn't a mapping.
+    """
     cfg = copy.deepcopy(DEFAULTS)
     if path is not None:
         path = Path(path)
         if not path.exists():
-            raise FileNotFoundError(f"Config file not found: {path}")
-        with open(path) as fh:
-            user_cfg = yaml.safe_load(fh) or {}
+            raise ConfigError(
+                f"Config file not found: {path}\n"
+                f"       Check the path you passed to -c/--config."
+            )
+        try:
+            with open(path) as fh:
+                user_cfg = yaml.safe_load(fh)
+        except yaml.YAMLError as e:
+            raise ConfigError(_format_yaml_error(path, e)) from e
+        except OSError as e:
+            raise ConfigError(
+                f"Could not read config file {path}: {e.strerror or e}."
+            ) from e
+        if user_cfg is None:
+            user_cfg = {}
+        if not isinstance(user_cfg, dict):
+            raise ConfigError(
+                f"Config file {path} must contain a mapping (key: value pairs) "
+                f"at the top level, but found a {type(user_cfg).__name__}.\n"
+                f"       Check the file's structure — a repseq config is a set "
+                f"of named sections, not a bare list or value."
+            )
         cfg = _deep_merge(cfg, user_cfg)
 
     # Environment variable overrides
@@ -520,7 +558,7 @@ def _validate_hmm_tokens(hmms: Any, path: str) -> tuple[list[str], list[str]]:
     """Validate an ``hmms:`` list of token strings.
 
     Each token is either a single HMM name (``"Name"``) or a multidomain
-    spec joined with ``--`` (``"A--B--C"``, HMMs listed in C-to-N order).
+    spec joined with ``--`` (``"A--B--C"``, HMMs listed in N-to-C order).
     Returns ``(errors, validated_tokens)``. Invalid tokens are dropped
     from ``validated_tokens`` so the caller can still check the
     "at least one of aliases / hmms" invariant.
@@ -555,7 +593,7 @@ def _validate_marker_entry(entry: Any, path: str) -> list[str]:
     or a dict with required ``name`` and at least one of ``aliases``
     (list of non-empty strings) or ``hmms`` (list of HMM token strings,
     where a token is either a single HMM name like ``"Name"`` or a
-    multidomain spec like ``"A--B"`` in C-to-N order).
+    multidomain spec like ``"A--B"`` in N-to-C order).
     """
     errs: list[str] = []
     if isinstance(entry, str):

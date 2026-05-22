@@ -92,7 +92,7 @@ def _cfg(segment_markers, *, tool="iqtree", enabled=True, linkage="proportional"
 
 _TWO_FAMILIES = {
     "S": {"hmms": ["Bunya_nucleocap"]},
-    "M": {"hmms": ["Bunya_G1--Bunya_G2"]},
+    "M": {"hmms": ["Bunya_G2--Bunya_G1"]},
 }
 
 
@@ -108,7 +108,7 @@ def _three_reps():
 # ---------------------------------------------------------------------------
 
 def test_nexus_safe_collapses_multidomain_separator_and_specials():
-    assert _nexus_safe("M_Bunya_G1--Bunya_G2") == "M_Bunya_G1_Bunya_G2"
+    assert _nexus_safe("M_Bunya_G2--Bunya_G1") == "M_Bunya_G2_Bunya_G1"
     assert _nexus_safe("PF00937.24") == "PF00937_24"
     assert _nexus_safe("") == "part"
 
@@ -231,7 +231,7 @@ def test_build_partitioned_happy_path_writes_supermatrix_and_nexus(tmp_path):
     assert {"test_msa.fasta", "test_tree.nwk", "test_tree.xml",
             "test_tree_id_map.tsv", "test_partition.nex"} <= names
     # One per-family MSA per family (label carries the segment prefix).
-    assert "test_msa_M_Bunya_G1--Bunya_G2.fasta" in names
+    assert "test_msa_M_Bunya_G2--Bunya_G1.fasta" in names
     assert "test_msa_S_Bunya_nucleocap.fasta" in names
 
     # IQ-TREE was invoked in partition mode with the requested linkage.

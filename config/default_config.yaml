@@ -131,8 +131,8 @@ segmented:
   #         aliases: [<alias>, <alias>]        #   AND/OR hmms. hmms is a list of TOKEN
   #         hmms: [<token>, <token>]           #   strings: "Name" for single-HMM, or
   #                                            #   "A--B--C" for multidomain (HMMs in
-  #                                            #   C-to-N order — A is C-terminal, C
-  #                                            #   N-terminal). Each token must be
+  #                                            #   N-to-C order — A is N-terminal, C
+  #                                            #   C-terminal). Each token must be
   #                                            #   satisfied by at least one CDS in
   #                                            #   the segment for QC to pass; the
   #                                            #   marker (longest satisfying CDS) is
@@ -208,16 +208,17 @@ clustering:
   #   • "Name"       — single-HMM token, satisfied by any CDS whose hit
   #                    to that HMM passes the configured cutoffs.
   #   • "A--B--C"    — multidomain token, satisfied only when a single
-  #                    CDS has passing hits to all listed HMMs IN C-TO-N
-  #                    ORDER (A most C-terminal, C most N-terminal),
+  #                    CDS has passing hits to all listed HMMs IN N-TO-C
+  #                    ORDER (A most N-terminal, C most C-terminal),
   #                    with strict non-overlap between named domains.
   #                    Extra domains anywhere on the CDS are fine.
   #
-  # IMPORTANT — C-to-N convention: the order in "A--B--C" reads C-to-N
-  # left-to-right. Most molecular-biology notation is N-to-C, so triple-
-  # check the order against the actual domain architecture before running.
-  # The convention exists so multidomain tokens can be checked directly
-  # against the hmmscan `ali_from`/`ali_to` columns without flipping.
+  # N-to-C convention: the order in "A--B--C" reads N-to-C left-to-right,
+  # the same direction molecular biology writes a protein sequence — so a
+  # token mirrors the domain architecture as you'd draw it (e.g. the
+  # coronavirus Spike is "Corona_S1--Corona_S2": S1 N-terminal, S2
+  # C-terminal). The named domains are matched against the hmmscan
+  # `ali_from`/`ali_to` columns in that order.
   #
   # When `hmms` is set AND `hmm.enabled=true` AND `hmmscan` is on PATH,
   # the HMM gate is AUTHORITATIVE for that marker: an upstream HMM-QC

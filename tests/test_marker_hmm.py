@@ -80,14 +80,14 @@ def test_hmm_gate_rejects_when_no_cds_passes():
 
 def test_multidomain_token_requires_all_hmms_on_same_cds():
     """v0.14.0 multidomain token semantic: 'A--B' requires a SINGLE CDS
-    with passing hits to both HMMs in C-to-N order (A C-terminal to B).
+    with passing hits to both HMMs in N-to-C order (A N-terminal to B).
     The partial CDS satisfying only one domain must NOT be picked even
     though it is longer; only the full polyprotein qualifies."""
     proteins = [
         # Only one of two required HMMs hits — does NOT satisfy "A--B".
         _cds("glycoprotein", "M" * 1000, protein_id="gly_partial",
              hmm_hits=[_hit("Bunya_G1", passing=True, ali_from=500, ali_to=800)]),
-        # Both HMMs hit in correct C-to-N order — does satisfy "A--B".
+        # Both HMMs hit in correct N-to-C order — does satisfy "G2--G1".
         _cds("glycoprotein", "M" * 800, protein_id="gly_full",
              hmm_hits=[
                  # Bunya_G2 N-terminal (positions 1-300).
@@ -96,7 +96,7 @@ def test_multidomain_token_requires_all_hmms_on_same_cds():
                  _hit("Bunya_G1", passing=True, ali_from=500, ali_to=800),
              ]),
     ]
-    spec = [{"name": "M", "aliases": ["glycoprotein"], "hmms": ["Bunya_G1--Bunya_G2"]}]
+    spec = [{"name": "M", "aliases": ["glycoprotein"], "hmms": ["Bunya_G2--Bunya_G1"]}]
     marker, failure = select_marker_protein(proteins, spec, hmm_active=True)
     assert failure is None
     assert marker["protein_id"] == "gly_full"

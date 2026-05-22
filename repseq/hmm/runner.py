@@ -160,21 +160,19 @@ def coverage_of(hit: dict) -> float:
 # Token notation: single HMM ("Name") or multidomain ("A--B--C").
 # ---------------------------------------------------------------------------
 #
-# In a multidomain token the HMMs are written in C-to-N order:
-#     "HMM1--HMM2"     means HMM1 lies C-terminal to HMM2 on the protein.
-#     "HMM1--HMM2--HMM3" means HMM1 is most C-terminal, HMM3 most N-terminal.
-# This is the opposite of the natural N-to-C reading direction most molecular
-# biology uses; the project designer fixed C-to-N as the convention in v0.14.0
-# and it is documented in default_config.yaml, README, and CLAUDE.md. Do NOT
-# silently flip the direction — that would silently invert real configs.
+# In a multidomain token the HMMs are written in N-to-C order — the natural
+# molecular-biology reading direction (left-to-right = N-terminus to
+# C-terminus):
+#     "HMM1--HMM2"     means HMM1 lies N-terminal to HMM2 on the protein.
+#     "HMM1--HMM2--HMM3" means HMM1 is most N-terminal, HMM3 most C-terminal.
 #
 # A CDS satisfies a token when:
 #   - single token: that HMM has at least one passing hit on the CDS;
 #   - multidomain: every HMM in the token has a passing hit AND those hits
-#     appear in C-to-N order along the CDS (each named domain starts strictly
+#     appear in N-to-C order along the CDS (each named domain starts strictly
 #     after the previous one ends — non-overlapping). Extra domains anywhere
-#     on the CDS are fine ("HMMX--A--B" CDS satisfies "A--B" because A still
-#     lies C-terminal to B).
+#     on the CDS are fine ("A--B--HMMX" CDS satisfies "A--B" because A still
+#     lies N-terminal to B).
 #
 # The token operations stay free of config-shape knowledge so they can be
 # unit-tested in isolation.
@@ -186,7 +184,7 @@ def parse_hmm_token(token: str) -> list[str]:
     """Split a token into its ordered list of HMM names.
 
     Single HMM ``"Name"`` → ``["Name"]``. Multidomain ``"A--B--C"`` →
-    ``["A", "B", "C"]`` in declared (C-to-N) order. Empty / whitespace-only
+    ``["A", "B", "C"]`` in declared (N-to-C) order. Empty / whitespace-only
     components raise ``ValueError`` so misformatted tokens like ``"A----B"``
     or ``" --A"`` don't silently become single-HMM tokens.
     """
@@ -218,9 +216,9 @@ def cds_satisfies_token(
     candidate CDSes "best E across the weakest required domain wins."
 
     Ordering rule for multidomain tokens: the named domains must appear in
-    C-to-N order along the CDS (token's first HMM is C-terminal). For each
-    consecutive pair (Hi, Hi+1) we require ``Hi.ali_from > Hi+1.ali_to`` —
-    strict non-overlap, with Hi strictly C-terminal to Hi+1. If a domain has
+    N-to-C order along the CDS (token's first HMM is N-terminal). For each
+    consecutive pair (Hi, Hi+1) we require ``Hi.ali_to < Hi+1.ali_from`` —
+    strict non-overlap, with Hi strictly N-terminal to Hi+1. If a domain has
     multiple passing hits, we pick the best (lowest E-value) hit that still
     satisfies the order constraint via a greedy left-to-right walk; the
     walk only fails if no consistent assignment exists. Extra hits to HMMs
@@ -242,15 +240,14 @@ def cds_satisfies_token(
         # Single-HMM token: pick the best hit and return its E-value.
         best = min(by_target[token_hmms[0]], key=lambda h: h["dom_evalue"])
         return float(best["dom_evalue"])
-    # Multidomain: assign one hit per named HMM s.t. the C-to-N order
-    # holds (hit_i.ali_from > hit_{i+1}.ali_to for all consecutive i, i+1).
-    # Greedy: walk the token N→C (reverse: most-N-terminal first), at each
-    # step pick the *most-N-terminal* passing hit whose ali_to is strictly
-    # less than the next required ali_from.
-    reversed_tokens = list(reversed(token_hmms))
+    # Multidomain: assign one hit per named HMM s.t. the N-to-C order
+    # holds (hit_i.ali_to < hit_{i+1}.ali_from for all consecutive i, i+1).
+    # The token is already written N→C, so walk it left-to-right (most-
+    # N-terminal first); at each step pick the *most-N-terminal* passing hit
+    # whose ali_from is strictly greater than the previous hit's ali_to.
     chosen: list[dict] = []
     prev_to = -1  # ali_to of the previously-placed (more N-terminal) hit
-    for name in reversed_tokens:
+    for name in token_hmms:
         # Candidate hits whose ali_from is strictly C-terminal to prev_to.
         candidates = [h for h in by_target[name] if h["ali_from"] > prev_to]
         if not candidates:
