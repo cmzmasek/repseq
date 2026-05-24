@@ -140,6 +140,20 @@ segmented:
   #                                            #   chosen if alphabet=protein. See the
   #                                            #   top-level `hmm:` block for gate
   #                                            #   behaviour and cutoffs.
+  #     extra_protein:                         # optional accessory proteins per segment
+  #       <segment_name>:                      #   to extract / phylogenize but NOT use
+  #         - {name: ..., aliases: [...], hmms: [<token>]}   # for clustering. Same dict
+  #                                            #   schema as cluster_protein. `name:`
+  #                                            #   is REQUIRED (keys the output
+  #                                            #   filename) and must be unique across
+  #                                            #   ALL extra_protein entries in this
+  #                                            #   virus. Each entry emits an unaligned
+  #                                            #   FASTA into
+  #                                            #   {prefix}_extra_protein_fasta/, and
+  #                                            #   under --per-protein-phylo also a
+  #                                            #   tree into {prefix}_extra_protein/.
+  #                                            #   Sparse-by-design: specs that no rep
+  #                                            #   satisfies produce no file.
   # See config/examples/influenza_a.yaml for a worked example with
   # strain-aware list-valued counts.
   viruses: {}
@@ -241,6 +255,32 @@ clustering:
   # only define `aliases:` (no `hmms:`) are advisory selection hints; they
   # do not gate QC.
   cluster_protein: []
+
+  # Additional proteins to extract (and, with --per-protein-phylo, tree)
+  # but NOT use for clustering or the whole-genome tree. Same dict schema
+  # as cluster_protein — each entry is `{name, aliases?, hmms?}` — but the
+  # `name:` field is REQUIRED and must be unique across all entries in
+  # this list (it keys the output filename). Example:
+  #
+  #   extra_protein:
+  #     - {name: "Coronavirus protein 7",       aliases: [],     hmms: ["Corona_7"]}
+  #     - {name: "Coronavirus small envelope protein E",
+  #        aliases: ["E"], hmms: ["CoV_E"]}
+  #
+  # For every entry, the satisfying CDS (HMM-gated when `hmms:` is
+  # declared and the HMM tier ran; alias fallback against /product
+  # otherwise) is extracted from each representative and written
+  # unaligned to {prefix}_extra_protein_fasta/{prefix}_<name>.fasta —
+  # one file per entry. With --per-protein-phylo, each entry also
+  # produces a tree (MSA, Newick, phyloXML, id-map) under
+  # {prefix}_extra_protein/. extras are SPARSE BY DESIGN: a spec that
+  # no representative satisfies produces no file (no warning either —
+  # missing accessory proteins are expected). Names visible to the user
+  # come from `name:` verbatim, sanitised for the filesystem
+  # (whitespace → "_"). Segmented runs use the same key under
+  # `segmented.viruses.<v>.extra_protein:` as a per-segment dict (see
+  # `segmented.viruses` block above).
+  extra_protein: []
 
   # Diagnostic "diversity curve" reporting. For each stratum where the
   # binary-search clustering ran (clustered=TRUE in
@@ -358,6 +398,18 @@ hmm:
   # being accepted as full marker matches. Both cutoffs (E-value AND
   # coverage) must pass for an HMM hit to be considered passing.
   relative_length_cutoff: 0.5
+  # Multidomain-token overlap tolerance, in amino acids. For a token
+  # like "CoV_S1--CoV_S2" the named domains must appear N-to-C on the
+  # CDS with forward-progressing endpoints, but their boundaries may
+  # overlap by up to this many residues at the seam. Default 30 is
+  # comfortable for typical Pfam viral-glycoprotein profiles whose HMM
+  # boundaries don't land exactly on the molecular cleavage site (e.g.
+  # CoV S1/S2 across the furin site, bunya G1/G2). Set 0 to require
+  # strict non-overlap (pre-v0.22 behaviour). Full containment is
+  # ALWAYS rejected regardless of tolerance, so a single fused region
+  # cannot masquerade as two distinct domains by matching two profiles
+  # at the same span.
+  multidomain_overlap_tolerance: 30
   # null → use top-level cfg.threads.
   threads: null
 
@@ -598,3 +650,14 @@ phylo:
 output:
   dir: ./repseq_output
   prefix: repseq
+
+  # `{prefix}_protein_taxonomic_report.txt` controls. The file lists,
+  # per taxonomic rank (subgenus → class), how many isolates/sequences
+  # in each taxon carry each declared protein (`cluster_protein` and
+  # `extra_protein`) and the length stats (min/max/median/IQR aa) of
+  # those proteins. Ranks with more than `max_breakdown` distinct taxa
+  # are truncated to the top-N by member count with a "+N more taxa
+  # not shown" line, so the file stays readable on a terminal. Raise
+  # for publication runs where the full per-rank table is expected.
+  protein_report:
+    max_breakdown: 20

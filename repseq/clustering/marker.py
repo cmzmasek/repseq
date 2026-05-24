@@ -110,11 +110,14 @@ def _passing_hits(p: dict) -> list[dict]:
     return [h for h in (p.get("hmm_hits") or []) if h.get("passing")]
 
 
-def _cds_satisfies_any_token(p: dict, tokens: list[str]) -> Optional[str]:
+def _cds_satisfies_any_token(
+    p: dict, tokens: list[str], overlap_tolerance: int = 0,
+) -> Optional[str]:
     """Return the token string this CDS satisfies (any token), or None.
 
     Used by marker selection to pick the longest CDS satisfying at least
-    one token in the spec.
+    one token in the spec. ``overlap_tolerance`` is forwarded to
+    :func:`cds_satisfies_token`.
     """
     hits = p.get("hmm_hits") or []
     for token in tokens:
@@ -122,7 +125,9 @@ def _cds_satisfies_any_token(p: dict, tokens: list[str]) -> Optional[str]:
             parsed = parse_hmm_token(token)
         except ValueError:
             continue
-        if cds_satisfies_token(hits, parsed) is not None:
+        if cds_satisfies_token(
+            hits, parsed, overlap_tolerance=overlap_tolerance,
+        ) is not None:
             return token
     return None
 
@@ -169,6 +174,7 @@ def select_marker_protein(
 
     last_hmm_failure: Optional[MarkerFailure] = None
     any_alias_only_attempted = False
+    overlap_tol = int((hmm_cfg or {}).get("multidomain_overlap_tolerance", 30))
 
     for spec in specs:
         hmms = spec["hmms"]
@@ -176,7 +182,9 @@ def select_marker_protein(
             # HMM tier is authoritative for this spec.
             satisfying: list[dict] = []
             for p in with_seq:
-                if _cds_satisfies_any_token(p, hmms) is not None:
+                if _cds_satisfies_any_token(
+                    p, hmms, overlap_tolerance=overlap_tol,
+                ) is not None:
                     satisfying.append(p)
             if satisfying:
                 return max(satisfying, key=lambda p: len(p["sequence"])), None

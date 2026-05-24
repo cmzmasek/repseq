@@ -477,7 +477,7 @@ def test_incongruence_skipped_for_single_family(tmp_path):
 def test_raises_when_no_tokens_configured(tmp_path):
     cfg = _seg_cfg({})
     reps = [_concat_rep(f"iso{i}", {"S": _S_proteins()}) for i in range(3)]
-    with pytest.raises(PhyloError, match="no HMM marker tokens"):
+    with pytest.raises(PhyloError, match="nothing to build"):
         _run(reps, cfg, tmp_path)
 
 

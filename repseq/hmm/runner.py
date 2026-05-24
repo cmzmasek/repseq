@@ -205,6 +205,8 @@ def parse_hmm_token(token: str) -> list[str]:
 def cds_satisfies_token(
     hits: list[dict],
     token_hmms: list[str],
+    *,
+    overlap_tolerance: int = 0,
 ) -> Optional[float]:
     """Does this CDS's hit list satisfy the token? Returns the worst (largest)
     domain E-value across the satisfying hits on success, or ``None`` on
@@ -215,14 +217,25 @@ def cds_satisfies_token(
     The returned E-value is the worst-of-set so the caller can rank
     candidate CDSes "best E across the weakest required domain wins."
 
-    Ordering rule for multidomain tokens: the named domains must appear in
+    Ordering rule for multidomain tokens — named domains must appear in
     N-to-C order along the CDS (token's first HMM is N-terminal). For each
-    consecutive pair (Hi, Hi+1) we require ``Hi.ali_to < Hi+1.ali_from`` —
-    strict non-overlap, with Hi strictly N-terminal to Hi+1. If a domain has
-    multiple passing hits, we pick the best (lowest E-value) hit that still
-    satisfies the order constraint via a greedy left-to-right walk; the
-    walk only fails if no consistent assignment exists. Extra hits to HMMs
-    not named in the token are ignored.
+    consecutive pair (Hi, Hi+1) we require:
+
+    * ``Hi.ali_to <= Hi+1.ali_from + overlap_tolerance`` — boundaries may
+      overlap by up to ``overlap_tolerance`` residues (default 0 → strict
+      non-overlap, the pre-v0.22 behaviour). The tolerance accommodates
+      Pfam profile boundaries that don't quite align to the molecular
+      cleavage site (e.g. coronavirus S1/S2 across the furin site).
+    * ``Hi+1.ali_from > Hi.ali_from`` AND ``Hi+1.ali_to > Hi.ali_to`` —
+      strict forward progression of both endpoints. This rejects full
+      containment and prevents a single fused region from masquerading
+      as two distinct domains by matching the two profiles at the same
+      span, regardless of how generous ``overlap_tolerance`` is.
+
+    If a domain has multiple passing hits, we pick the *most-N-terminal*
+    hit that still satisfies the order constraint via a greedy left-to-
+    right walk; the walk only fails if no consistent assignment exists.
+    Extra hits to HMMs not named in the token are ignored.
     """
     if not token_hmms:
         return None
@@ -238,23 +251,30 @@ def cds_satisfies_token(
             return None
     if len(token_hmms) == 1:
         # Single-HMM token: pick the best hit and return its E-value.
+        # overlap_tolerance is irrelevant — there are no neighbours to overlap.
         best = min(by_target[token_hmms[0]], key=lambda h: h["dom_evalue"])
         return float(best["dom_evalue"])
-    # Multidomain: assign one hit per named HMM s.t. the N-to-C order
-    # holds (hit_i.ali_to < hit_{i+1}.ali_from for all consecutive i, i+1).
-    # The token is already written N→C, so walk it left-to-right (most-
-    # N-terminal first); at each step pick the *most-N-terminal* passing hit
-    # whose ali_from is strictly greater than the previous hit's ali_to.
+    # Multidomain: walk the token N→C, at each step picking the most-N-
+    # terminal hit consistent with the prior pick under the tolerance rule.
     chosen: list[dict] = []
-    prev_to = -1  # ali_to of the previously-placed (more N-terminal) hit
+    prev_from = -1  # ali_from of the previously-placed (more N-terminal) hit
+    prev_to = -1    # ali_to of the same
     for name in token_hmms:
-        # Candidate hits whose ali_from is strictly C-terminal to prev_to.
-        candidates = [h for h in by_target[name] if h["ali_from"] > prev_to]
+        # Candidates that progress forward on both endpoints AND don't
+        # overlap the prior hit by more than the tolerance.
+        candidates = [
+            h for h in by_target[name]
+            if h["ali_from"] > prev_from
+            and h["ali_to"] > prev_to
+            and h["ali_to"] - h["ali_from"] >= 0  # well-formed; defensive
+            and (prev_to < 0 or h["ali_from"] >= prev_to - overlap_tolerance + 1)
+        ]
         if not candidates:
             return None
         # Pick the candidate with the smallest ali_to (leaves the most room
         # for subsequent more-C-terminal hits).
         pick = min(candidates, key=lambda h: h["ali_to"])
         chosen.append(pick)
+        prev_from = pick["ali_from"]
         prev_to = pick["ali_to"]
     return float(max(h["dom_evalue"] for h in chosen))

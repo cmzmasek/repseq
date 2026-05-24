@@ -138,12 +138,94 @@ def test_multidomain_fails_when_order_is_reversed():
 
 
 def test_multidomain_fails_on_overlap():
-    """Strict non-overlap required between named domains."""
+    """Default tolerance (0) — strict non-overlap required between named domains."""
     hits = [
         _hit("Bunya_G2", 1, 400),
-        _hit("Bunya_G1", 300, 700),  # overlaps with G2
+        _hit("Bunya_G1", 300, 700),  # overlaps with G2 by 101 aa
     ]
     assert cds_satisfies_token(hits, ["Bunya_G2", "Bunya_G1"]) is None
+
+
+def test_multidomain_tolerance_zero_rejects_one_aa_overlap():
+    """overlap_tolerance=0 reproduces strict-non-overlap behaviour."""
+    hits = [
+        _hit("Bunya_G2", 1, 400),
+        _hit("Bunya_G1", 400, 700),  # 1-aa overlap (position 400 shared)
+    ]
+    assert cds_satisfies_token(
+        hits, ["Bunya_G2", "Bunya_G1"], overlap_tolerance=0,
+    ) is None
+
+
+def test_multidomain_tolerance_accepts_small_overlap_at_boundary():
+    """A typical Pfam-boundary fuzz case: 10-residue overlap at the seam,
+    well within a 30-aa tolerance."""
+    hits = [
+        _hit("Bunya_G2", 1, 400, dom_evalue=1e-40),
+        _hit("Bunya_G1", 391, 700, dom_evalue=1e-30),  # 10-aa overlap
+    ]
+    result = cds_satisfies_token(
+        hits, ["Bunya_G2", "Bunya_G1"], overlap_tolerance=30,
+    )
+    assert result == 1e-30
+
+
+def test_multidomain_tolerance_accepts_exact_threshold_overlap():
+    """Boundary case: overlap equal to the tolerance is still accepted."""
+    hits = [
+        _hit("Bunya_G2", 1, 400, dom_evalue=1e-40),
+        _hit("Bunya_G1", 371, 700, dom_evalue=1e-30),  # 30-aa overlap
+    ]
+    result = cds_satisfies_token(
+        hits, ["Bunya_G2", "Bunya_G1"], overlap_tolerance=30,
+    )
+    assert result == 1e-30
+
+
+def test_multidomain_tolerance_rejects_overlap_beyond_threshold():
+    """Overlap larger than the tolerance is still rejected."""
+    hits = [
+        _hit("Bunya_G2", 1, 400),
+        _hit("Bunya_G1", 350, 700),  # 51-aa overlap
+    ]
+    assert cds_satisfies_token(
+        hits, ["Bunya_G2", "Bunya_G1"], overlap_tolerance=30,
+    ) is None
+
+
+def test_multidomain_tolerance_rejects_full_containment():
+    """Full containment is always rejected — forward progression requires
+    ali_from(i+1) > ali_from(i) AND ali_to(i+1) > ali_to(i), so a single
+    fused region matching both profiles cannot masquerade as two domains
+    regardless of how generous the tolerance is."""
+    hits = [
+        _hit("Bunya_G2", 1, 800),    # outer hit
+        _hit("Bunya_G1", 100, 700),  # fully contained inside G2
+    ]
+    assert cds_satisfies_token(
+        hits, ["Bunya_G2", "Bunya_G1"], overlap_tolerance=1000,
+    ) is None
+
+
+def test_multidomain_tolerance_rejects_same_span():
+    """Two profiles hitting the exact same span are rejected even under a
+    huge tolerance — the second hit doesn't progress forward."""
+    hits = [
+        _hit("Bunya_G2", 1, 500),
+        _hit("Bunya_G1", 1, 500),
+    ]
+    assert cds_satisfies_token(
+        hits, ["Bunya_G2", "Bunya_G1"], overlap_tolerance=1000,
+    ) is None
+
+
+def test_multidomain_tolerance_ignored_for_single_hmm_token():
+    """A single-HMM token has no neighbour to overlap with; tolerance is
+    a no-op there."""
+    hits = [_hit("RdRP_4", 1, 500, dom_evalue=1e-30)]
+    # Both tolerance=0 and tolerance=30 should return the same E-value.
+    assert cds_satisfies_token(hits, ["RdRP_4"], overlap_tolerance=0) == 1e-30
+    assert cds_satisfies_token(hits, ["RdRP_4"], overlap_tolerance=30) == 1e-30
 
 
 def test_multidomain_fails_when_one_hmm_missing():

@@ -147,6 +147,18 @@ DEFAULTS: dict[str, Any] = {
         # that matches a CDS wins; if no aliases match (or the list is
         # empty), the longest CDS on the sequence is used.
         "cluster_protein": [],
+        # Additional proteins to extract and (optionally) phylogenize but
+        # NOT use for clustering or the whole-genome tree. Same schema as
+        # cluster_protein (list of {name, aliases?, hmms?} dicts). For
+        # every entry, a single CDS per representative (HMM-gated when
+        # `hmms` is declared and the HMM tier ran; alias fallback against
+        # /product otherwise) is written to
+        # {prefix}_extra_protein_fasta/{prefix}_<name>.fasta. With
+        # --per-protein-phylo, one tree per entry is also emitted into
+        # {prefix}_extra_protein/. Intended for proteins that are sparse
+        # across taxa (e.g. coronavirus ORF7) — clustering them would
+        # systematically drop representatives that lack the protein.
+        "extra_protein": [],
         # Diagnostic: for each stratum where binary-search clustering ran,
         # also run the clustering backend at each of these identity
         # thresholds and report the cluster count as additional columns
@@ -211,6 +223,19 @@ DEFAULTS: dict[str, Any] = {
         # Guards against tiny single-domain hits being accepted as full
         # marker matches. Range (0, 1].
         "relative_length_cutoff": 0.5,
+        # Multidomain-token overlap tolerance, in amino acids. Consecutive
+        # named domains in an N-to-C token (`A--B--C`) may overlap by up
+        # to this many residues at their boundary AND still satisfy the
+        # token. The walk also requires forward progression — the next
+        # hit must start strictly C-terminal to the prior hit's start AND
+        # end strictly C-terminal to the prior hit's end — so a single
+        # fused region can never masquerade as two domains, and full
+        # containment is always rejected. Set 0 for strict non-overlap
+        # (pre-v0.22 behaviour). 30 (default) is comfortable for typical
+        # Pfam viral-glycoprotein profiles whose boundaries don't align
+        # exactly to the molecular cleavage site (e.g. coronavirus
+        # S1/S2 across the furin site, bunya G1/G2).
+        "multidomain_overlap_tolerance": 30,
         # null = use cfg.threads.
         "threads": None,
     },
@@ -457,6 +482,14 @@ DEFAULTS: dict[str, Any] = {
     "output": {
         "dir": "./repseq_output",
         "prefix": "repseq",
+        # {prefix}_protein_taxonomic_report.txt — protein coverage and length
+        # statistics per taxonomic rank (subgenus → class). max_breakdown caps
+        # the rows per rank table; extra taxa are summarised on a "+N more"
+        # line so column widths stay readable on a terminal. Set higher for
+        # publication runs where the full per-rank table is expected.
+        "protein_report": {
+            "max_breakdown": 20,
+        },
     },
 }
 
@@ -862,6 +895,65 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                         sm, virus_name, set(vdef.get("segments", []))
                     ))
 
+                ep = vdef.get("extra_protein")
+                if ep is not None:
+                    if not isinstance(ep, dict):
+                        errors.append(
+                            f"segmented.viruses.{virus_name}.extra_protein "
+                            f"must be a mapping of segment-name → list of "
+                            f"{{name, aliases?, hmms?}} dicts"
+                        )
+                    else:
+                        seg_names = set(vdef.get("segments", []))
+                        seen_extra: set[str] = set()
+                        for seg_name, entries in ep.items():
+                            if seg_name not in seg_names:
+                                errors.append(
+                                    f"segmented.viruses.{virus_name}."
+                                    f"extra_protein: unknown segment "
+                                    f"'{seg_name}'"
+                                )
+                            if not isinstance(entries, list):
+                                errors.append(
+                                    f"segmented.viruses.{virus_name}."
+                                    f"extra_protein.{seg_name} must be a "
+                                    f"list of {{name, aliases?, hmms?}} dicts"
+                                )
+                                continue
+                            for j, entry in enumerate(entries):
+                                ipath = (
+                                    f"segmented.viruses.{virus_name}."
+                                    f"extra_protein.{seg_name}[{j}]"
+                                )
+                                if isinstance(entry, str):
+                                    errors.append(
+                                        f"{ipath} must be a dict "
+                                        f"{{name, aliases?, hmms?}}, not a "
+                                        f"bare alias string"
+                                    )
+                                    continue
+                                errors.extend(
+                                    _validate_marker_entry(entry, ipath)
+                                )
+                                if isinstance(entry, dict):
+                                    nm = (entry.get("name") or "").strip()
+                                    if nm:
+                                        # Names must be unique across the
+                                        # whole virus (not just within one
+                                        # segment) — the output basename is
+                                        # the name alone, no segment prefix.
+                                        key = nm.lower()
+                                        if key in seen_extra:
+                                            errors.append(
+                                                f"{ipath}: duplicate name "
+                                                f"'{nm}' — extra_protein "
+                                                f"names must be unique "
+                                                f"across all segments "
+                                                f"(they key the output "
+                                                f"filenames)"
+                                            )
+                                        seen_extra.add(key)
+
                 epps = vdef.get("expected_proteins_per_segment")
                 if epps is not None:
                     if not isinstance(epps, dict):
@@ -977,6 +1069,39 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             errors.extend(
                 _validate_marker_entry(entry, f"clustering.cluster_protein[{i}]")
             )
+
+    extra_protein_global = cfg.get("clustering", {}).get("extra_protein", [])
+    if not isinstance(extra_protein_global, list):
+        errors.append(
+            "clustering.extra_protein must be a list of "
+            "{name, aliases?, hmms?} dicts"
+        )
+    else:
+        seen_extra_names: set[str] = set()
+        for i, entry in enumerate(extra_protein_global):
+            # extra_protein entries MUST be dicts with a name — they drive
+            # output filenames, so a bare alias string (which has no name)
+            # has nothing to key the artifact on.
+            if isinstance(entry, str):
+                errors.append(
+                    f"clustering.extra_protein[{i}] must be a dict "
+                    f"{{name, aliases?, hmms?}}, not a bare alias string"
+                )
+                continue
+            errors.extend(
+                _validate_marker_entry(entry, f"clustering.extra_protein[{i}]")
+            )
+            if isinstance(entry, dict):
+                name = (entry.get("name") or "").strip()
+                if name:
+                    key = name.lower()
+                    if key in seen_extra_names:
+                        errors.append(
+                            f"clustering.extra_protein[{i}]: duplicate name "
+                            f"'{name}' — extra_protein names must be unique "
+                            f"(they key the output filenames)"
+                        )
+                    seen_extra_names.add(key)
 
     diversity_cutoffs = cfg.get("clustering", {}).get("diversity_curve_cutoffs", [])
     if not isinstance(diversity_cutoffs, list):
@@ -1229,6 +1354,12 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         errors.append(
             "hmm.threads must be null (use cfg.threads) or a positive integer"
         )
+    mot = hmm.get("multidomain_overlap_tolerance", 30)
+    if not isinstance(mot, int) or isinstance(mot, bool) or mot < 0:
+        errors.append(
+            "hmm.multidomain_overlap_tolerance must be a non-negative integer "
+            "(amino acids; 0 = strict non-overlap, 30 = default)"
+        )
 
     # Representative priority
     priority = cfg.get("representative", {}).get("priority", [])
@@ -1241,6 +1372,17 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             )
     if "longest" not in priority:
         errors.append("representative.priority must include 'longest' as a fallback")
+
+    pr_cfg = cfg.get("output", {}).get("protein_report", {}) or {}
+    max_breakdown = pr_cfg.get("max_breakdown", 20)
+    if (
+        not isinstance(max_breakdown, int)
+        or isinstance(max_breakdown, bool)
+        or max_breakdown < 1
+    ):
+        errors.append(
+            "output.protein_report.max_breakdown must be a positive integer"
+        )
 
     return errors
 

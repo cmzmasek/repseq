@@ -392,6 +392,177 @@ def write_proteins_fasta(
     return True
 
 
+def _pick_marker_cds(
+    proteins: list[dict],
+    hmm_tokens: list[str],
+    aliases: list[str],
+    hmm_active: bool,
+    *,
+    overlap_tolerance: int = 0,
+) -> Optional[dict]:
+    """Back-compat shim; delegates to :func:`phylo.per_protein.pick_marker_cds`.
+
+    Both writers and the tree-builder share the same picker so a FASTA
+    record and the corresponding tree leaf always carry the same CDS.
+    """
+    from ..phylo.per_protein import pick_marker_cds
+    return pick_marker_cds(
+        proteins, hmm_tokens, aliases, hmm_active,
+        overlap_tolerance=overlap_tolerance,
+    )
+
+
+def _write_specs_to_fastas(
+    specs: list[tuple[str, list[str], list[str], Optional[str]]],
+    result: RunResult,
+    cfg: dict[str, Any],
+    sub_dir: Path,
+    prefix: str,
+    label: str,
+) -> list[Path]:
+    """Emit one unaligned protein FASTA per spec under ``sub_dir``.
+
+    Shared engine for ``write_per_protein_fastas`` (cluster_protein /
+    segment_markers) and ``write_extra_protein_fastas`` (extra_protein).
+    Spec format: ``(family_label, hmm_tokens, aliases, segment_or_None)``.
+    ``label`` is used only in the soft-fail stderr line.
+
+    Filename: ``{sub_dir}/{prefix}_{family_label}.fasta`` — the prefix
+    inside the basename matches the existing improvement-#1 pattern and
+    survives a flat-copy out of the subdirectory unambiguously.
+    """
+    from ..phylo.per_protein import (
+        _hmm_tier_ran,
+        _segment_proteins,
+        overlap_tolerance_from_cfg,
+    )
+
+    if not specs:
+        return []
+
+    hmm_active = _hmm_tier_ran(cfg, result.representatives)
+    tol = overlap_tolerance_from_cfg(cfg)
+    # Soft-fail: every spec needs HMM but the HMM tier didn't run.
+    if not hmm_active and all(t and not a for _, t, a, _ in specs):
+        sys.stderr.write(
+            f"[{label} FASTA skipped] HMM tier did not run this session "
+            f"and every configured spec is HMM-only — no FASTAs to write\n"
+        )
+        return []
+
+    written: list[Path] = []
+    for family_label, hmm_tokens, aliases, segment in specs:
+        records: list[tuple[Optional[str], Sequence, dict]] = []
+        for rep in result.representatives:
+            # Pick the parent Sequence the CDS lives on so its segment/
+            # accession/host/etc. drive the FASTA header tags.
+            if segment is None:
+                parent = rep
+                isolate_id = rep.isolate_id
+            else:
+                parent = None
+                for seg in rep.concat_segments or []:
+                    if seg.segment == segment:
+                        parent = seg
+                        break
+                if parent is None and rep.segment == segment:
+                    parent = rep
+                if parent is None:
+                    continue
+                isolate_id = parent.isolate_id or rep.isolate_id
+                if not isolate_id and rep.id.startswith("CONCAT|"):
+                    parts = rep.id.split("|")
+                    if len(parts) > 1:
+                        isolate_id = parts[1]
+
+            proteins = _segment_proteins(rep, segment) if segment else (rep.proteins or [])
+            cds = _pick_marker_cds(
+                proteins, hmm_tokens, aliases, hmm_active,
+                overlap_tolerance=tol,
+            )
+            if cds is None:
+                continue
+            records.append((isolate_id, parent, cds))
+
+        if not records:
+            continue
+
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        path = sub_dir / f"{prefix}_{family_label}.fasta"
+        with open(path, "w") as fh:
+            for iso_id, parent_seq, cds in records:
+                _write_protein_fasta_record(fh, cds, parent_seq, iso_id)
+        written.append(path)
+
+    return written
+
+
+def write_per_protein_fastas(
+    result: RunResult,
+    cfg: dict[str, Any],
+    complete_isolates: Optional[dict[str, list[Sequence]]],
+    out_dir: Path,
+    prefix: str,
+) -> list[Path]:
+    """Always-on unaligned protein FASTAs, one per declared marker spec.
+
+    For each entry in ``clustering.cluster_protein`` (non-segmented) or
+    ``virus.segment_markers`` / ``virus.cluster_protein`` (segmented), pick
+    the satisfying CDS from each representative and write all such CDS to
+    ``{prefix}_per_protein_fasta/{prefix}_{family}.fasta``. CDS selection
+    uses the HMM gate when ``hmms:`` is declared AND the HMM tier ran
+    (same logic as ``--per-protein-phylo``); for alias-only specs (or
+    HMM-off runs on alias-bearing specs) it falls back to alias matching
+    against ``/product``.
+
+    Headers are byte-identical to the ``_representative_isolate_proteins.fasta``
+    / ``_representative_sequence_proteins.fasta`` writer
+    (:func:`_write_protein_fasta_record`), so a Spike record in the
+    per-protein file and in the all-protein file carry the same tags.
+
+    Specs that no representative satisfies (empty file) are skipped.
+    When the HMM tier didn't run AND every spec is HMM-only, prints a
+    soft-fail stderr note and returns ``[]``.
+    """
+    from ..phylo.per_protein import collect_marker_specs
+
+    return _write_specs_to_fastas(
+        collect_marker_specs(cfg),
+        result, cfg,
+        out_dir / f"{prefix}_per_protein_fasta",
+        prefix, "per-protein",
+    )
+
+
+def write_extra_protein_fastas(
+    result: RunResult,
+    cfg: dict[str, Any],
+    complete_isolates: Optional[dict[str, list[Sequence]]],
+    out_dir: Path,
+    prefix: str,
+) -> list[Path]:
+    """Always-on unaligned protein FASTAs for ``extra_protein`` specs.
+
+    Parallel to :func:`write_per_protein_fastas` but driven by
+    ``clustering.extra_protein`` (non-segmented) / ``virus.extra_protein``
+    (segmented). These proteins are NOT used for clustering or the
+    whole-genome tree — they may be sparse across representatives, and
+    that is fine: a spec that no rep satisfies simply produces no file.
+
+    Output lives under ``{prefix}_extra_protein_fasta/`` so it's visually
+    distinct from the marker-driven per-protein FASTAs. Headers and CDS
+    selection chain are identical (HMM-first, alias-fallback).
+    """
+    from ..phylo.per_protein import collect_extra_specs
+
+    return _write_specs_to_fastas(
+        collect_extra_specs(cfg),
+        result, cfg,
+        out_dir / f"{prefix}_extra_protein_fasta",
+        prefix, "extra-protein",
+    )
+
+
 _TAX_RANKS = (
     "species",
     "subgenus",
@@ -785,6 +956,435 @@ def write_taxonomic_report(
     path.write_text("\n".join(lines).rstrip() + "\n")
 
 
+# Ranks for the protein taxonomic report — `_TAX_RANKS` without ``species``.
+# Species-level diversity is reported in `_taxonomic_report.txt`; the protein
+# report starts at subgenus where coverage gaps between marker and accessory
+# proteins actually start to inform biology (within a species you'd expect
+# every isolate to carry every protein, modulo CDS-annotation noise).
+_PROTEIN_REPORT_RANKS = tuple(r for r in _TAX_RANKS if r != "species")
+
+
+def _protein_report_specs(
+    cfg: dict[str, Any],
+) -> list[tuple[str, list[str], list[str], Optional[str], bool]]:
+    """Specs in the order the protein report's columns will appear.
+
+    Returns ``[(family_label, hmm_tokens, aliases, segment_or_None,
+    is_cluster), …]`` — cluster_protein / segment_markers entries first
+    (rendered with a trailing ``*`` in the header to flag "drives the
+    clustering and the whole-genome tree"), then extra_protein entries
+    in declaration order.
+    """
+    from ..phylo.per_protein import collect_extra_specs, collect_marker_specs
+
+    specs: list[tuple[str, list[str], list[str], Optional[str], bool]] = []
+    for label, tokens, aliases, segment in collect_marker_specs(cfg):
+        specs.append((label, tokens, aliases, segment, True))
+    for label, tokens, aliases, segment in collect_extra_specs(cfg):
+        specs.append((label, tokens, aliases, segment, False))
+    return specs
+
+
+def _proteins_at_segment(seq: Sequence, segment: Optional[str]) -> list[dict]:
+    """Proteins to search for ``seq`` under a spec's ``segment`` scope.
+
+    Non-segmented (``segment is None``): the sequence's own ``proteins``.
+    Segmented: the matching entry in ``concat_segments``; falls back to
+    the sequence itself if it directly carries that segment label
+    (resilient against non-CONCAT segmented input).
+    """
+    if segment is None:
+        return seq.proteins or []
+    for sub in seq.concat_segments or []:
+        if sub.segment == segment:
+            return sub.proteins or []
+    if seq.segment == segment:
+        return seq.proteins or []
+    return []
+
+
+def _quartile_summary(values: list[int]) -> Optional[tuple[int, int, int, int, int]]:
+    """``(min, max, median, Q3-Q1, n)`` for a list of ints, or ``None`` if empty.
+
+    Q3-Q1 (IQR) is the third minus first quartile of the distribution.
+    ``statistics.quantiles`` requires n>=2; for a single value the IQR is
+    zero by definition (one-point distribution). ``n`` is the sample
+    size so the user can judge how trustworthy the quartiles are.
+    """
+    if not values:
+        return None
+    import statistics
+
+    vmin = min(values)
+    vmax = max(values)
+    median = int(round(statistics.median(values)))
+    if len(values) >= 2:
+        q1, _q2, q3 = statistics.quantiles(values, n=4)
+        iqr = int(round(q3 - q1))
+    else:
+        iqr = 0
+    return vmin, vmax, median, iqr, len(values)
+
+
+def _format_coverage_cell(count: int, total: int) -> str:
+    """Render one (count, total) coverage cell as ``"<count> <pct>%"``.
+
+    ``total == 0`` is the "no items in this taxon" case (shouldn't happen
+    in practice — taxa are derived from the same items being counted —
+    but guarded so a division-by-zero can't void the report).
+    """
+    if total <= 0:
+        return f"{count} ---"
+    pct = round(100.0 * count / total)
+    return f"{count} {pct}%"
+
+
+def _format_length_cell(stats: Optional[tuple[int, int, int, int, int]]) -> str:
+    """Render a ``(min, max, median, Q3-Q1, n)`` cell, or ``"n/a"`` when empty."""
+    if stats is None:
+        return "n/a"
+    vmin, vmax, median, iqr, n = stats
+    return f"{vmin}, {vmax}, {median}, {iqr}, {n}"
+
+
+def _coverage_data_per_taxon(
+    seqs: list[Sequence],
+    specs: list[tuple[str, list[str], list[str], Optional[str], bool]],
+    hmm_active: bool,
+    rank: str,
+    overlap_tolerance: int = 0,
+) -> tuple[dict[str, int], dict[str, list[list[int]]]]:
+    """For each taxon at ``rank``, count items and gather per-spec AA lengths.
+
+    Returns ``(taxon_totals, taxon_lengths)``:
+
+    * ``taxon_totals[taxon]`` = number of items in that taxon (the
+      denominator of the coverage percentage).
+    * ``taxon_lengths[taxon][spec_idx]`` = list of AA lengths of the
+      satisfying CDS, one per item that carries the spec. Items without
+      a satisfying CDS contribute *nothing* to the list (so the count
+      from ``len(taxon_lengths[t][i])`` is the numerator of coverage).
+
+    Items whose taxonomy lacks a value at ``rank`` are excluded (mirrors
+    ``_taxonomic_report.txt`` behaviour). The picker chain is the same
+    one used for the per-protein FASTAs and trees, so a coverage hit
+    here corresponds exactly to a record in the matching artifact.
+    """
+    from ..phylo.per_protein import pick_marker_cds
+
+    taxon_totals: dict[str, int] = {}
+    taxon_lengths: dict[str, list[list[int]]] = {}
+    n_specs = len(specs)
+
+    for seq in seqs:
+        taxon = _seq_rank_value(seq, rank)
+        if not taxon:
+            continue
+        taxon_totals[taxon] = taxon_totals.get(taxon, 0) + 1
+        if taxon not in taxon_lengths:
+            taxon_lengths[taxon] = [[] for _ in range(n_specs)]
+        for i, (_label, tokens, aliases, segment, _is_cluster) in enumerate(specs):
+            proteins = _proteins_at_segment(seq, segment)
+            cds = pick_marker_cds(
+                proteins, tokens, aliases, hmm_active,
+                overlap_tolerance=overlap_tolerance,
+            )
+            if cds is None:
+                continue
+            seq_str = cds.get("sequence") or ""
+            length = cds.get("length") or len(seq_str)
+            if not length:
+                continue
+            taxon_lengths[taxon][i].append(int(length))
+
+    return taxon_totals, taxon_lengths
+
+
+def _format_coverage_table(
+    indent: str,
+    title: str,
+    totals: dict[str, int],
+    lengths: dict[str, list[list[int]]],
+    spec_headers: list[str],
+    max_breakdown: int,
+) -> list[str]:
+    """Render one coverage sub-table.
+
+    Sorted by ``total`` desc (matches ``_taxonomic_report.txt``); ranks
+    with more than ``max_breakdown`` distinct taxa get a ``"+N more taxa
+    not shown"`` summary line so the column widths stay terminal-friendly.
+    """
+    lines: list[str] = [f"{indent}{title}"]
+    # Truncate by member count (the rank header advertises "top N by
+    # member count") so a long-tail rank doesn't drop high-count taxa
+    # just for being late in the alphabet; then sort the kept taxa
+    # alphabetically for display.
+    taxa = sorted(totals, key=lambda t: (-totals[t], t))
+    truncated = 0
+    if len(taxa) > max_breakdown:
+        truncated = len(taxa) - max_breakdown
+        taxa = taxa[:max_breakdown]
+    taxa = sorted(taxa)
+    if not taxa:
+        lines.append(f"{indent}  (no taxa)")
+        return lines
+
+    cells: dict[tuple[str, int], str] = {}
+    for taxon in taxa:
+        total = totals[taxon]
+        for i, _h in enumerate(spec_headers):
+            count = len(lengths[taxon][i])
+            cells[(taxon, i)] = _format_coverage_cell(count, total)
+
+    taxon_w = max(max(len(t) for t in taxa), len("taxon"))
+    count_w = max(max(len(str(totals[t])) for t in taxa), len("count"))
+    spec_ws: list[int] = []
+    for i, header in enumerate(spec_headers):
+        w = max(
+            len(header),
+            *(len(cells[(t, i)]) for t in taxa),
+        )
+        spec_ws.append(w)
+
+    sub_indent = indent + "  "
+    header_parts = [f"{'taxon':<{taxon_w}}", f"{'count':>{count_w}}"]
+    for i, header in enumerate(spec_headers):
+        header_parts.append(f"{header:>{spec_ws[i]}}")
+    header_line = "  ".join(header_parts)
+    lines.append(sub_indent + header_line)
+    lines.append(sub_indent + "-" * len(header_line))
+    for taxon in taxa:
+        row_parts = [f"{taxon:<{taxon_w}}", f"{totals[taxon]:>{count_w}}"]
+        for i in range(len(spec_headers)):
+            row_parts.append(f"{cells[(taxon, i)]:>{spec_ws[i]}}")
+        lines.append(sub_indent + "  ".join(row_parts))
+    if truncated:
+        lines.append(sub_indent + f"... +{truncated} more taxa not shown")
+    return lines
+
+
+def _format_length_table(
+    indent: str,
+    title: str,
+    totals: dict[str, int],
+    lengths: dict[str, list[list[int]]],
+    spec_headers: list[str],
+    max_breakdown: int,
+) -> list[str]:
+    """Render one length-statistics sub-table (``min, max, median, Q3-Q1, n``)."""
+    lines: list[str] = [f"{indent}{title}"]
+    # Same truncate-then-alphabetise pattern as the coverage table —
+    # see _format_coverage_table for rationale.
+    taxa = sorted(totals, key=lambda t: (-totals[t], t))
+    truncated = 0
+    if len(taxa) > max_breakdown:
+        truncated = len(taxa) - max_breakdown
+        taxa = taxa[:max_breakdown]
+    taxa = sorted(taxa)
+    if not taxa:
+        lines.append(f"{indent}  (no taxa)")
+        return lines
+
+    cells: dict[tuple[str, int], str] = {}
+    for taxon in taxa:
+        for i in range(len(spec_headers)):
+            cells[(taxon, i)] = _format_length_cell(
+                _quartile_summary(lengths[taxon][i])
+            )
+
+    taxon_w = max(max(len(t) for t in taxa), len("taxon"))
+    spec_ws: list[int] = []
+    for i, header in enumerate(spec_headers):
+        w = max(
+            len(header),
+            *(len(cells[(t, i)]) for t in taxa),
+        )
+        spec_ws.append(w)
+
+    sub_indent = indent + "  "
+    header_parts = [f"{'taxon':<{taxon_w}}"]
+    for i, header in enumerate(spec_headers):
+        header_parts.append(f"{header:>{spec_ws[i]}}")
+    header_line = "  ".join(header_parts)
+    lines.append(sub_indent + header_line)
+    lines.append(sub_indent + "-" * len(header_line))
+    for taxon in taxa:
+        row_parts = [f"{taxon:<{taxon_w}}"]
+        for i in range(len(spec_headers)):
+            row_parts.append(f"{cells[(taxon, i)]:>{spec_ws[i]}}")
+        lines.append(sub_indent + "  ".join(row_parts))
+    if truncated:
+        lines.append(sub_indent + f"... +{truncated} more taxa not shown")
+    return lines
+
+
+def _format_hmm_architecture_section(
+    specs: list[tuple[str, list[str], list[str], Optional[str], bool]],
+    cfg: dict[str, Any],
+) -> list[str]:
+    """Architecture + cutoff-policy summary for HMM-bearing specs."""
+    hmm_specs = [s for s in specs if s[1]]  # non-empty hmm_tokens
+    if not hmm_specs:
+        return []
+
+    hmm_cfg = cfg.get("hmm", {}) or {}
+    use_ga = bool(hmm_cfg.get("use_ga_when_available", True))
+    default_e = hmm_cfg.get("default_evalue", 1.0e-5)
+    rel_len = hmm_cfg.get("relative_length_cutoff", 0.5)
+    cutoff_summary = (
+        f"GA cutoffs when available, else E≤{default_e:g}"
+        if use_ga else f"E≤{default_e:g}"
+    )
+
+    lines: list[str] = []
+    lines.append("== HMM marker architectures ==")
+    lines.append("")
+    lines.append(
+        "Tokens within a spec are alternative architectures (OR): a CDS "
+        "satisfying ANY token satisfies the spec. Multidomain tokens "
+        "(\"A--B--C\") list HMMs in N-to-C order on the protein."
+    )
+    lines.append("")
+    for label, tokens, _aliases, segment, is_cluster in hmm_specs:
+        star = "*" if is_cluster else ""
+        scope = f" (segment {segment})" if segment else ""
+        joined = " OR ".join(tokens) if len(tokens) > 1 else tokens[0]
+        lines.append(f"{label}{star}{scope}: {joined}")
+        lines.append(f"  ({cutoff_summary}; coverage ≥ {rel_len:g})")
+    lines.append("")
+    return lines
+
+
+def write_protein_taxonomic_report(
+    before_seqs: list[Sequence],
+    after_seqs: list[Sequence],
+    cfg: dict[str, Any],
+    segmented: bool,
+    path: Path,
+) -> bool:
+    """Write ``{prefix}_protein_taxonomic_report.txt``.
+
+    For each rank from ``subgenus`` up to ``class`` (skipping
+    ``species`` — within-species coverage gaps are dominated by
+    annotation noise, not biology), emits two coverage sub-tables
+    (post-QC pool + representatives) and two length-statistics
+    sub-tables for every declared protein. Cluster-driving markers
+    (``cluster_protein`` / ``segment_markers``) get a trailing ``*``
+    in the header — they participate in clustering AND the
+    whole-genome tree. ``extra_protein`` entries follow.
+
+    Returns False (writes nothing) when no specs are configured —
+    the file would carry only structural noise. The picker chain
+    matches the per-protein/extra-protein FASTAs and trees so a
+    coverage hit here corresponds exactly to a record in those
+    artifacts.
+    """
+    from ..phylo.per_protein import _hmm_tier_ran, overlap_tolerance_from_cfg
+
+    specs = _protein_report_specs(cfg)
+    if not specs:
+        return False
+
+    pr_cfg = cfg.get("output", {}).get("protein_report", {}) or {}
+    max_breakdown = int(pr_cfg.get("max_breakdown", 20))
+
+    hmm_active = _hmm_tier_ran(cfg, after_seqs)
+    tol = overlap_tolerance_from_cfg(cfg)
+    spec_headers = [
+        f"{label}{'*' if is_cluster else ''}"
+        for label, _t, _a, _s, is_cluster in specs
+    ]
+    unit = "isolates" if segmented else "sequences"
+
+    lines: list[str] = []
+    lines.append("Protein taxonomic report")
+    lines.append(f"Generated: {datetime.date.today().isoformat()}")
+    lines.append(
+        f"Counting unit: {unit} "
+        f"(post-QC pool fed to clustering = {len(before_seqs)} {unit}; "
+        f"representatives = {len(after_seqs)} {unit})"
+    )
+    lines.append(
+        "Coverage cell format: <count> <%>; length cell format: "
+        "min, max, median, Q3-Q1, n (amino acids; n = number of "
+        "items contributing the length)."
+    )
+    lines.append(
+        "An asterisk (*) marks proteins also used for clustering and the "
+        "whole-genome tree; the rest are accessory proteins declared via "
+        "`extra_protein:` and reported here only."
+    )
+    lines.append("")
+
+    rank_printed_any = False
+    for rank in _PROTEIN_REPORT_RANKS:
+        b_totals, b_lengths = _coverage_data_per_taxon(
+            before_seqs, specs, hmm_active, rank, overlap_tolerance=tol,
+        )
+        a_totals, a_lengths = _coverage_data_per_taxon(
+            after_seqs, specs, hmm_active, rank, overlap_tolerance=tol,
+        )
+        n_distinct = len(b_totals)
+        if n_distinct == 0:
+            continue
+        rank_printed_any = True
+        # Use the same rank label style as _taxonomic_report.txt so the
+        # two reports key on the same headings ("subgenus (18 distinct):").
+        if n_distinct > max_breakdown:
+            header = (
+                f"{rank} ({n_distinct} distinct, top {max_breakdown} by "
+                f"member count shown):"
+            )
+        else:
+            header = f"{rank} ({n_distinct} distinct):"
+        lines.append(header)
+        lines.extend(_format_coverage_table(
+            indent="  ",
+            title=f"coverage (post-QC pool, N={sum(b_totals.values())})",
+            totals=b_totals, lengths=b_lengths,
+            spec_headers=spec_headers,
+            max_breakdown=max_breakdown,
+        ))
+        lines.append("")
+        if a_totals:
+            lines.extend(_format_coverage_table(
+                indent="  ",
+                title=f"coverage (representatives, N={sum(a_totals.values())})",
+                totals=a_totals, lengths=a_lengths,
+                spec_headers=spec_headers,
+                max_breakdown=max_breakdown,
+            ))
+            lines.append("")
+        lines.extend(_format_length_table(
+            indent="  ",
+            title="protein length statistics [min, max, median, Q3-Q1, n] (post-QC pool)",
+            totals=b_totals, lengths=b_lengths,
+            spec_headers=spec_headers,
+            max_breakdown=max_breakdown,
+        ))
+        lines.append("")
+        if a_totals:
+            lines.extend(_format_length_table(
+                indent="  ",
+                title="protein length statistics [min, max, median, Q3-Q1, n] (representatives)",
+                totals=a_totals, lengths=a_lengths,
+                spec_headers=spec_headers,
+                max_breakdown=max_breakdown,
+            ))
+            lines.append("")
+
+    if not rank_printed_any:
+        lines.append("(no taxonomy available at any rank from "
+                     "subgenus to class)")
+        lines.append("")
+
+    lines.extend(_format_hmm_architecture_section(specs, cfg))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines).rstrip() + "\n")
+    return True
+
+
 def write_all_reports(
     result: RunResult,
     qc_report: QCReport,
@@ -877,3 +1477,28 @@ def write_all_reports(
         result, complete_isolates,
         out_dir / f"{prefix}_{proteins_basename}.fasta",
     )
+    # Always-on per-marker unaligned FASTAs (one per declared marker
+    # spec — Spike, Nucleocapsid, etc.). Headers match the
+    # all-proteins file above; the difference is one file per marker
+    # with only the satisfying CDS from each rep. Independent of
+    # `--per-protein-phylo`: those build trees over the same CDS, this
+    # always emits the raw protein set so a user can re-align or
+    # post-process without re-extracting.
+    try:
+        pp_files = write_per_protein_fastas(
+            result, cfg, complete_isolates, out_dir, prefix,
+        )
+        output_files.extend(pp_files)
+    except Exception as exc:
+        sys.stderr.write(f"[per-protein FASTA skipped] {exc}\n")
+    # Always-on extra-protein FASTAs (one per `extra_protein` entry).
+    # Same selection chain and headers as the per-protein FASTAs above,
+    # but a separate output subdirectory so accessory / sparse proteins
+    # don't visually mix with the clustering markers.
+    try:
+        ep_files = write_extra_protein_fastas(
+            result, cfg, complete_isolates, out_dir, prefix,
+        )
+        output_files.extend(ep_files)
+    except Exception as exc:
+        sys.stderr.write(f"[extra-protein FASTA skipped] {exc}\n")

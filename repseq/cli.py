@@ -15,7 +15,11 @@ from .errors import InputError, RepseqError
 from .io.fasta import read_fasta
 from .models import SequenceSource
 from .models import RunResult
-from .output.report import write_all_reports, write_taxonomic_report
+from .output.report import (
+    write_all_reports,
+    write_protein_taxonomic_report,
+    write_taxonomic_report,
+)
 from .output.writer import write_results
 from .clustering.marker import populate_protein_sequences
 from .qc.pipeline import remove_duplicates, run_qc
@@ -291,8 +295,14 @@ def _any_marker_has_hmms(cfg: dict) -> bool:
 
     Used to skip the hmmscan step entirely when no marker would consume
     the hits (the scan is purely diagnostic without configured HMMs).
+    Covers cluster_protein, segment_markers, AND extra_protein — the last
+    can declare HMMs without any of the others (e.g. extracting a sparse
+    accessory protein on a run that clusters by NT only).
     """
     for entry in (cfg.get("clustering", {}).get("cluster_protein", []) or []):
+        if isinstance(entry, dict) and (entry.get("hmms") or []):
+            return True
+    for entry in (cfg.get("clustering", {}).get("extra_protein", []) or []):
         if isinstance(entry, dict) and (entry.get("hmms") or []):
             return True
     virus_cfg = get_virus_config(cfg)
@@ -304,6 +314,10 @@ def _any_marker_has_hmms(cfg: dict) -> bool:
         for spec in (virus_cfg.get("segment_markers") or {}).values():
             if isinstance(spec, dict) and (spec.get("hmms") or []):
                 return True
+        for entries in (virus_cfg.get("extra_protein") or {}).values():
+            for entry in (entries or []):
+                if isinstance(entry, dict) and (entry.get("hmms") or []):
+                    return True
     return False
 
 
@@ -330,6 +344,9 @@ def _collect_config_hmm_names(cfg: dict) -> set[str]:
     for entry in (cfg.get("clustering", {}).get("cluster_protein", []) or []):
         if isinstance(entry, dict):
             _add_tokens(entry.get("hmms", []))
+    for entry in (cfg.get("clustering", {}).get("extra_protein", []) or []):
+        if isinstance(entry, dict):
+            _add_tokens(entry.get("hmms", []))
     virus_cfg = get_virus_config(cfg)
     if virus_cfg:
         for entries in (virus_cfg.get("cluster_protein") or {}).values():
@@ -339,6 +356,10 @@ def _collect_config_hmm_names(cfg: dict) -> set[str]:
         for spec in (virus_cfg.get("segment_markers") or {}).values():
             if isinstance(spec, dict):
                 _add_tokens(spec.get("hmms", []))
+        for entries in (virus_cfg.get("extra_protein") or {}).values():
+            for entry in (entries or []):
+                if isinstance(entry, dict):
+                    _add_tokens(entry.get("hmms", []))
     return names
 
 
@@ -549,7 +570,7 @@ def _resolve_segment_hmms(
     return None, []
 
 
-def _segment_fails_hmm_gate(seq, tokens: list[str]) -> Optional[str]:
+def _segment_fails_hmm_gate(seq, tokens: list[str], overlap_tolerance: int = 0) -> Optional[str]:
     """Gate a segment against its ``hmms:`` token list. Return ``None`` when
     the segment passes, or a token string naming what was expected when it
     fails.
@@ -560,6 +581,10 @@ def _segment_fails_hmm_gate(seq, tokens: list[str]) -> Optional[str]:
     the unsatisfied alternative(s) — a single token, or the alternatives
     joined with ``|`` when more than one was declared — for the
     ``_qc_removed.tsv`` reason and the per-marker counter key.
+
+    ``overlap_tolerance`` is forwarded to :func:`cds_satisfies_token` so
+    Pfam-boundary fuzz at multidomain seams doesn't drop biologically
+    valid isolates from the QC pool.
     """
     from .hmm.runner import cds_satisfies_token, parse_hmm_token
 
@@ -572,7 +597,10 @@ def _segment_fails_hmm_gate(seq, tokens: list[str]) -> Optional[str]:
             continue  # a malformed token can't be satisfied; skip as a candidate
         declared.append(token)
         if any(
-            cds_satisfies_token(p.get("hmm_hits") or [], parsed) is not None
+            cds_satisfies_token(
+                p.get("hmm_hits") or [], parsed,
+                overlap_tolerance=overlap_tolerance,
+            ) is not None
             for p in proteins
         ):
             return None  # at least one alternative architecture present → pass
@@ -600,6 +628,9 @@ def _run_hmm_qc_segmented(sequences, cfg, qc_report):
     virus_cfg = get_virus_config(cfg) or {}
     segment_markers = virus_cfg.get("segment_markers") or {}
     cluster_protein_per_seg = virus_cfg.get("cluster_protein") or {}
+    overlap_tol = int(
+        cfg.get("hmm", {}).get("multidomain_overlap_tolerance", 30)
+    )
 
     by_isolate: dict[str, list] = {}
     for seq in sequences:
@@ -618,7 +649,7 @@ def _run_hmm_qc_segmented(sequences, cfg, qc_report):
             )
             if not tokens:
                 continue  # no HMM gate for this segment
-            failed_token = _segment_fails_hmm_gate(seq, tokens)
+            failed_token = _segment_fails_hmm_gate(seq, tokens, overlap_tol)
             if failed_token is not None:
                 failures_by_isolate.setdefault(isolate_id, []).append(
                     (seg_name, failed_token)
@@ -696,11 +727,14 @@ def _run_hmm_qc_non_segmented(sequences, cfg, qc_report):
     if not hmm_specs:
         return sequences
 
+    overlap_tol = int(
+        cfg.get("hmm", {}).get("multidomain_overlap_tolerance", 30)
+    )
     kept: list = []
     for seq in sequences:
         failed_spec: Optional[tuple[str, str]] = None
         for spec_name, tokens in hmm_specs:
-            failed_token = _segment_fails_hmm_gate(seq, tokens)
+            failed_token = _segment_fails_hmm_gate(seq, tokens, overlap_tol)
             if failed_token is not None:
                 failed_spec = (spec_name, failed_token)
                 break
@@ -1337,6 +1371,26 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
             out_files.append(tax_path)
         except Exception as exc:
             click.echo(f"[taxonomic report skipped] {exc}", err=True)
+    # Per-protein coverage report — for each declared marker /
+    # extra_protein, the fraction of isolates / sequences carrying it
+    # per taxonomic rank, plus length statistics. Only emitted when at
+    # least one protein spec is declared; soft-fail so a render bug
+    # never voids a real selection.
+    if pre_clustering_sequences is not None:
+        try:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            pr_path = out_dir / f"{prefix}_protein_taxonomic_report.txt"
+            if write_protein_taxonomic_report(
+                pre_clustering_sequences,
+                result.representatives,
+                cfg,
+                segmented=bool(complete_isolates),
+                path=pr_path,
+            ):
+                out_files.append(pr_path)
+        except Exception as exc:
+            click.echo(f"[protein taxonomic report skipped] {exc}", err=True)
     # Methods-section starter — written after every successful run so
     # a bench scientist can copy it into a paper. Soft-fail (one stderr
     # line) so a render bug never voids a real selection.
