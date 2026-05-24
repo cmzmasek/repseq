@@ -240,6 +240,43 @@ def test_render_summary_phylo_concat_when_partition_disabled(make_seq, tmp_path)
     assert "multiple sequence alignment of the" in md
 
 
+def test_render_summary_phylo_describes_fast_mode_mafft(make_seq, tmp_path):
+    """--fast forces MAFFT '--retree 1' with use_auto=False — the summary
+    must say so (and flag it as a preliminary-run setting, not pretend
+    --auto ran)."""
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {
+        "tool": "fasttree",
+        "partition": {"enabled": False},
+        "trimal": {"enabled": False},
+        "mafft": {"extra_args": ["--retree", "1"], "use_auto": False},
+    }
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "`--retree 1`" in md
+    assert "single-pass FFT-NS-1" in md
+    assert "`--fast` preliminary-run setting" in md
+    # And must NOT lie about --auto.
+    assert "`--auto`" not in md
+
+
+def test_render_summary_per_protein_fast_mode_does_not_claim_l_ins_i(make_seq, tmp_path):
+    """Per-protein branch must not call --retree 1 'high-accuracy L-INS-i'."""
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {
+        "tool": "fasttree",
+        "per_protein": {
+            "min_taxa": 3,
+            "mafft": {"extra_args": ["--retree", "1"]},
+        },
+    }
+    md = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], per_protein_ran=True,
+    )
+    assert "high-accuracy L-INS-i" not in md
+    assert "`--retree 1`" in md
+    assert "`--fast` preliminary-run setting" in md
+
+
 def test_render_summary_coloring_two_rank_and_disabled(make_seq, tmp_path):
     cfg = _base_cfg(tmp_path)
     cfg["phylo"] = {

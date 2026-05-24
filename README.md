@@ -710,6 +710,34 @@ clustering alphabet: **IQ-TREE for protein** (ModelFinder + UFBoot
 bootstrap by default) and **FastTree for nucleotide** (with `-nt -gtr`).
 Set `phylo.tool: fasttree` (or `iqtree`) to pin one.
 
+##### Preliminary-run shortcut: `--fast` (v0.24.0+)
+
+When you are iterating on a config (tuning QC thresholds, HMM
+architectures, cluster cut-offs, etc.), the slow/strict tree pipeline
+is overkill — every run rebuilds full IQ-TREE bootstraps over a fresh
+MAFFT `--auto` alignment. Pass `--fast` and repseq overrides the
+`phylo:` block of your YAML for that one run and forces:
+
+- **FastTree** for every tree (whole-genome 2E **and** per-protein 2F).
+  No IQ-TREE, no ModelFinder, no UFBoot.
+- **MAFFT `--retree 1`** — single-pass FFT-NS-1 progressive alignment.
+  Drops `--auto`, ignores `phylo.mafft.extra_args` /
+  `phylo.per_protein.mafft.extra_args`. (Skips any L-INS-i you may
+  have set for publication runs.)
+- **No trimAl** (`phylo.trimal.enabled` and
+  `phylo.per_protein.trimal.enabled` are forced off).
+- **No partitioned supermatrix** (`phylo.partition.enabled` is forced
+  off — FastTree can't fit per-partition models anyway).
+
+The override is in-memory only — your YAML file is untouched. A
+banner is printed to stderr at startup so you always know a fast-mode
+run is happening, and `{prefix}_summary.md` describes the fast
+pipeline (not whatever your YAML said). **Switch `--fast` off for
+the final publication run.** trimAl trimming, IQ-TREE / ModelFinder,
+UFBoot bootstrap, and the partitioned supermatrix all change the
+topology meaningfully on real data; the fast pipeline trades that
+accuracy for speed.
+
 ##### Alignment trimming (trimAl, optional, off by default)
 
 Enable `phylo.trimal.enabled: true` to trim poorly-aligned / gap-rich

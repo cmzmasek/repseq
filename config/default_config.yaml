@@ -433,6 +433,13 @@ phylo:
     # Examples: ["--maxiterate", "1000"] for accurate L-INS-i;
     #           ["--retree", "1"] to speed a very large pass.
     extra_args: []
+    # Pass --auto to MAFFT (size-adaptive strategy selection: FFT-NS-1
+    # for huge inputs, FFT-NS-2 for medium, L-INS-i for small). Set to
+    # false to drop --auto and rely purely on extra_args (e.g. pinning
+    # FFT-NS-1 with extra_args: ["--retree", "1"]). The CLI flag
+    # --fast forces this to false at runtime for a preliminary-run
+    # tree build.
+    use_auto: true
   # Optional alignment trimming (trimAl) for the whole-genome tree (2E),
   # between MAFFT and the tree-builder. OFF by default. When on,
   # {prefix}_msa.fasta becomes the trimmed (tree-input) alignment and the

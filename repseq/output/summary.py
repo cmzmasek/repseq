@@ -572,6 +572,27 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
         and alphabet == "protein"
         and chosen == "iqtree2"
     )
+    # Describe the actual MAFFT command rather than hardcoding `--auto`,
+    # so `--fast` (`--retree 1`, no `--auto`) and any user override get
+    # an honest write-up.
+    mafft_cfg = phylo_cfg.get("mafft", {}) or {}
+    mafft_use_auto = bool(mafft_cfg.get("use_auto", True))
+    mafft_extra = list(mafft_cfg.get("extra_args", []) or [])
+    if mafft_use_auto:
+        genome_mafft_phrase = "`--auto`"
+        if mafft_extra:
+            genome_mafft_phrase = f"`--auto {' '.join(mafft_extra)}`"
+    else:
+        if mafft_extra == ["--retree", "1"]:
+            genome_mafft_phrase = (
+                "`--retree 1` (single-pass FFT-NS-1; the `--fast` "
+                "preliminary-run setting — switch this off for the "
+                "publication run)"
+            )
+        elif mafft_extra:
+            genome_mafft_phrase = f"`{' '.join(mafft_extra)}`"
+        else:
+            genome_mafft_phrase = "(no `--auto`)"
     # Optional trimAl trimming, described where it sits (between MAFFT and
     # the tree). Whole-genome (phylo.trimal) and per-protein
     # (phylo.per_protein.trimal) have independent switches.
@@ -606,7 +627,7 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"Each declared marker family (the `hmms:` domain-architecture "
             f"tokens used for QC) was aligned **separately** with **MAFFT** "
             f"v{versions.get('mafft') or '?'} ({_CITATIONS['mafft']}, "
-            f"`--auto`). {genome_trim_partition_clause}The per-family "
+            f"{genome_mafft_phrase}). {genome_trim_partition_clause}The per-family "
             f"alignments were concatenated "
             f"column-wise into one supermatrix. A maximum-likelihood tree was "
             f"then inferred with **IQ-TREE** v{versions.get('iqtree2') or '?'} "
@@ -631,7 +652,7 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"A multiple sequence alignment of the **{_fmt_int(n_reps)}** "
             f"representative sequences was built with **MAFFT** "
             f"v{versions.get('mafft') or '?'} ({_CITATIONS['mafft']}, "
-            f"`--auto`). {genome_trim_clause}{tree_sentence} The tree was rooted using the "
+            f"{genome_mafft_phrase}). {genome_trim_clause}{tree_sentence} The tree was rooted using the "
             f"**{rooting}** strategy (with minimum ancestor deviation and "
             f"midpoint as fallbacks where applicable) and internal nodes "
             f"were annotated with the last common ancestor (LCA) of their "
@@ -647,7 +668,14 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f" (then trimmed with **trimAl** `-{pp_trim.get('mode', 'automated1')}`)"
             if pp_trim.get("enabled") else ""
         )
-        if pp_mafft:
+        if pp_mafft == ["--retree", "1"]:
+            align_sentence = (
+                f"aligned with MAFFT (`--retree 1`; single-pass FFT-NS-1, "
+                f"the `--fast` preliminary-run setting — switch this off for "
+                f"the publication run){pp_trim_clause} and inferred with "
+                f"{chosen}"
+            )
+        elif pp_mafft:
             align_sentence = (
                 f"aligned with MAFFT (`{' '.join(pp_mafft)}`; high-accuracy "
                 f"L-INS-i for these single-gene sets){pp_trim_clause} and "

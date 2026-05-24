@@ -259,6 +259,10 @@ DEFAULTS: dict[str, Any] = {
             # Examples: ["--maxiterate", "1000"] for L-INS-i; or
             # ["--retree", "1"] for a faster pass on a very large input.
             "extra_args": [],
+            # Pass --auto to MAFFT. Set false to drop it and rely on
+            # extra_args alone (used by the --fast CLI flag to force
+            # single-pass FFT-NS-1).
+            "use_auto": True,
         },
         # Optional alignment trimming (trimAl) between MAFFT and the
         # tree-builder, for the whole-genome tree (2E). OFF by default.

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from repseq.cli import (
+    _apply_fast_overrides,
     _check_output_dir,
     _final_summary,
     _handle_segmented,
@@ -357,6 +358,94 @@ def test_load_and_validate_alphabet_default_unchanged_when_no_override(tmp_path)
         alphabet_for_clustering=None,
     )
     assert cfg["clustering"]["alphabet_for_clustering"] == "protein"
+
+
+# ---------------------------------------------------------------------------
+# --fast: preliminary-run tree pipeline overrides
+# ---------------------------------------------------------------------------
+
+def test_apply_fast_overrides_forces_fasttree_and_skips_trimal_partition():
+    """--fast forces FastTree, kills trimAl + partitioned supermatrix."""
+    cfg = {
+        "phylo": {
+            "tool": "iqtree",
+            "partition": {"enabled": True},
+            "trimal": {"enabled": True, "mode": "automated1"},
+            "mafft": {"extra_args": ["--maxiterate", "1000"]},
+            "per_protein": {
+                "trimal": {"enabled": True},
+                "mafft": {"extra_args": ["--localpair"]},
+            },
+        }
+    }
+    _apply_fast_overrides(cfg)
+    assert cfg["phylo"]["tool"] == "fasttree"
+    assert cfg["phylo"]["partition"]["enabled"] is False
+    assert cfg["phylo"]["trimal"]["enabled"] is False
+    assert cfg["phylo"]["per_protein"]["trimal"]["enabled"] is False
+
+
+def test_apply_fast_overrides_pins_mafft_retree_one_and_disables_auto():
+    """--fast pins MAFFT to '--retree 1' (no --auto) for 2E and 2F."""
+    cfg = {"phylo": {}}
+    _apply_fast_overrides(cfg)
+    assert cfg["phylo"]["mafft"]["extra_args"] == ["--retree", "1"]
+    assert cfg["phylo"]["mafft"]["use_auto"] is False
+    assert cfg["phylo"]["per_protein"]["mafft"]["extra_args"] == [
+        "--retree", "1",
+    ]
+
+
+def test_apply_fast_overrides_replaces_any_user_mafft_extras():
+    """An L-INS-i config is wholesale replaced by --retree 1 under --fast."""
+    cfg = {
+        "phylo": {
+            "mafft": {"extra_args": ["--maxiterate", "1000", "--localpair"]},
+            "per_protein": {
+                "mafft": {"extra_args": ["--maxiterate", "1000", "--localpair"]},
+            },
+        }
+    }
+    _apply_fast_overrides(cfg)
+    assert cfg["phylo"]["mafft"]["extra_args"] == ["--retree", "1"]
+    assert cfg["phylo"]["per_protein"]["mafft"]["extra_args"] == [
+        "--retree", "1",
+    ]
+
+
+def test_load_and_validate_fast_flag_applies_overrides(tmp_path):
+    """fast=True at the load/validate boundary mutates cfg before run."""
+    out_dir = tmp_path / "out"
+    cfg = _load_and_validate(
+        config_path=None,
+        output_dir=str(out_dir),
+        prefix=None,
+        threads=None,
+        seed=None,
+        alphabet_for_clustering=None,
+        fast=True,
+    )
+    assert cfg["phylo"]["tool"] == "fasttree"
+    assert cfg["phylo"]["partition"]["enabled"] is False
+    assert cfg["phylo"]["trimal"]["enabled"] is False
+    assert cfg["phylo"]["mafft"]["extra_args"] == ["--retree", "1"]
+    assert cfg["phylo"]["mafft"]["use_auto"] is False
+
+
+def test_load_and_validate_fast_default_off_leaves_yaml_intact(tmp_path):
+    """Without --fast the YAML phylo defaults survive."""
+    out_dir = tmp_path / "out"
+    cfg = _load_and_validate(
+        config_path=None,
+        output_dir=str(out_dir),
+        prefix=None,
+        threads=None,
+        seed=None,
+        alphabet_for_clustering=None,
+    )
+    # default config ships phylo.tool="auto", partition.enabled=True.
+    assert cfg["phylo"]["tool"] == "auto"
+    assert cfg["phylo"]["partition"]["enabled"] is True
 
 
 # ---------------------------------------------------------------------------

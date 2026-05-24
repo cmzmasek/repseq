@@ -343,13 +343,9 @@ def _build_tree(
         mafft_args_used = list(mafft_extra_args)
         mafft_auto_used = mafft_use_auto
     else:
-        mafft_args_used = list(
-            ((cfg or {}).get("phylo", {}).get("mafft", {}) or {}).get(
-                "extra_args", [],
-            )
-            or []
-        )
-        mafft_auto_used = True
+        mafft_cfg = ((cfg or {}).get("phylo", {}).get("mafft", {}) or {})
+        mafft_args_used = list(mafft_cfg.get("extra_args", []) or [])
+        mafft_auto_used = bool(mafft_cfg.get("use_auto", True))
 
     try:
         run_mafft(

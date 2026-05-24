@@ -286,6 +286,41 @@ def test_run_phylogeny_uses_protein_sequence_when_alphabet_protein(tmp_path):
     assert all("M" in body and "K" in body for body in seen_input_bodies)
 
 
+def test_run_phylogeny_honors_mafft_use_auto_from_cfg(tmp_path):
+    """phylo.mafft.use_auto: False (set by --fast) drops --auto in 2E.
+
+    The cfg-fallback path inside _build_tree (no caller-supplied
+    mafft_extra_args, no --auto from cfg) must propagate use_auto=False
+    to run_mafft so the MAFFT command for the whole-genome tree no
+    longer asks for adaptive strategy selection.
+    """
+    reps = [_seq(f"p{i}", "MK") for i in range(3)]
+    seen_kwargs: list[dict] = []
+
+    def _capture_mafft(input_fasta, output_fasta, cfg, **kwargs):
+        seen_kwargs.append(kwargs)
+        _stub_mafft_writes_alignment(input_fasta, output_fasta, cfg)
+
+    cfg = {
+        "phylo": {
+            "tool": "fasttree",
+            "mafft": {
+                "extra_args": ["--retree", "1"],
+                "use_auto": False,
+            },
+        }
+    }
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_capture_mafft), \
+         patch("repseq.phylo.pipeline.run_fasttree",
+               side_effect=_stub_fasttree_writes_newick(["S0001", "S0002", "S0003"])):
+        run_phylogeny(reps, cfg, tmp_path, "test")
+
+    assert seen_kwargs, "run_mafft was not called"
+    kw = seen_kwargs[0]
+    assert kw.get("use_auto") is False
+    assert kw.get("extra_args") == ["--retree", "1"]
+
+
 def test_run_phylogeny_wraps_mafft_error_as_phyloerror(tmp_path):
     reps = [_seq(f"p{i}", "MK") for i in range(3)]
 
