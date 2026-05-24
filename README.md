@@ -179,14 +179,25 @@ your FASTA file(s)
   clean (QC):
     drop duplicates → length filter → too many ambiguous chars
     → bad-keyword annotations → (optional) wrong protein count
+    → (optional) bad-residue protein quality
         │
         ▼
   (segmented mode only)
     populate /isolate, /segment from GenBank
+    → flag/drop strain-as-isolate collisions
     → drop isolates whose segments disagree on species (taxonomy_consistency)
     → keep only isolates with ALL expected segments
     → per-segment length bounds (drop the whole isolate if any segment is out of range)
-    → fetch the marker protein per segment, concatenate per isolate
+        │
+        ▼
+  HMM-based identity QC                                          (when any spec has hmms:)
+    scan every CDS with hmmscan → drop isolates/sequences whose
+    expected markers don't have a satisfying CDS (one bad segment
+    fails the whole isolate)
+        │
+        ▼
+  (segmented mode only)
+    fetch the marker protein per segment, concatenate per isolate
         │
         ▼
   group by your chosen mode (rank / host / decade / similarity / …)
@@ -196,15 +207,21 @@ your FASTA file(s)
         ▼
   write:
     • selected representatives (FASTA, per-segment FASTAs, concatenated FASTA)
-    • their proteins (per-CDS FASTA + per-CDS TSV)
+    • all proteins of each representative (one big AA FASTA + per-CDS TSV)
+    • one AA FASTA per declared marker        →  {prefix}_per_protein_fasta/
+    • one AA FASTA per declared extra_protein →  {prefix}_extra_protein_fasta/
     • per-rep metadata spreadsheet
     • per-stratum + per-cluster + per-drop TSVs
-    • plain-text run log
+    • taxonomic diversity report              →  {prefix}_taxonomic_report.txt
+    • per-marker coverage + length stats      →  {prefix}_protein_taxonomic_report.txt
+    • Methods-section starter                 →  {prefix}_summary.md
+    • plain-text run log                      →  {prefix}_run.log
     • (optional) UMAP/MDS clustering plot                        (--plot)
     • (optional) MAFFT MSA + IQ-TREE / FastTree + phyloXML tree  (--phylo)
     •            (protein + IQ-TREE: partitioned-supermatrix tree, per-marker model)
     •            (optional trimAl column trimming; off by default)
-    • (optional) one tree per HMM domain-architecture marker     (--per-protein-phylo)
+    • (optional) one tree per HMM marker      →  {prefix}_per_protein/      (--per-protein-phylo)
+    •            one tree per extra_protein   →  {prefix}_extra_protein/    (--per-protein-phylo)
 ```
 
 The run log (`{prefix}_run.log`) records exactly what settings were used
@@ -231,20 +248,28 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_group_counts.tsv` | yes | One row per stratum: in / out / clustered / cutoff. |
 | `{prefix}_clusters.tsv` | yes | Which sequences ended up grouped, who represents whom. |
 | `{prefix}_representatives.fasta` | non-segmented | Selected representative sequences. |
-| `{prefix}_representative_sequences.tsv` | non-segmented | Per-representative metadata spreadsheet. |
+| `{prefix}_representative_sequences.tsv` | non-segmented | Per-representative metadata spreadsheet (since v0.21.0: same schema as `_representative_isolates.tsv`). |
 | `{prefix}_concatenated.fasta` | segmented | Per-isolate head-to-tail concat of all segments. |
 | `{prefix}_segment_<NAME>.fasta` | segmented | One file per expected segment, just the representative isolates. |
 | `{prefix}_representative_isolates.tsv` | segmented | Per-representative-isolate metadata spreadsheet. |
 | `{prefix}_isolate_proteins.tsv` | segmented + GenBank | Every protein of every isolate that survived QC, with a `representative` TRUE/FALSE column. |
 | `{prefix}_representative_isolate_proteins.tsv` | segmented + GenBank | Same schema as above, row-filtered to representatives only. |
+| `{prefix}_sequence_proteins.tsv` | non-segmented + GenBank | Per-CDS counterpart of `_isolate_proteins.tsv` (since v0.21.0). |
+| `{prefix}_representative_sequence_proteins.tsv` | non-segmented + GenBank | Reps-only filtered view of the above. |
 | `{prefix}_representative_isolate_proteins.fasta` | segmented + GenBank | AA FASTA of every protein of every representative isolate. |
 | `{prefix}_representative_sequence_proteins.fasta` | non-segmented + GenBank | AA FASTA of every protein of every representative sequence. |
+| `{prefix}_per_protein_fasta/{prefix}_<family>.fasta` | any run with `cluster_protein` / `segment_markers` declared | Unaligned per-marker protein FASTA, one CDS per rep carrying that marker (always-on since v0.22.0). |
+| `{prefix}_extra_protein_fasta/{prefix}_<name>.fasta` | any run with `extra_protein:` declared | Same shape, for accessory proteins that aren't required everywhere (v0.22.0). |
 | `{prefix}_representatives_protein.fasta` | when `alphabet_for_clustering: protein` (default) | The AA strings actually fed into the clusterer. |
+| `{prefix}_taxonomic_report.txt` | every run | Per-rank diversity table: distinct taxa before vs after clustering. |
+| `{prefix}_protein_taxonomic_report.txt` | any run with `cluster_protein` / `segment_markers` / `extra_protein` declared | Per-rank protein coverage + AA length statistics (v0.22.0). |
 | `{prefix}_clustering.png` | only with `--plot` | Diagnostic scatter of the clustering. |
 | `{prefix}_msa.fasta`, `_tree.nwk`, `_tree.xml`, `_tree_id_map.tsv` | only with `--phylo` | Alignment + tree + name mapping. |
 | `{prefix}_partition.nex`, `_msa_<family>.fasta` | `--phylo`, protein + IQ-TREE | NEXUS partition file + per-family alignments (partitioned-supermatrix tree). |
 | `{prefix}_msa_untrimmed.fasta` | `--phylo` + `phylo.trimal.enabled` | Raw MAFFT alignment retained when trimAl trimming ran (`_msa.fasta` is then the trimmed tree input). |
 | `{prefix}_iqtree_summary.txt` | only with `--phylo` + IQ-TREE | IQ-TREE ModelFinder report. |
+| `{prefix}_per_protein/` | only with `--per-protein-phylo` | One tree (MSA + Newick + phyloXML + id map) per marker; plus `_incongruence.tsv` of pairwise Robinson-Foulds distances. |
+| `{prefix}_extra_protein/` | `--per-protein-phylo` + `extra_protein:` declared | Same shape, accessory-protein trees (kept out of the incongruence table by design). |
 | `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations). |
 
 "Segmented + GenBank" means: segmented mode is on **and** the GenBank source
@@ -316,6 +341,52 @@ DIAMOND, HMMER, MMseqs2 search, or any sequence-search tool** — it's
 both pre-curated and pre-annotated. This is usually "the" output file
 for protein-centric workflows.
 
+#### `{prefix}_per_protein_fasta/{prefix}_<family>.fasta` *(always-on since v0.22.0, one file per declared marker)*
+
+Unaligned protein FASTA, one file per marker spec you declared under
+`clustering.cluster_protein` (non-segmented) or `segment_markers` /
+`cluster_protein` (segmented). Each file holds **one record per
+representative that carries that marker** — exactly the CDS that
+satisfied the marker's HMM (or the legacy alias chain if no `hmms:` is
+declared on that spec).
+
+`<family>` is the spec's `name:` when given (e.g. `Spike`), or the
+single token (`Bunya_nucleocap`), or the first token plus `_altN` for
+an unnamed multi-architecture spec. In segmented mode the segment is
+prefixed (`M_Spike`, `S_Bunya_nucleocap`).
+
+Headers are **byte-identical** to the all-protein FASTA above
+(`_representative_isolate_proteins.fasta` / `_representative_sequence_proteins.fasta`),
+so a Spike record in `_per_protein_fasta/<prefix>_M_Spike.fasta` and
+in the all-protein file are the same string. That means you can pull
+one marker, hand it to BLAST/HMMER/MAFFT, and the metadata travels
+with it.
+
+Use it for: per-marker downstream analysis (alignment, profile build,
+ML tree off-pipeline) without having to re-extract the CDS from the
+all-protein FASTA. This is independent of `--per-protein-phylo` —
+it's written on every run so you always have the input FASTAs even if
+you skip the tree step.
+
+Specs that no representative satisfies are silently skipped (empty
+file isn't written). A run where the HMM tier didn't fire and every
+spec is HMM-only emits one stderr note explaining why nothing came
+out.
+
+#### `{prefix}_extra_protein_fasta/{prefix}_<name>.fasta` *(when `extra_protein:` declares entries, v0.22.0+)*
+
+The **accessory-protein** analogue of the per-protein FASTA above.
+Same selection chain, same bracket-tag header format. Driven by
+`clustering.extra_protein:` (non-segmented) or `virus.extra_protein:`
+(segmented, per-segment dict). See the
+[Accessory proteins](#accessory-proteins-extra_protein) section for
+what these are for and when you'd want one.
+
+The filename uses the spec's `name:` verbatim (no segment prefix even
+in segmented mode — `extra_protein` names must be unique across all
+segments). Sparse coverage is the expected case here, so specs that no
+representative satisfies are silently skipped without comment.
+
 #### `{prefix}_representatives_protein.fasta` *(when `clustering.alphabet_for_clustering: protein` actually fired)*
 
 The **AA strings that were fed into the clusterer** — the per-isolate
@@ -326,7 +397,8 @@ not written for `alphabet_for_clustering: nucleotide`).
 
 This is a *diagnostic*, not a primary output: useful if you want to
 reproduce or audit the clustering input. For a clean per-protein set, use
-`_representative_*_proteins.fasta` instead.
+`_representative_*_proteins.fasta` (all proteins) or
+`_per_protein_fasta/` (split by marker).
 
 ### Spreadsheets (TSV)
 
@@ -340,12 +412,23 @@ the NCBI lineage and are commonly blank for viruses.
 
 #### `{prefix}_representative_sequences.tsv` — non-segmented mode
 
-One row per representative sequence. Columns:
+One row per representative sequence. **Schema-identical to
+`_representative_isolates.tsv` (below)** since v0.21.0, so the same
+analysis script reads both modes. Columns:
 
-`accession`, `organism`, `description`, `strain`, `host`,
-`collection_date`, `country`, `segment`, `isolate_id`, `molecule_type`,
-`length_nt`, `is_refseq`, `is_reviewed`, `ncbi_taxon_id`, then the
+`isolate_id`, `isolate_id_source`, `organism`, `strain`, `host`,
+`collection_date`, `country`, `n_segments`, `segments`, `accessions`,
+`total_length_nt`, `is_refseq`, `is_reviewed`, `ncbi_taxon_id`, then the
 nine-rank taxonomic ladder.
+
+In non-segmented mode the isolate-only cells are blanked
+(`isolate_id`, `isolate_id_source`, `n_segments`, `segments`) or
+remapped to their per-sequence meaning: `accessions` is the single
+accession, `total_length_nt` is the sequence's NT length. The
+per-sequence-only columns the old schema carried (`description`,
+`segment`, `molecule_type`, `length_nt` under that name) are absent
+— they have no slot in the shared schema. Use
+`_sequence_proteins.tsv` for per-CDS detail.
 
 Open in Excel / Numbers / your scripting language — this is the
 spreadsheet you'll usually hand to a collaborator.
@@ -395,6 +478,32 @@ join back from a hit in a downstream analysis to the isolate it came from.
 Same exact schema as `_isolate_proteins.tsv`, but **filtered to the
 representative isolates only** (i.e. every row has `representative=TRUE`).
 Easier on the eye when you just want "the proteins in my reduced set".
+
+#### `{prefix}_sequence_proteins.tsv` — non-segmented mode (when proteins are reachable, v0.21.0+)
+
+The non-segmented counterpart of `_isolate_proteins.tsv`. One row per
+**CDS** of every sequence that survived QC, with the exact same column
+schema as the segmented version so the same analysis script reads both
+modes:
+
+`protein_id`, `product`, `length_aa`, `isolate_id`, `isolate_id_source`,
+`segment`, `segment_length_nt`, `accession`, `representative` (`TRUE` if
+the parent sequence ended up as a representative, `FALSE` otherwise),
+`hmmscan`, then the nine-rank taxonomic ladder.
+
+The isolate-only columns are blanked in non-segmented mode
+(`isolate_id`, `isolate_id_source`, `segment`); `segment_length_nt`
+holds the parent sequence's NT length and `accession` is the parent
+accession.
+
+Use it the same way as `_isolate_proteins.tsv`: a per-protein audit of
+what passed QC, and the table to join against for downstream hits.
+
+#### `{prefix}_representative_sequence_proteins.tsv` — non-segmented mode (when proteins are reachable, v0.21.0+)
+
+Row-filtered companion to `_sequence_proteins.tsv` (reps only — every
+row has `representative=TRUE`). Same column schema; the non-segmented
+analogue of `_representative_isolate_proteins.tsv`.
 
 #### `{prefix}_clusters.tsv` — always
 
@@ -459,6 +568,72 @@ makes the selection fully reproducible.
 The "QC SUMMARY" block also shows the new **per-segment length-filter
 breakdown** (since v0.9.1) so you can tell *which* segment caused
 isolates to fall out, not just that "some did".
+
+### Taxonomic reports
+
+Two plain-text reports that turn "what kind of diversity did I just
+select?" into a one-glance answer. Both are written on every run that
+has the relevant inputs available; both are safe to open in any text
+editor.
+
+#### `{prefix}_taxonomic_report.txt` — diversity before vs after
+
+Per-rank counts of **distinct taxa** in the pool fed to selection
+versus in the final representatives. Counting unit is **isolates** in
+segmented mode and **sequences** otherwise. Two sections:
+
+- **Section 1** — a 9-rank ladder (species → class) with two numeric
+  columns: distinct taxa before, distinct taxa after. A glance tells
+  you which ranks the clustering compressed and which it preserved.
+- **Section 2** — for each rank that has at least one populated taxon,
+  the per-taxon breakdown: taxon name, before-count, after-count,
+  sorted by before-count desc. Ranks with more than
+  `output.protein_report.max_breakdown` (default 20) populated taxa
+  show only the top 20, with a note in the rank label.
+
+Blank rank values are excluded from every count, so subfamily /
+suborder / subclass cells (commonly empty for viruses) don't inflate
+diversity.
+
+#### `{prefix}_protein_taxonomic_report.txt` — per-marker coverage + length (v0.22.0+)
+
+Per-rank tables for **each declared protein** (every
+`cluster_protein` / `segment_markers` / `extra_protein` spec). For
+each rank from `subgenus` to `class` (skipping `species` because the
+annotation noise there dominates), four sub-tables are written:
+
+1. **Coverage (post-QC pool)** — cells are `<count> <pct>%`: how many
+   isolates/sequences in that taxon had a CDS satisfying the marker.
+2. **Coverage (representatives)** — same, restricted to the final
+   selected set.
+3. **Length statistics (post-QC pool)** — cells are
+   `min, max, median, Q3-Q1, n` in amino acids (Q3-Q1 = IQR; n = the
+   number of items contributing the length, so you can judge whether
+   the quartiles are trustworthy).
+4. **Length statistics (representatives)** — same on the reps.
+
+Marker columns are headed by the spec's `name:`. **Cluster-driving
+markers (the `cluster_protein` / `segment_markers` ones — i.e. the
+proteins that drove both clustering and the whole-genome tree) carry a
+trailing `*`**, so you can tell at a glance which are the load-bearing
+proteins vs accessory `extra_protein` ones.
+
+A `== HMM marker architectures ==` block at the bottom lists each
+HMM-bearing spec's token alternatives (joined with `OR`) and the
+cutoff policy that gated it (GA when curated, else
+`default_evalue`, plus `relative_length_cutoff`) — so the Methods
+section of a paper can quote the gate verbatim.
+
+Taxa within each sub-table are **truncated first by member count**
+(top `max_breakdown` by population, default 20) **then sorted
+alphabetically** for display — so a long-tail rank never silently
+drops a high-count taxon for being late in the alphabet.
+
+Use it for: a one-shot answer to "is my representative set still
+covering polymerase / glycoprotein / nucleocapsid across the
+families I started with, and is the protein length distribution still
+sensible?" — the bench-scientist QC that catches a marker quietly
+dropping out of one genus.
 
 ### Diagnostic plot
 
@@ -667,6 +842,18 @@ segmented mode (`M_Spike`, `S_Bunya_nucleocap`):
   …
   {prefix}_incongruence.tsv
 ```
+
+**Extra-protein trees (v0.22.0+):** when you've also declared
+[`extra_protein:`](#accessory-proteins-extra_protein) accessory
+proteins, a **separate** `{prefix}_extra_protein/` directory is emitted
+with the same per-tree shape (one `<name>_msa.fasta` / `<name>_tree.nwk`
+/ `<name>_tree.xml` / `<name>_tree_id_map.tsv` per spec, built by the
+same engine). The split is intentional: accessory proteins are sparse
+by design, so they are **excluded from the `_incongruence.tsv` table**
+to keep the reassortment signal in the required-marker pairs from being
+drowned out by `NA`/low-`n_common_taxa` rows. If you want RF distances
+involving an accessory tree, run the math off its `.nwk` file
+yourself.
 
 Each tree file has the same format and rich annotation as its `--phylo`
 counterpart, with two deliberate differences. First, a leaf shows **only
@@ -1023,7 +1210,7 @@ Each element of `hmms:` is a **token** string. A token is either:
 | Form | Meaning |
 | --- | --- |
 | `"Name"`         | Single HMM. A CDS satisfies the token if it has a passing hit to `Name`. |
-| `"A--B"`         | Multidomain. A CDS satisfies the token only when it has passing hits to **both** `A` and `B`, with `A` lying N-terminal to `B` (strict non-overlap). |
+| `"A--B"`         | Multidomain. A CDS satisfies the token only when it has passing hits to **both** `A` and `B`, with `A` lying N-terminal to `B` (forward-progressing endpoints, with at most `hmm.multidomain_overlap_tolerance` aa of overlap at the seam — default 30 aa). |
 | `"A--B--C"`      | Same idea, three domains: `A` most N-terminal, `C` most C-terminal. |
 
 **N-to-C order**. The first HMM in a multidomain token is the most
@@ -1033,6 +1220,19 @@ architecture as you'd draw it (e.g. the coronavirus Spike is
 `"CoV_S1--CoV_S2"`: S1 N-terminal, S2 C-terminal). The named
 domains are compared against the hmmscan `ali_from`/`ali_to` columns
 in that order.
+
+**Why the overlap tolerance.** Pfam profile boundaries rarely align
+exactly to a real cleavage site. The classic case is the coronavirus
+Spike S1/S2 furin seam, where the two Pfam profiles can overlap by
+20-25 aa even though biology cuts a single peptide bond; the
+bunyaviridae G1/G2 glycoproteins behave the same way. A strict
+non-overlap rule would silently drop those representatives. The
+default 30-aa tolerance accepts that fuzz; set
+`hmm.multidomain_overlap_tolerance: 0` for strict non-overlap.
+**Full containment is always rejected** regardless of the tolerance —
+both `ali_from` and `ali_to` must progress forward between consecutive
+named domains, so a single profile hit fully inside another can never
+satisfy the multidomain token.
 
 **Extra domains are fine.** A CDS annotated as `A--B--HMMX` still
 satisfies the token `"A--B"` because `A` remains N-terminal to `B`.
@@ -1090,10 +1290,11 @@ unchanged and are not gated by HMM-QC.
 ### Bundled vs user-supplied database
 
 `hmm.database: null` (default) uses the bundled set at
-`repseq/data/hmms/repseq_viral_core.hmm` — 17 hand-picked Pfam-A
+`repseq/data/hmms/repseq_viral_core.hmm` — 26 hand-picked Pfam-A
 profiles covering the most common viral marker proteins (RdRp,
-nucleocapsid, glycoprotein, helicase, protease) across the main
-families. Pfam-A is licensed CC0 so redistribution is unrestricted.
+nucleocapsid, glycoprotein, helicase, protease, plus the coronavirus
+Spike S1/S2 architectures and the small accessory proteins M/E/3a/7a/
+viroporin) across the main families. Pfam-A is licensed CC0 so redistribution is unrestricted.
 The bundled set was assembled from Pfam-A via
 `scripts/build_bundled_hmms.sh`; you can re-run that script to refresh
 it against a newer Pfam release.
@@ -1153,12 +1354,16 @@ marker for the same segment, `segment_markers` wins.
 
 ```yaml
 hmm:
-  enabled: true                  # master switch
-  database: null                 # null → bundled; abs path → user-supplied
-  default_evalue: 1.0e-5         # used when a profile has no curated GA
-  use_ga_when_available: true    # prefer curated GA over default_evalue
-  relative_length_cutoff: 0.5    # ali_span / hmm_len ≥ this
-  threads: null                  # null → falls through to cfg.threads
+  enabled: true                       # master switch
+  database: null                      # null → bundled; abs path → user-supplied
+  default_evalue: 1.0e-5              # used when a profile has no curated GA
+  use_ga_when_available: true         # prefer curated GA over default_evalue
+  relative_length_cutoff: 0.5         # ali_span / hmm_len ≥ this
+  multidomain_overlap_tolerance: 30   # max aa overlap at the seam of a multidomain
+                                      # token (0 = strict non-overlap; default 30
+                                      # accommodates Pfam-boundary fuzz at e.g.
+                                      # the CoV S1/S2 furin seam)
+  threads: null                       # null → falls through to cfg.threads
 ```
 
 ### Soft-fail posture
@@ -1167,6 +1372,69 @@ The HMM tier never aborts a run on its own. If `hmmscan` is missing,
 the database is unreadable, or hmmscan returns non-zero, repseq emits
 one stderr warning and falls through to the alias / longest-CDS
 chain. To check that everything is wired up, run `repseq doctor`.
+
+---
+
+## Accessory proteins (`extra_protein`)
+
+`cluster_protein` (non-segmented) and `segment_markers` (segmented)
+declare the **required** marker proteins: every isolate has to carry
+one, the whole-genome tree is built from them, and missing one fails
+HMM-QC. That's the right model for an RNA-dependent RNA polymerase or
+a structural glycoprotein — proteins present in every member of the
+family.
+
+It's the **wrong** model for sparse accessory proteins. The
+coronavirus ORF7a, ORF8, ORF9b, or the betacoronavirus-only HE
+(haemagglutinin-esterase) appear in some isolates and not others.
+Adding them to `cluster_protein` would force HMM-QC to drop every
+representative that doesn't carry them — exactly the wrong outcome.
+
+`extra_protein:` (since v0.22.0) is the home for those proteins. The
+spec shape is identical to `cluster_protein` — `{name, aliases?,
+hmms?}` — but extras are **not** used for clustering, are **not**
+required for HMM-QC to pass, and are **not** part of the whole-genome
+tree. They are reported wherever it makes sense to:
+
+- Per-marker protein FASTA in `{prefix}_extra_protein_fasta/`
+  (always-on when any extra is declared).
+- A separate per-protein tree in `{prefix}_extra_protein/` when you
+  also pass `--per-protein-phylo` (built with the same MAFFT +
+  IQ-TREE / FastTree engine as the required-marker trees).
+- Coverage and length columns in `{prefix}_protein_taxonomic_report.txt`,
+  without the trailing `*` that marks the cluster-driving markers.
+- **Excluded** from `{prefix}_per_protein/{prefix}_incongruence.tsv` by
+  design — sparse coverage would produce a lot of `NA`/low-`n_common_taxa`
+  rows that would drown out the real reassortment signal across required
+  markers. If you want RF distances against an extra, run the math
+  off the `<name>_tree.nwk` file yourself.
+
+Configuration shape (segmented, one entry per segment as a dict; the
+non-segmented form is a top-level `clustering.extra_protein: [...]`
+list using the same dict shape):
+
+```yaml
+segmented:
+  viruses:
+    sarbecovirus:
+      expected_segments: 1
+      segments: [genome]
+      isolate_regex: "..."
+      segment_markers:
+        genome:
+          - {name: Spike, hmms: ["CoV_S1--CoV_S2",
+                                 "bCoV_S1_N--bCoV_S1_RBD--CoV_S2"]}
+          - {name: N,     hmms: ["CoV_nucleocap"]}
+      extra_protein:
+        genome:
+          - {name: ORF7a, hmms: ["Corona_7"]}
+          - {name: ORF3a, hmms: ["Corona_NS3b"]}
+          - {name: HE,    aliases: ["hemagglutinin-esterase"]}
+```
+
+Names must be unique across all `extra_protein` entries for a virus
+(the name is used as the filename and also has to identify the protein
+unambiguously in the protein-taxonomic report).
 
 ---
 
@@ -1284,142 +1552,95 @@ to run anywhere and finish in a couple of seconds.
 
 ## Status
 
-Current: **`v0.13.0`**. All 8 selection modes, protein-alphabet clustering
-by default (`alphabet_for_clustering: protein`), MMseqs2 and cd-hit
-backends, optional protein-annotation QC, per-isolate
-taxonomy-consistency QC for segmented viruses, **HMM-based marker
-selection (HMMER hmmscan + bundled Pfam-A subset)**, strain-as-isolate
-provenance + collision detection, segment-name synonyms, rich phyloXML
-output, an optional UMAP/MDS plot of the clustering, an auto-generated
-Methods-section starter (`_summary.md`) on every run, and a per-stratum
-diversity curve in `_group_counts.tsv`. **741 offline regression tests
+Current: **`v0.22.0`**. All 8 selection modes, protein-alphabet
+clustering by default (`alphabet_for_clustering: protein`), MMseqs2 and
+cd-hit backends, optional protein-annotation and protein-quality QC,
+per-isolate taxonomy-consistency QC for segmented viruses, **HMM-based
+identity QC with multidomain-architecture token notation** (HMMER
+hmmscan + bundled 26-profile viral Pfam-A subset; user-supplied DB
+supported), strain-as-isolate provenance + collision detection,
+segment-name synonyms, **rich phyloXML output with taxonomy-driven leaf
+coloring, partitioned-supermatrix tree for protein + IQ-TREE (default),
+optional trimAl trimming, per-marker domain-architecture trees with
+pairwise Robinson-Foulds incongruence table**, an optional UMAP/MDS
+plot of the clustering, an auto-generated Methods-section starter
+(`_summary.md`) on every run, **per-marker protein FASTAs always-on, a
+separate `extra_protein:` channel for sparse accessory proteins, and
+two plain-text diversity reports (`_taxonomic_report.txt`,
+`_protein_taxonomic_report.txt`)**. **983 offline regression tests
 pass**; the NCBI-backed paths have been validated end-to-end against
-live influenza-A, peribunyaviridae, and hantaviridae datasets.
+live influenza-A, peribunyaviridae, hantaviridae, and coronaviridae
+datasets.
 
-Highlights of recent releases (newest first):
+Highlights of recent releases (newest first; `git log` for the
+complete history):
 
-- **`v0.13.0`** — HMM-based marker selection. When `hmm.enabled` is
-  true (default) and a marker definition carries `hmms: [...]` (in
-  `clustering.cluster_protein` or per-segment `segment_markers`),
-  HMMER hmmscan is used as the AUTHORITATIVE gate — a CDS whose
-  `/product` matches an alias but FAILS the HMM check (E-value or
-  coverage) is rejected, and the segment / sequence is dropped.
-  Multi-HMM lists are AND (every HMM must hit the same CDS). Bundled
-  set of 17 viral Pfam-A profiles in `repseq/data/hmms/`; auto-
-  `hmmpress`-ed on first run. User-supplied DB via `hmm.database`.
-  Soft-fails (warns + falls back to alias/longest) when hmmscan is
-  missing or the database is unavailable. Two new QC counters
-  (`removed_hmm_failed`, `removed_hmm_by_marker`); new `hmmscan`
-  column right of `representative` in `_isolate_proteins.tsv` and
-  `_representative_isolate_proteins.tsv` showing passing hits
-  (`Bunya_Gn(E=1e-30,cov=0.85);Bunya_Gc(E=3e-25,cov=0.78)` format,
-  best-E first); same string emitted as `[hmmscan=...]` tag on
-  proteins-FASTA headers. `repseq doctor` reports DB status (path,
-  profile count, indexed Y/N, GA-cutoff coverage). The Methods-
-  section summary names HMMER + the cutoffs when the tier fired. 63
-  new tests bring the suite from 678 → 741. See the new
-  "HMM-based marker selection" section above for configuration and
-  examples.
+- **`v0.22.0`** — protein-centric outputs. Always-on per-marker
+  protein FASTAs in `{prefix}_per_protein_fasta/`. New top-level
+  `extra_protein:` for sparse accessory proteins (CoV ORF7a / HE /
+  …) — emits per-protein FASTAs in `{prefix}_extra_protein_fasta/`
+  and, with `--per-protein-phylo`, separate trees in
+  `{prefix}_extra_protein/` (deliberately kept out of the
+  incongruence table). New per-rank coverage + AA-length report
+  `{prefix}_protein_taxonomic_report.txt`, cluster-driving markers
+  tagged `*` so they stand out from accessories. **Relaxed
+  multidomain token rule** — new `hmm.multidomain_overlap_tolerance`
+  (default 30 aa) lets Pfam-boundary fuzz at e.g. the CoV S1/S2
+  furin seam pass; full containment is still rejected.
 
-- **`v0.12.0`** — `_group_counts.tsv` gains a per-stratum diversity
-  curve. For each stratum where the binary-search clustering ran, the
-  clustering backend is also invoked at each of the configured
-  "standard" identity thresholds (default `[0.99, 0.95, 0.9, 0.8, 0.7]`)
-  and the resulting cluster counts are reported as trailing
-  `n_clusters_<c>` columns. Purely diagnostic — representative
-  selection is unchanged. Cutoffs below the backend's identity floor
-  (cd-hit-est < 0.80, cd-hit protein < 0.40) are reported as `NA`.
-  Configurable via `clustering.diversity_curve_cutoffs`; set to `[]`
-  to disable on very large runs where the extra clustering work would
-  dominate runtime. Mentioned by the `_summary.md` writer so the
-  Methods section is aware of it.
-- **`v0.11.0`** — every successful run now writes `{prefix}_summary.md`,
-  a Markdown Methods-section starter that reads as scientific prose
-  with the live numbers from the run filled in (input count, per-stage
-  QC counts, segmented-completeness counts, clustering input
-  description, mode rationale, phylogenetic inference description if
-  `--phylo` ran). Includes a Software & references table with versions
-  auto-detected from `--version` probes on every external tool repseq
-  could have used (cd-hit, cd-hit-est, MMseqs2, MAFFT, FastTree,
-  IQ-TREE) plus full journal citations. Soft-fails on render error so a
-  bug in the writer never voids a successful selection.
-- **`v0.10.2`** — actual fix for cd-hit-est round-trip mismatches.
-  v0.10.1 sanitized IUPAC ambiguity codes but a hantaviridae run still
-  hit `91 in, 34 accounted for`. Root cause: the `.clstr` parser regex
-  only matched cd-hit (protein) member lines (`at 99.93%`) and missed
-  cd-hit-est (nucleotide) strand-prefixed ones (`at +/99.93%`,
-  `at -/99.93%`). Every member line silently failed to parse, making
-  every cluster look like a singleton. Regex now accepts the optional
-  `+/`/`-/` prefix; protein output unaffected.
-- **`v0.10.1`** — fixed a silent data-loss bug in cd-hit-est when
-  clustering on nucleotides. cd-hit-est rejects sequences containing
-  IUPAC ambiguity codes (W, R, Y, K, M, S, B, D, H, V) but writes the
-  warning to stderr only — our wrapper swallowed it on a 0 exit, and a
-  hantaviridae run hit 91 concat sequences in / 34 out / 57 silently
-  dropped. Fixed by sanitizing the cd-hit FASTA input (non-ACGTN → N)
-  before clustering; original `seq.sequence` and all downstream output
-  FASTAs are untouched. MMseqs2 tolerates IUPAC codes natively so its
-  path is unchanged. A one-time stderr notice prints when
-  sanitization fires.
-- **`v0.10.0`** — the clustering alphabet is now a user-facing choice
-  end-to-end. The config knob `clustering.alphabet` was renamed to
-  `clustering.alphabet_for_clustering` to make the scope unambiguous
-  (it only chooses what the clustering backend sees — GenBank CDS
-  download, protein-count QC, and the per-segment
-  `expected_proteins_per_segment` check still run regardless). A new
-  CLI flag `--alphabet-for-clustering [protein|nucleotide]` overrides
-  the YAML at run time. The little-used `auto` value was dropped:
-  pick `protein` or `nucleotide` explicitly (a `--no-resolve` run must
-  pick `nucleotide`). **Breaking change** for any YAML that set
-  `clustering.alphabet`.
-- **`v0.9.4`** — the QC summary's `Passed QC` line was misleading: it
-  only counted what survived the basic-QC stages (duplicates / length /
-  ambiguous / annotation), not protein-QC, segmented completeness,
-  taxonomy-consistency, strain-collision, or per-segment length. It's
-  now relabeled `Passed basic QC`, and a new `Final survivors : N
-  isolates (after every QC stage)` line is appended at the bottom of
-  the QC Summary block (and the success summary in stderr) so the
-  number the user actually cares about — what reached selection — is
-  visible at a glance.
-- **`v0.9.3`** — segmented mode now records the **provenance of every
-  `isolate_id`** (new `isolate_id_source` column: `isolate` | `strain` |
-  `regex`) and runs a **strain-collision detector** on the strain-derived
-  ids. Default action is `warn`; set
-  `segmented.strain_collision_action: drop` to remove colliders into
-  `_qc_removed.tsv` with reason `strain_collision:<segment>`. See
-  [Strain-as-isolate fallback](#strain-as-isolate-fallback-and-collision-detection).
-- **`v0.9.2`** — hardened the cd-hit `.clstr` round-trip: the
-  member-line regex used to silently drop seq ids containing internal
-  `...`; now it's greedy + end-anchored, and the round-trip error
-  message names the specific unmatched ids in both directions.
-- **`v0.9.1`** — segmented runs now report a **per-segment, isolate-level
-  length-filter breakdown** during the run and in the QC summary
-  (`L too short : 257`, `M too long : 6`, …) instead of the misleading
-  "skipped (segmented mode)" line.
-- **`v0.9.0`** — new segmented-only QC step
-  `segmented.taxonomy_consistency` (on by default). Drops any isolate
-  whose segments disagree on the configured taxonomy rank (default
-  `species`) — typically reassortants or `/isolate` collisions. Missing
-  labels are ignored; dropped segments appear in `_qc_removed.tsv` with
-  reason `taxonomy_mismatch:<rank>`.
-- **`v0.8.0` / `v0.8.1`** — TSV and FASTA output schemas overhauled and
-  harmonised. Canonical identifier column is always `accession`;
-  booleans are always `TRUE` / `FALSE`; length columns carry their
-  alphabet (`length_nt`, `length_aa`, `segment_length_nt`,
-  `total_length_nt`); taxonomic ladder is the same nine ranks
-  everywhere. Representative FASTA now splits by mode
-  (`_representative_isolate_proteins.fasta` segmented vs
-  `_representative_sequence_proteins.fasta` non-segmented) with NCBI
-  bracket-tag headers carrying organism, full taxonomy, host, country,
-  collection date, and protein length. **Breaking change** for any
-  downstream script that parses output by column or filename.
-- **`v0.7.0` / `v0.7.1`** — rich phyloXML output: every leaf carries
-  taxonomy, accession, host/country/date as `<property>` elements; every
-  annotated internal clade carries an LCA scientific name + rank;
-  taxonomy-guided rooting (with MAD / midpoint fallbacks); deterministic
-  short-id remap so phylo binaries can't lose track of identity.
-- **`v0.6.0` / `v0.6.1`** — **protein-alphabet clustering is now the
-  default.** Segmented runs cluster on the per-isolate concatenated
-  marker proteins (longest CDS per segment, overridable). IQ-TREE
-  becomes the protein-tree default (ModelFinder + UFBoot); FastTree
-  stays the nucleotide default.
+- **`v0.21.0`** — non-segmented output schema parity + 7 new bundled
+  HMM profiles. `_representative_sequences.tsv` now uses the
+  **identical column schema** as `_representative_isolates.tsv` so
+  one analysis script reads both modes; two new TSVs
+  `_sequence_proteins.tsv` / `_representative_sequence_proteins.tsv`
+  give non-segmented mode the same per-CDS coverage the segmented
+  side already had. Bundled HMM DB grew from 19 → 26 with the
+  coronavirus accessory + alternative-Spike profiles. A stderr
+  warning fires when a configured HMM token names a profile absent
+  from the database.
+
+- **`v0.20.x`** — phylogenetic stack hardening. **v0.20.0** added
+  partitioned-supermatrix trees for protein + IQ-TREE runs (default
+  on; per-family MSA → column-wise supermatrix → ModelFinder per
+  partition; falls back transparently to single-alignment when only
+  one marker family is present), trimAl alignment trimming (off by
+  default; soft-fails to the untrimmed alignment), and two new
+  bundled HMMs. **v0.20.1** introduced the N-to-C
+  domain-architecture token notation (`"A--B"` means A is N-terminal
+  to B, mirroring how biology draws a protein). **v0.20.2** added
+  alternative architectures within one marker (`hmms: [token1,
+  token2]` is OR), so e.g. one Spike spec spans both alpha-CoV
+  `CoV_S1--CoV_S2` and beta-CoV `bCoV_S1_N--bCoV_S1_RBD--CoV_S2`
+  architectures.
+
+- **`v0.18.0` / v0.17.0 / v0.16.0 / v0.15.0`** — per-protein
+  phylogenetics. **v0.15.0** introduced `--per-protein-phylo` (one
+  tree per HMM marker spec, useful for spotting reassortment as
+  topological incongruence between segment-marker trees). **v0.16.0**
+  added taxonomy-driven leaf colouring shared across the
+  whole-genome tree and every per-marker tree (so a genus is the
+  same colour everywhere — what makes incongruence visually obvious
+  in Archaeopteryx). **v0.17.0** added the
+  `{prefix}_incongruence.tsv` pairwise unrooted-Robinson-Foulds table
+  so you don't have to eyeball it. **v0.18.0** scoped each leaf in a
+  per-marker tree to its satisfying CDS and made MAFFT strategy
+  configurable (default `--auto`; opt-in L-INS-i for publication
+  runs).
+
+- **`v0.14.x`** — HMM-tier matured into universal QC. **v0.14.1**
+  reframed the HMM scan from "alphabet=protein only" (v0.13.0) to
+  "runs on every run that declares any `hmms:`" — segments / sequences
+  failing the HMM gate are dropped regardless of clustering alphabet.
+  **v0.14.2** added a protein-quality QC step (ambiguous-residue
+  fraction on CDS translations — closes the gap where a garbled
+  translation could pass a presence-only protein-count check).
+  **v0.14.3** was a scientific-accuracy audit pass (HMM coverage,
+  length filter, cluster-size accounting). **v0.14.4** hardened the
+  `--plot` step so matplotlib is the only hard dep and `umap-learn`
+  is best-effort with a classical-MDS fallback.
+
+For releases before v0.14, see `git log` — the v0.6 to v0.13 line
+brought protein-alphabet clustering, the harmonised TSV/FASTA
+schemas, the rich phyloXML output, `_summary.md`, per-isolate
+taxonomy-consistency QC, strain-as-isolate provenance + collision
+detection, and the initial HMM-based marker selection (`v0.13.0`).
