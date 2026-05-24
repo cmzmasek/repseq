@@ -1306,6 +1306,20 @@ run auto-`hmmpress`-es the file if the `.h3*` index files are missing.
 `repseq doctor` reports the DB status (path, profile count, indexed
 Y/N, GA-cutoff coverage).
 
+> **HMM hits are cached.** Each CDS is scanned against the HMM
+> database once and the result is kept in the local cache, keyed on
+> the CDS amino-acid sequence **and** a fingerprint of the database
+> file. Swapping in a different DB (or rebuilding the bundled one)
+> invalidates old entries automatically — no manual step needed.
+> Editing cutoffs (`default_evalue`, `relative_length_cutoff`,
+> `multidomain_overlap_tolerance`, …) likewise needs no clear; cutoffs
+> are reapplied each run. The one case where a manual clear helps is
+> editing a `.hmm` file in place without changing its size or mtime,
+> or wanting to reclaim disk after a DB swap:
+> `repseq cache clear -c your_config.yaml --source hmmscan` wipes only
+> the HMM hits and leaves the NCBI / UniProt caches intact. See
+> [The local cache](#the-local-cache) for the full breakdown.
+
 ### Configuration examples
 
 Non-segmented marker spec (top-level `clustering.cluster_protein`).
@@ -1440,15 +1454,81 @@ unambiguously in the protein-taxonomic report).
 
 ## The local cache
 
-Every NCBI/UniProt lookup is saved to a small database (`~/.repseq/cache/` by
-default) so you only pay the network cost once. Manage it with:
+Every NCBI/UniProt lookup is saved to a small SQLite database
+(`~/.repseq/cache/` by default) so you only pay the network cost once.
+A few different "kinds" of lookups share this cache, each under its own
+**source** name:
+
+| Source              | What's cached                                                          |
+|---------------------|------------------------------------------------------------------------|
+| `ncbi_taxonomy`     | Taxonomy lineages for accessions / taxon IDs.                          |
+| `ncbi_proteins`     | GenBank CDS records (the `/isolate`, `/segment`, protein translations). |
+| `uniprot`           | UniProt entries pulled by accession.                                   |
+| `hmmscan`           | Per-CDS HMM hit lists from `hmmscan` (see below).                       |
+
+Manage it with:
 
 ```bash
-repseq cache stats                           # how big is it, what's in it
-repseq cache purge-expired                   # remove stale entries
-repseq cache clear                           # wipe everything
-repseq cache clear --source ncbi_taxonomy    # wipe just one kind of lookup
+repseq cache stats -c your_config.yaml                # how big is it, what's in it
+repseq cache purge-expired -c your_config.yaml        # remove stale entries (TTL)
+repseq cache clear -c your_config.yaml                # wipe everything (asks first)
+repseq cache clear -c your_config.yaml --source ncbi_taxonomy   # wipe just one source
 ```
+
+`--source` accepts any of the source names from the table above.
+
+### When (and when not) to clear the `hmmscan` cache
+
+The `hmmscan` cache stores, for every CDS amino-acid sequence the
+pipeline has ever seen, the **raw HMM hit list** returned by `hmmscan`
+against your HMM database. Because viral CDSes are very repetitive
+across closely related isolates, this cache pays for itself within a
+single run — and on re-runs the HMM step is essentially free.
+
+Two things to know:
+
+1. **Cutoff changes do NOT require a clear.** The cache stores the raw
+   hits; the pass/fail flags (E-value, GA threshold, coverage,
+   multidomain order, overlap tolerance) are recomputed every run from
+   your live config. Editing `hmm.default_evalue`,
+   `hmm.relative_length_cutoff`, `hmm.use_ga_when_available`, or
+   `hmm.multidomain_overlap_tolerance` is fine — the next run will
+   apply the new cutoffs to the cached hits.
+
+2. **DB changes usually do NOT require a clear either.** Each cache
+   entry is keyed on `(AA sequence, database fingerprint)`. The
+   fingerprint is derived from the `.hmm` file's size and modification
+   time, so pointing `hmm.database` at a different file — or
+   rebuilding the bundled DB with `scripts/build_bundled_hmms.sh` —
+   automatically invalidates the old entries: they simply become
+   unreachable and the next run rescans against the new DB. They'll
+   eventually fall out of the cache via TTL (`taxonomy.cache_ttl_days`,
+   30 days by default).
+
+You only need to manually clear the `hmmscan` cache when:
+
+- **You want to reclaim disk space** after a DB swap — the orphaned
+  old-fingerprint rows are dead weight until the TTL evicts them.
+- **You edited the `.hmm` file in place without changing its size or
+  mtime** (uncommon, but possible with tools that preserve timestamps,
+  or with content-only edits at the exact same length). The DB
+  fingerprint will look unchanged, and stale hits will be reused.
+- **You suspect cache corruption** — a partial / interrupted earlier
+  run, or a manual edit to the SQLite file.
+
+In those cases:
+
+```bash
+repseq cache clear -c your_config.yaml --source hmmscan
+```
+
+This wipes only the `hmmscan` rows. Your NCBI taxonomy, GenBank CDS,
+and UniProt caches stay intact — so the next run still skips the
+network roundtrips and only the HMM scan re-fires. Add `--yes` to skip
+the confirmation prompt.
+
+To see how much you're holding before / after, use `repseq cache stats
+-c your_config.yaml` — it lists entry counts per source.
 
 ---
 

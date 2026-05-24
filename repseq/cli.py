@@ -66,20 +66,30 @@ def _shared_options(fn):
     fn = click.option(
         "--plot", is_flag=True, default=False,
         help=(
-            "Render a UMAP scatter of the clustering result to "
-            "{prefix}_clustering.png (requires the [viz] extras: "
-            "pip install 'repseq[viz]')."
+            "Render a 2-D scatter of the clustering result to "
+            "{prefix}_clustering.png. Uses UMAP when 'umap-learn' is "
+            "installed (the [viz-umap] extra) and falls back to a "
+            "numpy-only classical MDS (PCoA) on a k-mer Jaccard distance "
+            "otherwise; the chosen method appears in the figure title. "
+            "Requires the [viz] extras for matplotlib: pip install "
+            "'repseq[viz]' (or 'repseq[viz-umap]' for the UMAP upgrade)."
         ),
     )(fn)
     fn = click.option(
         "--phylo", is_flag=True, default=False,
         help=(
-            "After selection, build an MSA (MAFFT) and an approximate-ML "
-            "tree (FastTree) over the representative sequences and write "
-            "{prefix}_msa.fasta, {prefix}_tree.nwk, {prefix}_tree.xml "
-            "(phyloXML with original names restored), and "
-            "{prefix}_tree_id_map.tsv. Requires 'mafft' and 'FastTree' on "
-            "PATH; skipped with a warning if fewer than 3 representatives."
+            "After selection, build an MSA (MAFFT) and an ML tree over the "
+            "representatives, then write {prefix}_msa.fasta, "
+            "{prefix}_tree.nwk, {prefix}_tree.xml (phyloXML with taxonomy + "
+            "metadata properties and taxonomy-driven leaf colours), and "
+            "{prefix}_tree_id_map.tsv. Tree builder is chosen by phylo.tool "
+            "(default 'auto': IQ-TREE with ModelFinder + UFBoot for protein "
+            "alignments, FastTree -nt -gtr for nucleotide). For protein + "
+            "IQ-TREE with >=2 HMM-resolvable marker families, builds a "
+            "partitioned supermatrix by default (phylo.partition). Optional "
+            "trimAl trimming via phylo.trimal (off by default). Requires "
+            "'mafft' on PATH, plus 'iqtree2' and/or 'FastTree' as needed; "
+            "skipped with a warning if fewer than 3 representatives."
         ),
     )(fn)
     fn = click.option(
@@ -1939,9 +1949,10 @@ def cache_group():
 
 
 @cache_group.command("stats")
-@click.option("--config", "-c", "config_path", default=None)
+@click.option("--config", "-c", "config_path", default=None,
+              help="Path to YAML config file (locates the cache directory).")
 def cache_stats(config_path):
-    """Show cache statistics."""
+    """Show cache statistics: total entries, size, and a per-source breakdown."""
     cfg = load_config(config_path)
     cache = TaxonomyCache(cfg["cache_dir"])
     stats = cache.stats()
@@ -1953,11 +1964,18 @@ def cache_stats(config_path):
 
 
 @cache_group.command("clear")
-@click.option("--config", "-c", "config_path", default=None)
-@click.option("--source", default=None, help="Clear only a specific source.")
+@click.option("--config", "-c", "config_path", default=None,
+              help="Path to YAML config file (locates the cache directory).")
+@click.option("--source", default=None,
+              help=(
+                  "Clear only this source. Common values: 'ncbi_taxonomy' "
+                  "(lineages), 'ncbi_proteins' (GenBank CDS records), "
+                  "'uniprot' (UniProt entries), 'hmmscan' (HMM hit lists). "
+                  "Run 'repseq cache stats' to see which sources are present."
+              ))
 @click.confirmation_option(prompt="This will delete cached data. Continue?")
 def cache_clear(config_path, source):
-    """Clear the cache (all sources or a specific one)."""
+    """Clear the cache (all sources, or one with --source)."""
     cfg = load_config(config_path)
     cache = TaxonomyCache(cfg["cache_dir"])
     n = cache.clear(source)
@@ -1965,9 +1983,10 @@ def cache_clear(config_path, source):
 
 
 @cache_group.command("purge-expired")
-@click.option("--config", "-c", "config_path", default=None)
+@click.option("--config", "-c", "config_path", default=None,
+              help="Path to YAML config file (locates the cache directory).")
 def cache_purge(config_path):
-    """Remove expired cache entries."""
+    """Remove expired cache entries (older than taxonomy.cache_ttl_days)."""
     cfg = load_config(config_path)
     cache = TaxonomyCache(cfg["cache_dir"])
     n = cache.purge_expired()
