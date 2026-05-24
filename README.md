@@ -213,7 +213,8 @@ your FASTA file(s)
     • per-rep metadata spreadsheet
     • per-stratum + per-cluster + per-drop TSVs
     • taxonomic diversity report              →  {prefix}_taxonomic_report.txt
-    • per-marker coverage + length stats      →  {prefix}_protein_taxonomic_report.txt
+    • per-marker coverage + AA length stats   →  {prefix}_protein_taxonomic_report.txt
+    • per-rank NT length stats                →  {prefix}_nucleotide_taxonomic_report.txt
     • Methods-section starter                 →  {prefix}_summary.md
     • plain-text run log                      →  {prefix}_run.log
     • (optional) UMAP/MDS clustering plot                        (--plot)
@@ -263,6 +264,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_representatives_protein.fasta` | when `alphabet_for_clustering: protein` (default) | The AA strings actually fed into the clusterer. |
 | `{prefix}_taxonomic_report.txt` | every run | Per-rank diversity table: distinct taxa before vs after clustering. |
 | `{prefix}_protein_taxonomic_report.txt` | any run with `cluster_protein` / `segment_markers` / `extra_protein` declared | Per-rank protein coverage + AA length statistics (v0.22.0). |
+| `{prefix}_nucleotide_taxonomic_report.txt` | every run | Per-rank NT length statistics: per-segment + `total` (segmented) or single `genome` column (non-segmented). v0.23.0. |
 | `{prefix}_clustering.png` | only with `--plot` | Diagnostic scatter of the clustering. |
 | `{prefix}_msa.fasta`, `_tree.nwk`, `_tree.xml`, `_tree_id_map.tsv` | only with `--phylo` | Alignment + tree + name mapping. |
 | `{prefix}_partition.nex`, `_msa_<family>.fasta` | `--phylo`, protein + IQ-TREE | NEXUS partition file + per-family alignments (partitioned-supermatrix tree). |
@@ -571,10 +573,10 @@ isolates to fall out, not just that "some did".
 
 ### Taxonomic reports
 
-Two plain-text reports that turn "what kind of diversity did I just
-select?" into a one-glance answer. Both are written on every run that
-has the relevant inputs available; both are safe to open in any text
-editor.
+Three plain-text reports that turn "what kind of diversity did I just
+select?" into a one-glance answer. All three are written on every run
+that has the relevant inputs available; all are safe to open in any
+text editor.
 
 #### `{prefix}_taxonomic_report.txt` — diversity before vs after
 
@@ -634,6 +636,46 @@ covering polymerase / glycoprotein / nucleocapsid across the
 families I started with, and is the protein length distribution still
 sensible?" — the bench-scientist QC that catches a marker quietly
 dropping out of one genus.
+
+#### `{prefix}_nucleotide_taxonomic_report.txt` — per-rank NT length (v0.23.0+)
+
+The nucleotide analogue of `_protein_taxonomic_report.txt`: per-rank
+**length-statistics** tables on the input nucleotide sequences
+themselves, not on the encoded proteins. Two sub-tables per rank —
+post-QC pool and representatives — with cells in the same
+`min, max, median, Q3-Q1, n` format (Q3-Q1 = IQR; n = number of items
+contributing the length).
+
+Columns depend on the mode:
+
+- **Segmented:** one column per **segment** in the configured order
+  (S/M/L for hanta; HA/NA/NS/… for influenza), plus a trailing
+  **`total`** column (sum of segment lengths per isolate, i.e. the
+  concatenated genome length). One row per isolate. Lets you see e.g.
+  whether the L segment shrank in your reps compared to the pool
+  (a sign your clustering disproportionately kept short / fragmented
+  records), or whether one genus has a systematically larger total
+  genome than another.
+- **Non-segmented:** a single **`genome`** column with NT lengths.
+  Useful for sanity-checking that the reps don't skew toward the
+  short or long end of the distribution within each taxon.
+
+Same rank scope as the protein report (`subgenus` to `class`,
+skipping `species`), the same top-20-by-member-count truncation knob
+(`output.protein_report.max_breakdown`), and the same "blank ranks
+are excluded" rule.
+
+There are **no coverage tables** here — every passing entity carries
+every required nucleotide unit by construction (segmented
+completeness QC guarantees all `expected_segments` are present), so a
+coverage column would always be 100% and add no signal. The
+protein-coverage tables exist precisely because proteins are
+variably present; segments and whole genomes are not.
+
+Use it for: catching a representative set that's lost length
+distribution against the pool — a frequent and easy-to-miss artifact
+when clustering at an aggressive identity threshold or when one
+sub-clade is over-represented by short submissions.
 
 ### Diagnostic plot
 

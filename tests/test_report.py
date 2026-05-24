@@ -15,6 +15,7 @@ from pathlib import Path
 from repseq.output.report import (
     write_all_reports,
     write_group_counts_tsv,
+    write_nucleotide_taxonomic_report,
     write_representative_isolates_tsv,
     write_representative_sequences_tsv,
     write_run_log,
@@ -502,3 +503,148 @@ def test_taxonomic_report_handles_no_taxonomy(tmp_path):
     write_taxonomic_report(before, [], segmented=False, path=path)
     text = path.read_text()
     assert "(no taxonomy available at any rank)" in text
+
+
+# ---------------------------------------------------------------------------
+# write_nucleotide_taxonomic_report
+# ---------------------------------------------------------------------------
+
+def _nt_seq(seq_id, *, length, genus=None, species=None, family=None):
+    tax = TaxonomyInfo(species=species, genus=genus, family=family)
+    return Sequence(
+        id=seq_id, header=f">{seq_id}", sequence="A" * length,
+        seq_type=SequenceType.NUCLEOTIDE, taxonomy=tax,
+    )
+
+
+def test_nucleotide_report_non_segmented_emits_genome_column(tmp_path):
+    """Non-segmented mode: one `genome` column with NT-length stats per rank."""
+    before = [
+        _nt_seq("a", length=27000, genus="Alphacoronavirus", family="Coronaviridae"),
+        _nt_seq("b", length=28000, genus="Alphacoronavirus", family="Coronaviridae"),
+        _nt_seq("c", length=29000, genus="Alphacoronavirus", family="Coronaviridae"),
+        _nt_seq("d", length=30000, genus="Betacoronavirus",  family="Coronaviridae"),
+    ]
+    after = [
+        _nt_seq("a", length=27000, genus="Alphacoronavirus", family="Coronaviridae"),
+        _nt_seq("d", length=30000, genus="Betacoronavirus",  family="Coronaviridae"),
+    ]
+    path = tmp_path / "x_nucleotide_taxonomic_report.txt"
+    cfg = {"output": {"protein_report": {"max_breakdown": 20}}}
+    assert write_nucleotide_taxonomic_report(
+        before, after, cfg, segmented=False, path=path,
+    )
+    text = path.read_text()
+    # Header + units.
+    assert "Nucleotide taxonomic report" in text
+    assert "Counting unit: sequences" in text
+    # `genus` rank table exists with a `genome` column.
+    assert "genus (2 distinct):" in text
+    assert "genome" in text
+    # Post-QC pool stats for Alphacoronavirus genome lengths
+    # 27000/28000/29000 → min 27000, max 29000, median 28000, n=3.
+    assert "27000, 29000, 28000, " in text  # min, max, median, ...
+    assert ", 3" in text  # n=3 contributors
+
+
+def test_nucleotide_report_segmented_emits_per_segment_and_total(tmp_path):
+    """Segmented mode: columns S/M/L + a trailing `total` column."""
+    # Build two CONCAT isolates of the same hanta genus, each with three
+    # per-segment Sequence objects feeding `concat_segments`.
+    def isolate(iso_id, s_len, m_len, l_len, *, genus="Orthohantavirus"):
+        tax = TaxonomyInfo(genus=genus, family="Hantaviridae")
+        s = Sequence(id=f"{iso_id}.S", header="", sequence="A" * s_len,
+                     seq_type=SequenceType.NUCLEOTIDE, segment="S")
+        m = Sequence(id=f"{iso_id}.M", header="", sequence="A" * m_len,
+                     seq_type=SequenceType.NUCLEOTIDE, segment="M")
+        l_ = Sequence(id=f"{iso_id}.L", header="", sequence="A" * l_len,
+                      seq_type=SequenceType.NUCLEOTIDE, segment="L")
+        return Sequence(
+            id=f"CONCAT|{iso_id}",
+            header=f"CONCAT|{iso_id}",
+            sequence=("A" * (s_len + m_len + l_len)),
+            seq_type=SequenceType.NUCLEOTIDE,
+            isolate_id=iso_id,
+            taxonomy=tax,
+            concat_segments=[s, m, l_],
+        )
+
+    before = [
+        isolate("iso1", 1850, 3650, 6500),
+        isolate("iso2", 1900, 3700, 6600),
+    ]
+    after = [isolate("iso1", 1850, 3650, 6500)]
+    cfg = {
+        "output": {"protein_report": {"max_breakdown": 20}},
+        "segmented": {
+            "enabled": True,
+            "virus": "hantaviridae",
+            "viruses": {"hantaviridae": {"segments": ["S", "M", "L"]}},
+        },
+    }
+    path = tmp_path / "x_nucleotide_taxonomic_report.txt"
+    assert write_nucleotide_taxonomic_report(
+        before, after, cfg, segmented=True, path=path,
+    )
+    text = path.read_text()
+    assert "Counting unit: isolates" in text
+    # Column order S, M, L, total.
+    header_line = next(
+        ln for ln in text.splitlines()
+        if "taxon" in ln and "S" in ln and "M" in ln and "L" in ln
+    )
+    s_idx = header_line.index(" S")
+    m_idx = header_line.index(" M")
+    l_idx = header_line.index(" L")
+    t_idx = header_line.index("total")
+    assert s_idx < m_idx < l_idx < t_idx
+    # The L column should carry n=2 contributors in the post-QC table.
+    # (Min 6500, max 6600, median 6550, IQR 0 for two values? statistics
+    # gives Q3-Q1 = 50 for [6500,6600] under exclusive quantiles —
+    # check `n=2` is what's reported regardless of IQR rounding.)
+    assert "6500" in text and "6600" in text
+    # Total column for Orthohantavirus, n=2 isolates.
+    total_min = 1850 + 3650 + 6500  # 12000
+    total_max = 1900 + 3700 + 6600  # 12200
+    assert str(total_min) in text and str(total_max) in text
+
+
+def test_nucleotide_report_skips_species_rank(tmp_path):
+    """Species rank is intentionally skipped (matches the protein report)."""
+    before = [
+        _nt_seq("a", length=1000, species="Sp A", genus="Gen X"),
+        _nt_seq("b", length=1100, species="Sp A", genus="Gen X"),
+    ]
+    cfg = {"output": {"protein_report": {"max_breakdown": 20}}}
+    path = tmp_path / "x_nucleotide_taxonomic_report.txt"
+    write_nucleotide_taxonomic_report(before, [], cfg, segmented=False, path=path)
+    text = path.read_text()
+    # No `species (...)` rank header; genus is present.
+    assert "species (" not in text
+    assert "genus (1 distinct):" in text
+
+
+def test_nucleotide_report_truncates_rank_above_max_breakdown(tmp_path):
+    """A rank with > max_breakdown distinct taxa shows top-N + a 'more taxa' line."""
+    before = [
+        _nt_seq(f"s{i}", length=1000 + i, genus=f"Genus{i:02d}")
+        for i in range(25)
+    ]
+    cfg = {"output": {"protein_report": {"max_breakdown": 5}}}
+    path = tmp_path / "x_nucleotide_taxonomic_report.txt"
+    write_nucleotide_taxonomic_report(before, [], cfg, segmented=False, path=path)
+    text = path.read_text()
+    assert "genus (25 distinct, top 5 by member count shown):" in text
+    assert "... +20 more taxa not shown" in text
+
+
+def test_nucleotide_report_handles_no_taxonomy(tmp_path):
+    """No taxonomy at any rank still writes a valid report."""
+    before = [
+        Sequence(id="a", header=">a", sequence="ACGT", seq_type=SequenceType.NUCLEOTIDE),
+    ]
+    cfg = {"output": {"protein_report": {"max_breakdown": 20}}}
+    path = tmp_path / "x_nucleotide_taxonomic_report.txt"
+    assert write_nucleotide_taxonomic_report(before, [], cfg, segmented=False, path=path)
+    text = path.read_text()
+    assert "(no taxonomy available at any rank from subgenus to class)" in text

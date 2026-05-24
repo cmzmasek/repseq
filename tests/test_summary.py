@@ -133,7 +133,10 @@ def test_render_summary_non_segmented_describes_absolute_genome_bounds(make_seq,
     assert "longer than 13,000 nt" in md
     # Regression guards: the removed median wording must not reappear.
     assert "median" not in md
-    assert "per-rank" not in md
+    # "per-rank" used to be a regression guard for an older relative-bounds
+    # phrasing in this same filter section; v0.23 introduced legitimate
+    # "per-rank" prose for the taxonomic / nucleotide-length reports, so
+    # we drop the substring guard and rely on the "median" check instead.
     # And the per-segment sentence must NOT appear when removed_length_by_segment is empty.
     assert "per-segment length filter" not in md
 
@@ -436,6 +439,13 @@ def test_render_summary_points_to_taxonomic_report(make_seq, tmp_path):
     md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
     assert "{prefix}_taxonomic_report.txt" in md
     assert "Taxonomic diversity at each rank before and after clustering" in md
+
+
+def test_render_summary_points_to_nucleotide_taxonomic_report(make_seq, tmp_path):
+    """Summary must also point the reader at the NT length-statistics report."""
+    cfg = _base_cfg(tmp_path)
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "{prefix}_nucleotide_taxonomic_report.txt" in md
 
 
 def test_render_summary_protein_annotation_segmented_uses_segment_wording(make_seq, tmp_path):

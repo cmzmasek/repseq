@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 import yaml
 
+from ..config import get_virus_config
 from ..hmm.runner import coverage_of
 from ..models import QCReport, RunResult, Sequence
 
@@ -1379,6 +1380,193 @@ def write_protein_taxonomic_report(
         lines.append("")
 
     lines.extend(_format_hmm_architecture_section(specs, cfg))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines).rstrip() + "\n")
+    return True
+
+
+def _nucleotide_lengths_per_taxon(
+    seqs: list[Sequence],
+    rank: str,
+    segmented: bool,
+    segment_order: list[str],
+) -> tuple[dict[str, int], dict[str, list[list[int]]], list[str]]:
+    """For each taxon at ``rank``, gather NT lengths column-by-column.
+
+    Non-segmented: one column ``"genome"`` with each sequence's NT length.
+    Segmented: one column per segment in ``segment_order`` plus a trailing
+    ``"total"`` column (sum of segment lengths per CONCAT isolate). The
+    total is read from ``seq.length`` directly — it equals the sum of
+    ``concat_segments`` NT lengths regardless of clustering alphabet,
+    since ``build_concatenated_sequences`` always sets ``seq.sequence``
+    to the joined per-segment NT.
+
+    Items whose taxonomy lacks a value at ``rank`` are excluded (same
+    rule as ``_taxonomic_report.txt`` and the protein report). Counting
+    unit is the input sequence — one row per ``Sequence`` (isolate in
+    segmented mode, sequence otherwise).
+    """
+    if segmented:
+        spec_headers = list(segment_order) + ["total"]
+        seg_index = {name: i for i, name in enumerate(segment_order)}
+    else:
+        spec_headers = ["genome"]
+        seg_index = {}
+
+    taxon_totals: dict[str, int] = {}
+    taxon_lengths: dict[str, list[list[int]]] = {}
+    n_cols = len(spec_headers)
+
+    for seq in seqs:
+        taxon = _seq_rank_value(seq, rank)
+        if not taxon:
+            continue
+        taxon_totals[taxon] = taxon_totals.get(taxon, 0) + 1
+        if taxon not in taxon_lengths:
+            taxon_lengths[taxon] = [[] for _ in range(n_cols)]
+        if segmented:
+            for sub in seq.concat_segments or []:
+                col = seg_index.get(sub.segment) if sub.segment else None
+                if col is None:
+                    continue
+                length = sub.length
+                if length:
+                    taxon_lengths[taxon][col].append(int(length))
+            # Trailing total column: the joined NT length on the CONCAT
+            # itself. Equal to sum(sub.length for sub in concat_segments)
+            # but cheaper and resilient against missing segment labels.
+            if seq.length:
+                taxon_lengths[taxon][-1].append(int(seq.length))
+        else:
+            if seq.length:
+                taxon_lengths[taxon][0].append(int(seq.length))
+
+    return taxon_totals, taxon_lengths, spec_headers
+
+
+def _resolve_segment_order(
+    cfg: dict[str, Any],
+    seqs: list[Sequence],
+) -> list[str]:
+    """Pick the segment column order for the nucleotide report.
+
+    Prefers the active virus block's ``segments:`` list (the canonical
+    declared order — S/M/L for hanta, HA/NA/NS/… for influenza). Falls
+    back to the order segments first appear across the input sequences
+    so the report still works on a partially configured run.
+    """
+    virus_cfg = get_virus_config(cfg)
+    if virus_cfg:
+        seg = virus_cfg.get("segments")
+        if isinstance(seg, list) and seg:
+            return [str(s) for s in seg]
+    seen: list[str] = []
+    seen_set: set[str] = set()
+    for seq in seqs:
+        for sub in seq.concat_segments or []:
+            if sub.segment and sub.segment not in seen_set:
+                seen.append(sub.segment)
+                seen_set.add(sub.segment)
+    return seen
+
+
+def write_nucleotide_taxonomic_report(
+    before_seqs: list[Sequence],
+    after_seqs: list[Sequence],
+    cfg: dict[str, Any],
+    segmented: bool,
+    path: Path,
+) -> bool:
+    """Write ``{prefix}_nucleotide_taxonomic_report.txt``.
+
+    Parallel to :func:`write_protein_taxonomic_report` but reports NT
+    length distributions, not protein coverage. For each rank from
+    ``subgenus`` up to ``class`` (skipping ``species`` — within-species
+    length variation is dominated by sequencing/assembly noise), emits
+    two length-statistics sub-tables (post-QC pool + representatives)
+    with one column per segment plus a ``total`` column in segmented
+    mode, or a single ``genome`` column in non-segmented mode. Cells
+    are ``min, max, median, Q3-Q1, n`` in nucleotides; ``n`` is the
+    number of items contributing the length.
+
+    No coverage tables — every passing entity carries every required
+    nucleotide unit by construction (segmented completeness QC
+    guarantees all ``expected_segments`` are present), so coverage
+    would always be 100% and add no signal.
+    """
+    pr_cfg = cfg.get("output", {}).get("protein_report", {}) or {}
+    max_breakdown = int(pr_cfg.get("max_breakdown", 20))
+
+    if segmented:
+        segment_order = _resolve_segment_order(cfg, before_seqs)
+    else:
+        segment_order = []
+
+    unit = "isolates" if segmented else "sequences"
+
+    lines: list[str] = []
+    lines.append("Nucleotide taxonomic report")
+    lines.append(f"Generated: {datetime.date.today().isoformat()}")
+    lines.append(
+        f"Counting unit: {unit} "
+        f"(post-QC pool fed to clustering = {len(before_seqs)} {unit}; "
+        f"representatives = {len(after_seqs)} {unit})"
+    )
+    lines.append(
+        "Length cell format: min, max, median, Q3-Q1, n (nucleotides; "
+        "n = number of items contributing the length)."
+    )
+    if segmented:
+        lines.append(
+            "Per-segment columns plus a trailing `total` column "
+            "(sum of segment lengths per isolate, i.e. the concatenated "
+            "genome length)."
+        )
+    lines.append("")
+
+    rank_printed_any = False
+    for rank in _PROTEIN_REPORT_RANKS:
+        b_totals, b_lengths, spec_headers = _nucleotide_lengths_per_taxon(
+            before_seqs, rank, segmented, segment_order,
+        )
+        a_totals, a_lengths, _ = _nucleotide_lengths_per_taxon(
+            after_seqs, rank, segmented, segment_order,
+        )
+        n_distinct = len(b_totals)
+        if n_distinct == 0:
+            continue
+        rank_printed_any = True
+        if n_distinct > max_breakdown:
+            header = (
+                f"{rank} ({n_distinct} distinct, top {max_breakdown} by "
+                f"member count shown):"
+            )
+        else:
+            header = f"{rank} ({n_distinct} distinct):"
+        lines.append(header)
+        lines.extend(_format_length_table(
+            indent="  ",
+            title="nucleotide length statistics [min, max, median, Q3-Q1, n] (post-QC pool)",
+            totals=b_totals, lengths=b_lengths,
+            spec_headers=spec_headers,
+            max_breakdown=max_breakdown,
+        ))
+        lines.append("")
+        if a_totals:
+            lines.extend(_format_length_table(
+                indent="  ",
+                title="nucleotide length statistics [min, max, median, Q3-Q1, n] (representatives)",
+                totals=a_totals, lengths=a_lengths,
+                spec_headers=spec_headers,
+                max_breakdown=max_breakdown,
+            ))
+            lines.append("")
+
+    if not rank_printed_any:
+        lines.append("(no taxonomy available at any rank from "
+                     "subgenus to class)")
+        lines.append("")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines).rstrip() + "\n")

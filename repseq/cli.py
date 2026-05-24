@@ -17,6 +17,7 @@ from .models import SequenceSource
 from .models import RunResult
 from .output.report import (
     write_all_reports,
+    write_nucleotide_taxonomic_report,
     write_protein_taxonomic_report,
     write_taxonomic_report,
 )
@@ -1401,6 +1402,24 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
                 out_files.append(pr_path)
         except Exception as exc:
             click.echo(f"[protein taxonomic report skipped] {exc}", err=True)
+    # Per-rank NT length statistics: per-segment lengths + a `total`
+    # column (segmented) or a single `genome` column (non-segmented).
+    # Always-on; soft-fails so a render bug never voids the selection.
+    if pre_clustering_sequences is not None:
+        try:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            nt_path = out_dir / f"{prefix}_nucleotide_taxonomic_report.txt"
+            if write_nucleotide_taxonomic_report(
+                pre_clustering_sequences,
+                result.representatives,
+                cfg,
+                segmented=bool(complete_isolates),
+                path=nt_path,
+            ):
+                out_files.append(nt_path)
+        except Exception as exc:
+            click.echo(f"[nucleotide taxonomic report skipped] {exc}", err=True)
     # Methods-section starter — written after every successful run so
     # a bench scientist can copy it into a paper. Soft-fail (one stderr
     # line) so a render bug never voids a real selection.
