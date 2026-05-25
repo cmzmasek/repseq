@@ -570,8 +570,10 @@ def _read_iqtree_model_file(cfg: dict) -> dict[str, str]:
 
 def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
                   versions: dict, per_protein_ran: bool = False,
-                  per_segment_ran: bool = False) -> str:
-    if not phylo_ran and not per_protein_ran and not per_segment_ran:
+                  per_segment_ran: bool = False,
+                  conservation_ran: bool = False) -> str:
+    if (not phylo_ran and not per_protein_ran
+            and not per_segment_ran and not conservation_ran):
         return ""
     n_reps = len(result.representatives)
     alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
@@ -864,6 +866,24 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"font-colour property readable by tree viewers such as "
             f"Archaeopteryx.\n"
         )
+    if conservation_ran:
+        paragraphs.append(
+            "Per-marker **conservation heatmaps** were rendered to "
+            "`{prefix}_conservation/{prefix}_<family>.png`, one PNG per "
+            "declared HMM marker spec. Each figure stacks two metric "
+            "tracks — per-column **Shannon entropy** (bits, gaps "
+            "excluded) and **fraction matching consensus** (non-gap "
+            "rows whose residue equals the column mode) — over a "
+            "**domain-architecture ribbon** drawn from the HMM hits on "
+            "the longest satisfying CDS across representatives, "
+            "projected from ungapped CDS coordinates onto MSA columns. "
+            "The heatmap cells use a sequential viridis colormap; the "
+            "domain boxes use a stable golden-angle family colour so "
+            "the same marker is visually identifiable across runs. "
+            "Computed in-process from the per-protein MSAs already "
+            "written by `--per-protein-phylo` — no fresh alignment is "
+            "run for the heatmaps.\n"
+        )
     return "\n".join(paragraphs)
 
 
@@ -938,6 +958,7 @@ def render_summary(
     phylo_ran: bool = False,
     per_protein_ran: bool = False,
     per_segment_ran: bool = False,
+    conservation_ran: bool = False,
     command: str = "",
 ) -> str:
     """Build the full Markdown summary as a single string."""
@@ -952,6 +973,7 @@ def render_summary(
         _render_phylo(
             cfg, result, phylo_ran, versions,
             per_protein_ran, per_segment_ran,
+            conservation_ran=conservation_ran,
         ),
         _render_software(cfg, versions, any_phylo),
         _render_footer(),
@@ -970,6 +992,7 @@ def write_summary(
     phylo_ran: bool = False,
     per_protein_ran: bool = False,
     per_segment_ran: bool = False,
+    conservation_ran: bool = False,
     command: str = "",
 ) -> Path:
     """Render the summary and write it to ``{prefix}_summary.md``.
@@ -987,6 +1010,7 @@ def write_summary(
         phylo_ran=phylo_ran,
         per_protein_ran=per_protein_ran,
         per_segment_ran=per_segment_ran,
+        conservation_ran=conservation_ran,
         command=command,
     )
     path.write_text(md)

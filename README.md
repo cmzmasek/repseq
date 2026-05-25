@@ -162,7 +162,8 @@ Every mode also accepts: `--input/-i`, `--output-dir/-o`, `--config/-c`,
 `--threads`, `--seed`, `--segmented`, `--dry-run`, `--no-resolve`,
 `--source {auto,uniprot,ncbi,ncbi_virus}`, `--overflow {keep,trim}`, `--plot`,
 `--phylo`, `--per-protein-phylo`, `--per-segment-phylo` (segmented only),
-`--fast`, `--verbose`, `--alphabet-for-clustering {protein,nucleotide}`.
+`--conservation-heatmap`, `--fast`, `--verbose`,
+`--alphabet-for-clustering {protein,nucleotide}`.
 
 In addition to the selection modes, two diagnostic/utility subcommands:
 
@@ -283,6 +284,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_iqtree_summary.txt` | only with `--phylo` + IQ-TREE | IQ-TREE ModelFinder report. |
 | `{prefix}_iqtree_model.txt` | only with `--phylo` + IQ-TREE | Grep-friendly sidecar with the ModelFinder pick(s): one `<label>: <model>` line per partition (or a single `GENOME: <model>` line for the non-partitioned path). v0.28.0. |
 | `{prefix}_per_protein/` | only with `--per-protein-phylo` | One tree (MSA + Newick + phyloXML + id map) per marker; plus `_incongruence.tsv` of pairwise Robinson-Foulds distances. |
+| `{prefix}_conservation/{prefix}_<family>.png` | only with `--conservation-heatmap` (needs `--per-protein-phylo` first) | One per-marker conservation heatmap: per-column Shannon entropy + fraction-matching-consensus over a domain-architecture ribbon. v0.29.0. |
 | `{prefix}_extra_protein/` | `--per-protein-phylo` + `extra_protein:` declared | Same shape, accessory-protein trees (kept out of the incongruence table by design). |
 | `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment, from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
 | `{prefix}_hmm_diagnostic.tsv` | when the HMM tier ran AND a spec declares `hmms:` | One row per (representative, marker spec, declared HMM profile): `hit` T/F, `best_dom_evalue`, `best_dom_score`, `best_coverage`, `ga_cutoff`, `cutoff_used`, `passing`. Surfaces near-miss patterns the binary gate hides ("65 isolates barely missed the cutoff at E=2e-5"). v0.26.0. |
@@ -1125,6 +1127,55 @@ The default remains `phylo.rooting.method: auto` (taxonomy → MAD →
 midpoint chain); the other accepted values are `taxonomy`, `mad`,
 `midpoint`, and `none` (no rooting — for an input tree already rooted
 upstream).
+
+### Per-marker conservation heatmaps — `--conservation-heatmap` (v0.29.0+)
+
+A visual companion to the per-protein trees. When you pass
+`--conservation-heatmap`, repseq writes one PNG per declared marker
+spec to `{prefix}_conservation/{prefix}_<family>.png`, each showing
+**how conserved every column of the marker alignment is** alongside
+the **domain architecture** that defines the marker.
+
+Three stacked tracks per figure:
+
+1. **Shannon entropy** — per MSA column, in bits. Gaps are treated as
+   missing data (excluded from the per-column residue counts), so the
+   metric measures variability among *present* residues rather than
+   collapsing to "how gappy is this column". Cells use a viridis
+   colormap; dark = conserved, bright = variable.
+2. **Fraction matching consensus** — per column, the fraction of
+   non-gap rows whose residue equals the column mode. Complementary
+   to entropy: entropy weights *all* residues by frequency, %-consensus
+   answers "how often does the most common residue dominate?". Also
+   viridis; dark = low consensus, bright = monomorphic.
+3. **Domain-architecture ribbon** — coloured rectangles drawn from
+   the HMM hits on the **longest satisfying CDS across reps**,
+   projected from ungapped CDS coordinates onto MSA columns so the
+   box edges line up with the columns above. Each family gets a
+   stable golden-angle hue (same HSV space as the taxonomy palette),
+   so a marker that is "the green tree" in `--per-protein-phylo` is
+   also "the green ribbon" here. Box labels carry the HMM profile
+   name when there's room.
+
+The heatmaps **reuse the per-protein MSAs `--per-protein-phylo` has
+already written** — no new alignment is run. That means:
+
+- `--conservation-heatmap` **requires `--per-protein-phylo`** to have
+  produced the per-family MSAs at
+  `{prefix}_per_protein/<family>_msa.fasta`. Without those files the
+  step soft-fails per family with a stderr note (a missing MSA
+  doesn't stop sibling families).
+- It is **cheap** — only matplotlib runs on top of in-memory metric
+  computation; no MAFFT, no tree-builder. A run with twelve markers
+  produces twelve PNGs in seconds.
+- You can re-run **only** `--conservation-heatmap` against an output
+  directory from an earlier full run if you want a fresh PNG without
+  re-aligning.
+
+> **Requirement:** matplotlib (`pip install 'repseq[viz]'` — same
+> extra `--plot` uses). The step soft-fails with a single stderr line
+> if matplotlib can't be imported, leaving the rest of the run
+> intact.
 
 ---
 
