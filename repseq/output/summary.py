@@ -571,9 +571,11 @@ def _read_iqtree_model_file(cfg: dict) -> dict[str, str]:
 def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
                   versions: dict, per_protein_ran: bool = False,
                   per_segment_ran: bool = False,
-                  conservation_ran: bool = False) -> str:
+                  conservation_ran: bool = False,
+                  pre_cluster_ran: bool = False) -> str:
     if (not phylo_ran and not per_protein_ran
-            and not per_segment_ran and not conservation_ran):
+            and not per_segment_ran and not conservation_ran
+            and not pre_cluster_ran):
         return ""
     n_reps = len(result.representatives)
     alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
@@ -866,6 +868,24 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"font-colour property readable by tree viewers such as "
             f"Archaeopteryx.\n"
         )
+    if pre_cluster_ran:
+        paragraphs.append(
+            "A **pre-cluster overview tree** of every post-QC sequence "
+            "(one leaf per CONCAT isolate in segmented mode) was "
+            "inferred with a single-pass pipeline — **MAFFT** "
+            f"v{versions.get('mafft') or '?'} ({_CITATIONS['mafft']}) "
+            "with `--retree 1` (FFT-NS-1, no `--auto`), followed by "
+            f"**FastTree** v{versions.get('FastTree') or '?'} "
+            f"({_CITATIONS['FastTree']}), midpoint-rooted, with no "
+            "LCA annotation, trimAl, or bootstrap. The phyloXML "
+            "`<name>` of each representative leaf is prefixed with "
+            "`[repr] ` so the elected representatives can be picked "
+            "out at a glance against the broader diversity of the "
+            "input pool. Outputs: `{prefix}_pre_cluster_tree.nwk`, "
+            "`{prefix}_pre_cluster_tree.xml`, and "
+            "`{prefix}_pre_cluster_tree_id_map.tsv` (with an "
+            "`is_rep` column for grep-without-XML use).\n"
+        )
     if conservation_ran:
         paragraphs.append(
             "Per-marker **conservation plots** were rendered to "
@@ -961,11 +981,14 @@ def render_summary(
     per_protein_ran: bool = False,
     per_segment_ran: bool = False,
     conservation_ran: bool = False,
+    pre_cluster_ran: bool = False,
     command: str = "",
 ) -> str:
     """Build the full Markdown summary as a single string."""
     versions = detect_tool_versions()
-    any_phylo = phylo_ran or per_protein_ran or per_segment_ran
+    any_phylo = (
+        phylo_ran or per_protein_ran or per_segment_ran or pre_cluster_ran
+    )
     sections = [
         _render_header(cfg, command, result.mode),
         _render_input(qc_report, input_paths),
@@ -976,6 +999,7 @@ def render_summary(
             cfg, result, phylo_ran, versions,
             per_protein_ran, per_segment_ran,
             conservation_ran=conservation_ran,
+            pre_cluster_ran=pre_cluster_ran,
         ),
         _render_software(cfg, versions, any_phylo),
         _render_footer(),
@@ -995,6 +1019,7 @@ def write_summary(
     per_protein_ran: bool = False,
     per_segment_ran: bool = False,
     conservation_ran: bool = False,
+    pre_cluster_ran: bool = False,
     command: str = "",
 ) -> Path:
     """Render the summary and write it to ``{prefix}_summary.md``.
@@ -1013,6 +1038,7 @@ def write_summary(
         per_protein_ran=per_protein_ran,
         per_segment_ran=per_segment_ran,
         conservation_ran=conservation_ran,
+        pre_cluster_ran=pre_cluster_ran,
         command=command,
     )
     path.write_text(md)

@@ -8,11 +8,13 @@ alternatives.
 
 from .pipeline import PhyloError, run_phylogeny
 from .per_protein import run_per_protein_phylogeny, run_per_segment_phylogeny
+from .pre_cluster import run_pre_cluster_phylogeny
 
 __all__ = [
     "PhyloError",
     "run_phylogeny",
     "run_per_protein_phylogeny",
     "run_per_segment_phylogeny",
+    "run_pre_cluster_phylogeny",
 ]
 

@@ -492,6 +492,19 @@ DEFAULTS: dict[str, Any] = {
                 "extra_args": [],
             },
         },
+        # Pre-cluster overview tree (2H, v0.32.0+), triggered with
+        # --pre-cluster-tree or by setting `enabled: true` here. Builds a
+        # single rough tree of EVERY post-QC sequence (one leaf per
+        # CONCAT isolate in segmented mode) so the bench scientist can
+        # see at a glance where the elected representatives land in the
+        # broader diversity. Pipeline is hard-coded for speed regardless
+        # of the rest of phylo: MAFFT --retree 1 (no --auto), FastTree
+        # (no IQ-TREE / ModelFinder / UFBoot), midpoint root only, no
+        # LCA, no trimAl. Representative leaves are prefixed with
+        # "[repr] " in the phyloXML <name> for visual identification.
+        "pre_cluster_tree": {
+            "enabled": False,
+        },
     },
     "taxonomy": {
         "ncbi_email": None,

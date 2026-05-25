@@ -1,0 +1,259 @@
+"""Pre-cluster overview tree (2H).
+
+A rough, single-pass phylogeny of **every post-QC sequence** (one leaf
+per CONCAT isolate in segmented mode), built BEFORE clustering would
+have collapsed redundancy. The point is diagnostic, not analytical:
+the bench scientist opens this tree alongside the post-cluster tree
+(2E) and can see at a glance where the elected representatives land
+in the broader diversity of the input pool. Representative leaves get
+a ``[repr] `` prefix on their phyloXML ``<name>`` for visual
+identification; non-rep leaves carry the same formatted label without
+the prefix.
+
+The pipeline here is intentionally **hard-coded for speed**, regardless
+of the rest of ``phylo:``:
+
+* MAFFT ``--retree 1`` (single-pass FFT-NS-1) — no ``--auto``,
+  no L-INS-i.
+* **FastTree** (no IQ-TREE / ModelFinder / UFBoot) regardless of
+  alphabet — the user explicitly asked for "rough", and any model
+  selection would dominate the runtime budget.
+* **Midpoint rooting** only — no taxonomy-guided rooting, no MAD.
+* **No LCA annotation, no trimAl, no bootstrap.** The internal nodes
+  carry only the branch lengths FastTree wrote.
+
+Outputs land alongside the rest of the run's phylo files:
+
+* ``{prefix}_pre_cluster_tree.nwk`` — Newick, short-id leaves.
+* ``{prefix}_pre_cluster_tree.xml`` — phyloXML with taxonomy
+  ``<property>`` enrichment + per-leaf taxonomy colouring (the same
+  colour palette 2E and 2F use) and the ``[repr] `` prefix on rep
+  leaves.
+* ``{prefix}_pre_cluster_tree_id_map.tsv`` — three columns
+  (``short_id``, ``accession``, ``is_rep``) so a user grepping for
+  reps without opening the XML can find them.
+
+Soft-fails ``PhyloError`` like the rest of the phylo step: missing
+MAFFT/FastTree, fewer than 3 sequences, or any subprocess error
+surfaces as a stderr line and the rest of the run continues.
+"""
+
+from __future__ import annotations
+
+import logging
+import tempfile
+from pathlib import Path
+from typing import Any, Optional
+
+from Bio import Phylo
+
+from ..models import Sequence, SequenceType
+from .coloring import build_color_scheme
+from .fasttree import FastTreeError, run_fasttree
+from .mafft import MafftError, run_mafft
+from .phyloxml_writer import write_phyloxml
+from .pipeline import (
+    PhyloError,
+    _SHORT_ID_FMT,
+    _write_short_id_fasta,
+)
+from .rooting import root_tree
+from . import fasttree as fasttree_mod
+from . import mafft as mafft_mod
+
+logger = logging.getLogger(__name__)
+
+
+def _use_protein_sequence(
+    sequences: list[Sequence], cfg: dict[str, Any],
+) -> bool:
+    """True when the pre-cluster tree should be built on ``protein_sequence``.
+
+    Mirrors ``pipeline._use_protein_sequence``: the alphabet that fed
+    clustering is what the overview tree should depict, so the user
+    can compare like with like. A pool where any sequence lacks
+    ``protein_sequence`` falls back to NT — we never want a
+    half-protein, half-NT alignment.
+    """
+    if cfg.get("clustering", {}).get("alphabet_for_clustering") != "protein":
+        return False
+    return all(s.protein_sequence for s in sequences)
+
+
+def _build_id_map_pre(sequences: list[Sequence]) -> dict[str, str]:
+    """``S0001`` → ``seq.id`` map for the pre-cluster pool.
+
+    Insertion order matches the input order, so re-running on the
+    same post-QC pool produces identical ids — convenient for diffing.
+    """
+    return {
+        _SHORT_ID_FMT.format(i + 1): seq.id
+        for i, seq in enumerate(sequences)
+    }
+
+
+def _write_id_map_with_rep_flag(
+    id_map: dict[str, str],
+    rep_ids: set[str],
+    path: Path,
+) -> None:
+    """Three-column TSV: short_id, accession, is_rep.
+
+    Extends the two-column 2E format with an ``is_rep`` boolean
+    (``TRUE``/``FALSE``) so a user grepping the id_map without
+    opening the phyloXML can identify representative leaves.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("short_id\taccession\tis_rep\n")
+        for short, original in id_map.items():
+            flag = "TRUE" if original in rep_ids else "FALSE"
+            fh.write(f"{short}\t{original}\t{flag}\n")
+
+
+def run_pre_cluster_phylogeny(
+    sequences: list[Sequence],
+    representatives: list[Sequence],
+    cfg: dict[str, Any],
+    out_dir: Path,
+    prefix: str,
+) -> list[Path]:
+    """Build the pre-cluster overview tree of every post-QC sequence.
+
+    ``sequences`` is the post-QC pool fed to the mode (CONCAT isolates
+    in segmented mode). ``representatives`` is the elected subset;
+    leaves with an id in this set get a ``[repr] `` prefix in the
+    phyloXML ``<name>``.
+
+    Returns the list of files written (Newick, phyloXML, id_map).
+    Raises ``PhyloError`` when the step cannot proceed — soft-failed
+    upstream by the caller exactly like 2E.
+    """
+    n = len(sequences)
+    if n < 3:
+        raise PhyloError(
+            f"pre-cluster tree needs >= 3 sequences, got {n}"
+        )
+
+    use_protein = _use_protein_sequence(sequences, cfg)
+    rep_ids = {r.id for r in representatives}
+
+    id_map = _build_id_map_pre(sequences)
+    # The Newick keeps the short ids (safe across phylo tools); the
+    # human-readable label lands in the phyloXML <name> via the
+    # writer's existing label-formatting path. We pass [repr] prefixes
+    # so reps stand out at a glance in the XML.
+    label_prefix_by_id = {
+        seq.id: ("[repr] " if seq.id in rep_ids else "")
+        for seq in sequences
+    }
+
+    bodies = {
+        s.id: ((s.protein_sequence if use_protein else s.sequence) or "")
+        for s in sequences
+    }
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    newick_path = out_dir / f"{prefix}_pre_cluster_tree.nwk"
+    phyloxml_path = out_dir / f"{prefix}_pre_cluster_tree.xml"
+    id_map_path = out_dir / f"{prefix}_pre_cluster_tree_id_map.tsv"
+
+    # MSA is intermediate-only: MAFFT + FastTree both need a real file,
+    # but the user's locked decision is "Newick + phyloXML only", so
+    # we write the MSA into the run's temp dir and clean it up at
+    # exit.
+    work_root = Path(cfg.get("temp_dir") or "/tmp/repseq")
+    work_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        dir=work_root, prefix="pre_cluster_",
+    ) as td:
+        td = Path(td)
+        input_fasta = td / "input.fasta"
+        msa_fasta = td / "msa.fasta"
+        _write_short_id_fasta(
+            sequences, id_map, input_fasta, bodies=bodies,
+        )
+
+        # MAFFT --retree 1, hardcoded regardless of phylo.mafft.
+        # use_auto=False drops --auto so the extra args alone govern.
+        try:
+            run_mafft(
+                input_fasta, msa_fasta, cfg,
+                extra_args=["--retree", "1"],
+                use_auto=False,
+            )
+        except MafftError as exc:
+            raise PhyloError(
+                f"pre-cluster MAFFT failed: {exc}"
+            ) from exc
+
+        # FastTree regardless of clustering alphabet — IQ-TREE's
+        # ModelFinder would dominate runtime on a many-thousand-leaf
+        # rough tree. `is_protein` selects the FastTree model
+        # (defaults to JTT for protein; -nt -gtr for nucleotide).
+        try:
+            run_fasttree(
+                msa_fasta, newick_path, cfg,
+                is_protein=use_protein,
+            )
+        except FastTreeError as exc:
+            raise PhyloError(
+                f"pre-cluster FastTree failed: {exc}"
+            ) from exc
+
+    # Parse the Newick, midpoint root, write phyloXML.
+    try:
+        parsed = Phylo.read(str(newick_path), "newick")
+    except Exception as exc:
+        raise PhyloError(
+            f"pre-cluster Newick parse failed for {newick_path}: {exc}"
+        ) from exc
+
+    reps_by_short_id = dict(zip(id_map.keys(), sequences))
+    try:
+        parsed, rooting_used = root_tree(
+            parsed, reps_by_short_id, method="midpoint",
+        )
+    except Exception as exc:
+        logger.warning(
+            "[pre-cluster] midpoint rooting failed: %s; leaving as-is", exc,
+        )
+        rooting_used = "none"
+
+    # Shared colour palette is built over the FULL pool so the same
+    # taxon gets the same colour in 2E / 2F / 2H of the same run.
+    color_scheme = build_color_scheme(sequences, cfg)
+
+    alphabet_label = "protein" if use_protein else "nucleotide"
+    try:
+        write_phyloxml(
+            None,
+            phyloxml_path,
+            sequences,
+            id_map,
+            cfg=cfg or {},
+            prefix=f"{prefix}_pre_cluster",
+            alphabet=alphabet_label,
+            msa_tool="MAFFT",
+            msa_version=mafft_mod.tool_version(),
+            tree_tool="FastTree",
+            tree_version=fasttree_mod.tool_version(),
+            model=("JTT" if use_protein else "GTR"),
+            ufboot=None,
+            extra_msa_args=["--retree", "1"],
+            extra_tree_args=[],
+            tree=parsed,
+            rooting_method=rooting_used,
+            color_scheme=color_scheme,
+            leaf_protein_ids=None,
+            domain_architecture=False,
+            label_prefix_by_id=label_prefix_by_id,
+        )
+    except Exception as exc:
+        raise PhyloError(
+            f"pre-cluster phyloXML write failed: {exc}"
+        ) from exc
+
+    _write_id_map_with_rep_flag(id_map, rep_ids, id_map_path)
+
+    return [newick_path, phyloxml_path, id_map_path]

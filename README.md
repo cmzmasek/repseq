@@ -162,7 +162,7 @@ Every mode also accepts: `--input/-i`, `--output-dir/-o`, `--config/-c`,
 `--threads`, `--seed`, `--segmented`, `--dry-run`, `--no-resolve`,
 `--source {auto,uniprot,ncbi,ncbi_virus}`, `--overflow {keep,trim}`, `--plot`,
 `--phylo`, `--per-protein-phylo`, `--per-segment-phylo` (segmented only),
-`--conservation-heatmap`, `--fast`, `--verbose`,
+`--pre-cluster-tree`, `--conservation-heatmap`, `--fast`, `--verbose`,
 `--alphabet-for-clustering {protein,nucleotide}`.
 
 In addition to the selection modes, two diagnostic/utility subcommands:
@@ -285,6 +285,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_iqtree_summary.txt` | only with `--phylo` + IQ-TREE | IQ-TREE ModelFinder report. |
 | `{prefix}_iqtree_model.txt` | only with `--phylo` + IQ-TREE | Grep-friendly sidecar with the ModelFinder pick(s): one `<label>: <model>` line per partition (or a single `GENOME: <model>` line for the non-partitioned path). v0.28.0. |
 | `{prefix}_per_protein/` | only with `--per-protein-phylo` | One tree (MSA + Newick + phyloXML + id map) per marker; plus `_incongruence.tsv` of pairwise Robinson-Foulds distances. |
+| `{prefix}_pre_cluster_tree.{nwk,xml}`, `_id_map.tsv` | only with `--pre-cluster-tree` (or `phylo.pre_cluster_tree.enabled`) | Rough overview tree of every post-QC sequence (one leaf per CONCAT isolate in segmented mode), with `[repr] ` prefix on representative leaves in the phyloXML `<name>`. v0.32.0. |
 | `{prefix}_conservation/{prefix}_<family>.png` | only with `--conservation-heatmap` (needs `--per-protein-phylo` first) | One per-marker conservation plot: line charts of per-column Shannon entropy + fraction-matching-consensus (15-aa sliding-window smoothed) over a labelled domain-architecture ribbon. v0.29.0, line-chart rendering since v0.31.0. |
 | `{prefix}_extra_protein/` | `--per-protein-phylo` + `extra_protein:` declared | Same shape, accessory-protein trees (kept out of the incongruence table by design). |
 | `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment, from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
@@ -1204,6 +1205,64 @@ The default remains `phylo.rooting.method: auto` (taxonomy → MAD →
 midpoint chain); the other accepted values are `taxonomy`, `mad`,
 `midpoint`, and `none` (no rooting — for an input tree already rooted
 upstream).
+
+### Pre-cluster overview tree — `--pre-cluster-tree` (v0.32.0+)
+
+A diagnostic / sanity-check tree over **every post-QC sequence**,
+built BEFORE clustering would have collapsed redundancy. The point
+is to see at a glance where the elected representatives land in the
+broader diversity of the input pool: the phyloXML `<name>` of each
+representative leaf is prefixed with `[repr] ` so it stands out in
+Archaeopteryx, FigTree, or any phyloXML viewer.
+
+Pipeline is intentionally **hard-coded for speed**, regardless of
+what the rest of `phylo:` looks like:
+
+- **MAFFT `--retree 1`** (FFT-NS-1, no `--auto`, no L-INS-i)
+- **FastTree** (no IQ-TREE / ModelFinder / UFBoot) — regardless of
+  alphabet; the model selection IQ-TREE does isn't worth the budget
+  on a many-thousand-leaf rough tree
+- **Midpoint rooting** only (no taxonomy-guided / MAD)
+- **No LCA annotation, no trimAl, no bootstrap**
+
+The alphabet mirrors `clustering.alphabet_for_clustering`: if the
+run clustered on protein and every sequence carries a populated
+`protein_sequence`, the pre-cluster tree is built on AA; otherwise
+it falls back to NT. This keeps the overview tree's distance space
+consistent with the selection it depicts. In segmented mode the
+leaves are CONCAT isolates (same unit as the post-cluster tree).
+
+Three output files:
+
+- `{prefix}_pre_cluster_tree.nwk` — Newick, short-id leaves
+  (`S0001`, `S0002`, …)
+- `{prefix}_pre_cluster_tree.xml` — phyloXML with the full
+  taxonomy `<property>` enrichment + per-leaf taxonomy colour
+  (same palette as `--phylo` / `--per-protein-phylo`, so taxa stay
+  the same colour across every tree of a run), and the `[repr] `
+  prefix on representative leaves
+- `{prefix}_pre_cluster_tree_id_map.tsv` — three columns
+  (`short_id`, `accession`, `is_rep`), so a user grepping for
+  reps without opening the XML can find them
+
+The MSA produced by MAFFT is written to the run's temp directory
+and deleted after FastTree consumes it — only the tree + id_map
+land in the output dir. This is by design (the lock-in answer to
+"output file set?"); if you want to keep the MSA, run `--phylo`
+instead.
+
+Trigger either by passing `--pre-cluster-tree` on the command line
+or by setting `phylo.pre_cluster_tree.enabled: true` in the YAML
+config. Soft-fails like the other phylo steps: missing
+MAFFT/FastTree, fewer than 3 post-QC sequences, or any subprocess
+error surfaces as a single stderr line and the rest of the run
+continues.
+
+> **Scale note:** runtime grows roughly linearly with the post-QC
+> pool size. MAFFT `--retree 1` + FastTree on 5000 leaves typically
+> finishes in a few minutes; tens of thousands of leaves are
+> achievable but the resulting tree may be visually unreadable
+> without subsampling.
 
 ### Per-marker conservation plots — `--conservation-heatmap` (v0.29.0+)
 

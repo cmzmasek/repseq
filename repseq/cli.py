@@ -142,6 +142,23 @@ def _shared_options(fn):
         ),
     )(fn)
     fn = click.option(
+        "--pre-cluster-tree", "pre_cluster_tree", is_flag=True,
+        default=False,
+        help=(
+            "Build a rough overview tree of EVERY post-QC sequence "
+            "(one leaf per CONCAT isolate in segmented mode) BEFORE "
+            "clustering, with representative leaves prefixed '[repr] ' "
+            "in the phyloXML <name> so you can see at a glance where "
+            "the elected reps land in the broader diversity. Pipeline "
+            "is hard-coded for speed regardless of the rest of phylo: "
+            "MAFFT --retree 1, FastTree, midpoint root only, no LCA, "
+            "no trimAl, no bootstrap. Outputs: "
+            "{prefix}_pre_cluster_tree.{nwk,xml} + _tree_id_map.tsv "
+            "(short_id\\taccession\\tis_rep). Can also be enabled via "
+            "phylo.pre_cluster_tree.enabled: true in the YAML."
+        ),
+    )(fn)
+    fn = click.option(
         "--conservation-heatmap", "conservation_heatmap", is_flag=True,
         default=False,
         help=(
@@ -1413,8 +1430,37 @@ def _handle_segmented(sequences, cfg, qc_report):
 def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names,
                   pre_clustering_sequences=None, plot: bool = False, phylo: bool = False,
                   per_protein_phylo: bool = False, per_segment_phylo: bool = False,
-                  conservation_heatmap: bool = False):
+                  conservation_heatmap: bool = False,
+                  pre_cluster_tree: bool = False):
     out_files = write_results(result, cfg, complete_isolates, segment_names)
+    # Pre-cluster overview tree (2H): a rough single-pass FastTree
+    # over every post-QC sequence with [repr] prefixes on the elected
+    # representatives. Honoured either by --pre-cluster-tree or by
+    # phylo.pre_cluster_tree.enabled in the YAML. Runs BEFORE the
+    # post-cluster phylo block since logically it depicts the
+    # pre-clustering view; soft-fails like the other phylo steps.
+    pc_cfg = (cfg.get("phylo", {}) or {}).get("pre_cluster_tree", {}) or {}
+    if pre_cluster_tree or pc_cfg.get("enabled", False):
+        if pre_clustering_sequences is None or len(pre_clustering_sequences) < 3:
+            click.echo(
+                "[pre-cluster tree skipped] need >= 3 post-QC sequences",
+                err=True,
+            )
+        else:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            try:
+                from .phylo import PhyloError, run_pre_cluster_phylogeny
+                pc_files = run_pre_cluster_phylogeny(
+                    pre_clustering_sequences,
+                    result.representatives,
+                    cfg, out_dir, prefix,
+                )
+                out_files.extend(pc_files)
+            except PhyloError as exc:
+                click.echo(f"[pre-cluster tree skipped] {exc}", err=True)
+            except Exception as exc:
+                click.echo(f"[pre-cluster tree failed] {exc}", err=True)
     if plot:
         out_dir = Path(cfg["output"]["dir"])
         prefix = cfg["output"].get("prefix", "repseq")
@@ -1559,6 +1605,11 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
             per_protein_ran=per_protein_phylo,
             per_segment_ran=per_segment_phylo,
             conservation_ran=conservation_heatmap,
+            pre_cluster_ran=bool(
+                pre_cluster_tree
+                or (cfg.get("phylo", {}) or {})
+                    .get("pre_cluster_tree", {}).get("enabled", False)
+            ),
             command=" ".join(sys.argv),
         )
         out_files.append(summary_path)
@@ -1762,7 +1813,7 @@ def run_doctor_cmd(config_path, no_network):
 @click.option("--n-select", "-n", default=None, type=int,
               help="Number of representative sequences to select.")
 def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, conservation_heatmap,threshold, n_select):
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, pre_cluster_tree, conservation_heatmap,threshold, n_select):
     """Global mode: cluster at a threshold or select N diverse sequences."""
     if threshold is None and n_select is None:
         raise click.UsageError("Provide --threshold or --n-select.")
@@ -1794,7 +1845,7 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap, pre_cluster_tree=pre_cluster_tree)
 
 
 # ---------------------------------------------------------------------------
@@ -1808,7 +1859,7 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-group", "-n", required=True, type=int,
               help="Target representatives per taxonomic group.")
 def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, conservation_heatmap,rank, n_per_group):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, pre_cluster_tree, conservation_heatmap,rank, n_per_group):
     """Taxonomic mode 1: N representatives per taxonomic rank group."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, fast=fast,
@@ -1836,7 +1887,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap, pre_cluster_tree=pre_cluster_tree)
 
 
 # ---------------------------------------------------------------------------
@@ -1848,7 +1899,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--rank-levels", "-r", required=True,
               help='JSON list of {rank, n_per_group} dicts. E.g. \'[{"rank":"family","n_per_group":20},{"rank":"genus","n_per_group":5}]\'')
 def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, conservation_heatmap,rank_levels):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, pre_cluster_tree, conservation_heatmap,rank_levels):
     """Taxonomic mode 2: hierarchical multi-rank nested clustering."""
     import json as _json
     try:
@@ -1882,7 +1933,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap, pre_cluster_tree=pre_cluster_tree)
 
 
 # ---------------------------------------------------------------------------
@@ -1894,7 +1945,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-host", "-n", required=True, type=int,
               help="Target representatives per host organism.")
 def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, conservation_heatmap,n_per_host):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, pre_cluster_tree, conservation_heatmap,n_per_host):
     """Host-stratified mode: N representatives per host organism."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, fast=fast,
@@ -1922,7 +1973,7 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap, pre_cluster_tree=pre_cluster_tree)
 
 
 # ---------------------------------------------------------------------------
@@ -1936,7 +1987,7 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--window", default="year",
               help='Time window: "year", "decade", or a number (e.g. "5" for 5-year bins).')
 def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, conservation_heatmap,n_per_window, window):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, pre_cluster_tree, conservation_heatmap,n_per_window, window):
     """Time-stratified mode: N representatives per time window."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, fast=fast,
@@ -1964,7 +2015,7 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap, pre_cluster_tree=pre_cluster_tree)
 
 
 # ---------------------------------------------------------------------------
@@ -1976,7 +2027,7 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-country", "-n", required=True, type=int,
               help="Target representatives per country.")
 def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, conservation_heatmap,n_per_country):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, pre_cluster_tree, conservation_heatmap,n_per_country):
     """Geographic mode: N representatives per country."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, fast=fast,
@@ -2004,7 +2055,7 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap, pre_cluster_tree=pre_cluster_tree)
 
 
 # ---------------------------------------------------------------------------
@@ -2022,7 +2073,7 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--field-regex", default=None,
               help="Regex to extract the field value from FASTA headers.")
 def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, conservation_heatmap,field, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, pre_cluster_tree, conservation_heatmap,field, n_per_group,
                metadata_table, field_regex):
     """Custom metadata mode: group by any field or metadata table column."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
@@ -2056,7 +2107,7 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap, pre_cluster_tree=pre_cluster_tree)
 
 
 # ---------------------------------------------------------------------------
@@ -2072,7 +2123,7 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--metadata-table", default=None,
               help="Path to TSV/CSV metadata table with accession column.")
 def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, conservation_heatmap,fields, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, pre_cluster_tree, conservation_heatmap,fields, n_per_group,
                metadata_table):
     """Hybrid mode: multi-dimensional stratification (e.g. genus × host × year)."""
     field_list = [f.strip() for f in fields.split(",")]
@@ -2105,7 +2156,7 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo, conservation_heatmap=conservation_heatmap, pre_cluster_tree=pre_cluster_tree)
 
 
 # ---------------------------------------------------------------------------

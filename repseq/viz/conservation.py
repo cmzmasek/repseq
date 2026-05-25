@@ -425,7 +425,18 @@ def write_conservation_heatmap(
                 linewidth=0.6, alpha=0.85,
             )
             ax_d.add_patch(rect)
-            name = hit.get("hmm_name") or hit.get("name") or ""
+            # The HMM profile name lives under ``target`` in the dicts
+            # ``hmm/hmmscan.py:_parse_domtblout`` produces (column 1 of
+            # the hmmscan --domtblout output). ``hmm_name`` / ``name``
+            # are kept as fall-throughs only for synthetic dicts in
+            # tests / external callers; the real runtime always
+            # populates ``target``.
+            name = (
+                hit.get("target")
+                or hit.get("hmm_name")
+                or hit.get("name")
+                or ""
+            )
             if name:
                 ax_d.text(
                     af + w / 2.0 - 0.5, 0.5, name,

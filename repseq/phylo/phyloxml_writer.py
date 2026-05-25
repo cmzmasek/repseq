@@ -710,6 +710,7 @@ def write_phyloxml(
     leaf_protein_ids: Optional[dict[str, set[str]]] = None,
     domain_architecture: bool = False,
     trim_note: Optional[str] = None,
+    label_prefix_by_id: Optional[dict[str, str]] = None,
 ) -> None:
     """Render a tree to a richly-annotated phyloXML file at
     ``phyloxml_path``.
@@ -755,6 +756,16 @@ def write_phyloxml(
         seq.id: format_leaf_label(seq, label_format, **label_opts)
         for seq in representatives
     }
+    # Optional per-leaf prefix injected ahead of the formatted label
+    # (e.g. "[repr] " for representatives in the pre-cluster overview
+    # tree). Defaults to no prefix; the existing callers (2E, 2F,
+    # partitioned supermatrix, per-segment NT) leave this None so their
+    # phyloXML labels stay byte-identical to pre-v0.32.0 output.
+    if label_prefix_by_id:
+        label_by_id = {
+            seq_id: (label_prefix_by_id.get(seq_id, "") + label_by_id[seq_id])
+            for seq_id in label_by_id
+        }
     seq_by_id = {seq.id: seq for seq in representatives}
 
     phyloxml_cfg = (cfg or {}).get("phylo", {}).get("phyloxml", {}) or {}

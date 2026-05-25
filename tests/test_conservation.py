@@ -324,6 +324,71 @@ def test_write_heatmap_produces_png(tmp_path):
     assert _is_png(out_png)
 
 
+def test_write_heatmap_target_key_actually_lands_in_label_text(tmp_path, monkeypatch):
+    """Verify the *label text* matplotlib receives is the HMM target
+    name. PNGs are opaque to substring assertions, so we intercept
+    ``ax.text`` calls and check the positional ``name`` argument.
+
+    Three synthetic hits each carry only ``target`` (no ``hmm_name``
+    fallback). All three names must reach ``ax.text``. Regression-
+    guard for the v0.31.0 bug where the labeller looked for
+    ``hmm_name`` first and ``target`` was never read."""
+    pytest.importorskip("matplotlib")
+
+    captured_label_texts: list[str] = []
+    import matplotlib.axes as mpl_axes
+    original_text = mpl_axes.Axes.text
+
+    def _capture_text(self, x, y, s, *a, **kw):
+        captured_label_texts.append(s)
+        return original_text(self, x, y, s, *a, **kw)
+
+    monkeypatch.setattr(mpl_axes.Axes, "text", _capture_text)
+
+    msa = tmp_path / "f.fasta"
+    msa.write_text(">S0001\nMKLPQE\n>S0002\nMKLPQE\n>S0003\nMKLPQE\n")
+    hits = [
+        {"target": "CoV_S1", "ali_from": 1, "ali_to": 2, "aln_from": 1, "aln_to": 2},
+        {"target": "CoV_S2", "ali_from": 3, "ali_to": 4, "aln_from": 3, "aln_to": 4},
+        {"target": "TMprD",  "ali_from": 5, "ali_to": 6, "aln_from": 5, "aln_to": 6},
+    ]
+    write_conservation_heatmap(
+        msa, out_png=tmp_path / "f.png",
+        family_label="Spike", family_color="#3F8E7F",
+        hmm_hits_on_reference=hits,
+    )
+    assert "CoV_S1" in captured_label_texts
+    assert "CoV_S2" in captured_label_texts
+    assert "TMprD" in captured_label_texts
+
+
+def test_write_heatmap_uses_target_key_for_domain_label(tmp_path):
+    """Real HMM hit dicts (from hmm/hmmscan.py:_parse_domtblout) carry
+    the profile name under ``target``, not ``hmm_name``. The
+    domain-ribbon labeller must read ``target`` first so live runs
+    actually label their domains. Regression-guard: v0.31.0 only
+    read ``hmm_name``/``name`` and produced unlabelled domains on
+    every real run."""
+    pytest.importorskip("matplotlib")
+    msa = tmp_path / "f.fasta"
+    msa.write_text(
+        ">S0001\nMKLPQEMKLPQE\n>S0002\nMKLPQEMKLPQE\n>S0003\nMKLPQEMKLPQE\n"
+    )
+    out_png = tmp_path / "f.png"
+    # Note: only ``target`` is set, mirroring the schema hmmscan.py
+    # produces. No ``hmm_name`` / ``name`` fallback in this dict.
+    hits = [
+        {"target": "CoV_S2", "ali_from": 1, "ali_to": 6, "aln_from": 1, "aln_to": 6},
+    ]
+    result = write_conservation_heatmap(
+        msa, out_png=out_png, family_label="Spike",
+        family_color="#3F8E7F",
+        hmm_hits_on_reference=hits,
+    )
+    assert result == out_png
+    assert _is_png(out_png)
+
+
 def test_write_heatmap_no_domains_still_renders(tmp_path):
     """Without HMM hits, the figure has just the two metric tracks."""
     pytest.importorskip("matplotlib")

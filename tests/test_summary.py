@@ -242,6 +242,32 @@ def test_render_summary_phylo_partitioned_lists_per_partition_picks(make_seq, tm
     assert "{prefix}_iqtree_model.txt" in md
 
 
+def test_render_summary_pre_cluster_paragraph_when_run(make_seq, tmp_path):
+    """When pre_cluster_ran=True, the phylo section gains a paragraph
+    describing the {prefix}_pre_cluster_tree.* outputs with the [repr]
+    leaf-prefix convention. The section header appears even if
+    pre_cluster_ran is the only flag set."""
+    cfg = _base_cfg(tmp_path)
+    md = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], pre_cluster_ran=True,
+    )
+    assert "## Phylogenetic inference" in md
+    assert "pre-cluster overview tree" in md
+    assert "MAFFT" in md and "`--retree 1`" in md
+    assert "FastTree" in md
+    assert "midpoint" in md.lower()
+    assert "[repr]" in md
+    assert "{prefix}_pre_cluster_tree.nwk" in md
+
+
+def test_render_summary_no_pre_cluster_paragraph_when_off(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    md = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True,
+    )
+    assert "pre-cluster overview tree" not in md
+
+
 def test_render_summary_conservation_paragraph_when_run(make_seq, tmp_path):
     """When conservation_ran=True, the phylo section gains a paragraph
     describing the {prefix}_conservation/ plots. Without the flag,
