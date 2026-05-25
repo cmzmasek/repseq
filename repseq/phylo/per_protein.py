@@ -733,6 +733,110 @@ def run_per_protein_phylogeny(
     return written
 
 
+def run_per_segment_phylogeny(
+    representatives: list[Sequence],
+    cfg: dict[str, Any],
+    out_dir: Path,
+    prefix: str,
+) -> list[Path]:
+    """2H — build one **nucleotide** tree per segment, into
+    ``{prefix}_per_segment/``.
+
+    Segmented mode only. Complements 2F (per-marker protein trees) with a
+    raw per-segment NT view: every representative isolate contributes its
+    per-segment NT sequence (from ``concat_segments``) to one tree per
+    segment. Useful because reassortment may not be visible in any single
+    marker (which is one CDS per segment) but shows up as topological
+    incongruence between the per-segment trees themselves.
+
+    Soft-fail contract mirrors 2F: raises :class:`PhyloError` only when
+    the run is non-segmented, no segments are declared, or no segment has
+    >= ``phylo.per_protein.min_taxa`` representatives carrying it; per-
+    segment build failures log + skip individual segments. Uses the
+    shared :func:`_build_tree` engine so rooting / LCA / colouring /
+    phyloXML are identical to 2E and 2F. The leaf colour palette is
+    keyed on the same FULL representative set so a taxon keeps the same
+    colour across 2E, 2F, and 2H.
+    """
+    segmented = bool((cfg.get("segmented", {}) or {}).get("enabled"))
+    if not segmented:
+        raise PhyloError(
+            "per-segment trees (2H) only apply to segmented runs"
+        )
+
+    virus = get_virus_config(cfg) or {}
+    segments = list(virus.get("segments") or [])
+    if not segments:
+        raise PhyloError(
+            "no segments declared in virus config (need "
+            "segmented.viruses.<v>.segments)"
+        )
+
+    min_taxa = _min_taxa(cfg)
+    color_scheme = build_color_scheme(representatives, cfg)
+    pp_cfg = ((cfg or {}).get("phylo", {}) or {}).get("per_protein", {}) or {}
+
+    sub_dir = out_dir / f"{prefix}_per_segment"
+    written: list[Path] = []
+    built: list[str] = []
+    sparse: list[str] = []
+
+    for seg_name in segments:
+        leaf_reps: list[Sequence] = []
+        bodies: dict[str, str] = {}
+        for rep in representatives:
+            seg_seq = None
+            for sub in rep.concat_segments or []:
+                if sub.segment == seg_name:
+                    seg_seq = sub
+                    break
+            if seg_seq is None or not seg_seq.sequence:
+                continue
+            leaf_reps.append(rep)
+            bodies[rep.id] = seg_seq.sequence
+
+        if len(leaf_reps) < min_taxa:
+            sparse.append(f"{seg_name} ({len(leaf_reps)})")
+            logger.info(
+                "[per-segment] %s: %d rep(s) carry it (< %d) — skipped",
+                seg_name, len(leaf_reps), min_taxa,
+            )
+            continue
+
+        logger.info(
+            "[per-segment] building %s NT tree from %d rep(s)…",
+            seg_name, len(leaf_reps),
+        )
+        try:
+            files = _build_tree(
+                leaf_reps,
+                bodies,
+                is_protein=False,  # per-segment NT — always nucleotide
+                cfg=cfg,
+                out_dir=sub_dir,
+                file_prefix=_sanitize(seg_name),
+                xml_name_prefix=f"{prefix}_{seg_name}",
+                color_scheme=color_scheme,
+                leaf_protein_ids=None,
+                mafft_extra_args=None,
+                mafft_use_auto=True,
+                domain_architecture=False,
+                trimal_settings=(cfg.get("phylo", {}) or {}).get("trimal"),
+            )
+        except PhyloError as exc:
+            logger.warning("[per-segment] %s failed: %s", seg_name, exc)
+            continue
+        written.extend(files)
+        built.append(seg_name)
+
+    if not built:
+        detail = f" ({'; '.join(sparse)})" if sparse else ""
+        raise PhyloError(
+            f"no segment had >= {min_taxa} representatives carrying it{detail}"
+        )
+    return written
+
+
 def _write_incongruence_table(
     built_labels: list[str],
     sub_dir: Path,

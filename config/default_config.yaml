@@ -553,9 +553,27 @@ phylo:
     #                pure-Python. Robust when taxonomy is sparse.
     #   midpoint   — Bio.Phylo's root_at_midpoint. Last-resort
     #                fallback; always succeeds.
+    #   outgroup   — root on a user-specified accession or clade. Set
+    #                ``outgroup`` and/or ``outgroup_rank`` below. A
+    #                single accession roots at that leaf; a list of
+    #                accessions (or every leaf matching outgroup_rank)
+    #                roots at their MRCA. Falls back to midpoint with
+    #                a stderr note when the spec matches no rep.
     #   none       — leave the tree as parsed (use when the input
-    #                is already rooted, e.g. by an outgroup).
+    #                is already rooted upstream).
     method: auto
+    # User-specified outgroup (only consulted when method=outgroup).
+    # Accession matched case-insensitively against rep.accession,
+    # rep.id, or rep.isolate_id. Example:
+    #   outgroup: "AB123456"
+    #   outgroup: ["AB123456", "CD789012"]
+    outgroup: null
+    # Outgroup by taxonomy rank — every rep whose taxonomy carries the
+    # named taxon at the named rank is added to the outgroup set. Example:
+    #   outgroup_rank: {family: "Hantaviridae"}
+    # ``outgroup`` and ``outgroup_rank`` are unioned; multi-leaf outgroups
+    # root at the MRCA of all matching leaves.
+    outgroup_rank: null
   lca:
     # Internal-node LCA labels (lowest common ancestor of each clade's
     # terminals, read from the resolved NCBI lineage). Emitted in

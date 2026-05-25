@@ -12,9 +12,12 @@ from repseq.models import (
 )
 from pathlib import Path
 
+from repseq.models import Cluster
 from repseq.output.report import (
     write_all_reports,
+    write_cluster_tsv,
     write_group_counts_tsv,
+    write_hmm_diagnostic_tsv,
     write_nucleotide_taxonomic_report,
     write_representative_isolates_tsv,
     write_representative_sequences_tsv,
@@ -648,3 +651,261 @@ def test_nucleotide_report_handles_no_taxonomy(tmp_path):
     assert write_nucleotide_taxonomic_report(before, [], cfg, segmented=False, path=path)
     text = path.read_text()
     assert "(no taxonomy available at any rank from subgenus to class)" in text
+
+
+# ---------------------------------------------------------------------------
+# Cluster purity diagnostic columns
+# ---------------------------------------------------------------------------
+
+
+def _cluster_seq(sid, *, length=1000, species=None, genus=None, host=None):
+    tax = None
+    if species or genus:
+        tax = TaxonomyInfo(species=species, genus=genus)
+    return Sequence(
+        id=sid, header=sid, sequence="A" * length,
+        seq_type=SequenceType.NUCLEOTIDE, accession=sid,
+        host=host, taxonomy=tax,
+    )
+
+
+def test_write_cluster_tsv_emits_purity_columns(tmp_path):
+    rep = _cluster_seq("acc1", length=1000, species="Foo virus", genus="Foovirus", host="human")
+    members = [
+        _cluster_seq("acc2", length=900, species="Foo virus", genus="Foovirus", host="human"),
+        _cluster_seq("acc3", length=1100, species="Foo virus", genus="Foovirus", host="human"),
+    ]
+    result = RunResult(
+        mode="global", representatives=[rep],
+        clusters=[Cluster(cluster_id="c1", representative=rep, members=members)],
+    )
+    path = tmp_path / "c.tsv"
+    write_cluster_tsv(result, path)
+    lines = path.read_text().splitlines()
+    header = lines[0].split("\t")
+    assert "species_purity" in header
+    assert "genus_purity" in header
+    assert "host_purity" in header
+    assert "member_length_min" in header
+    assert "member_length_max" in header
+    assert "member_length_median" in header
+
+    row = dict(zip(header, lines[1].split("\t")))
+    # Every member agrees → purity 1.0, distinct 1.
+    assert row["species_purity"] == "1.000"
+    assert row["species_distinct"] == "1"
+    assert row["genus_purity"] == "1.000"
+    assert row["host_purity"] == "1.000"
+    assert row["member_length_min"] == "900"
+    assert row["member_length_max"] == "1100"
+    assert row["member_length_median"] == "1000"
+
+
+def test_write_cluster_tsv_flags_mixed_genus_cluster(tmp_path):
+    """A cluster spanning two genera should report < 1.0 purity and
+    distinct=2 — the actionable diagnostic for "threshold too lax"."""
+    rep = _cluster_seq("acc1", genus="Foovirus")
+    members = [
+        _cluster_seq("acc2", genus="Foovirus"),
+        _cluster_seq("acc3", genus="Barvirus"),  # the odd one out
+    ]
+    result = RunResult(
+        mode="global", representatives=[rep],
+        clusters=[Cluster(cluster_id="c1", representative=rep, members=members)],
+    )
+    path = tmp_path / "c.tsv"
+    write_cluster_tsv(result, path)
+    header, row_str = path.read_text().splitlines()
+    row = dict(zip(header.split("\t"), row_str.split("\t")))
+    # 2 of 3 share the same genus.
+    assert row["genus_purity"] == "0.667"
+    assert row["genus_distinct"] == "2"
+
+
+def test_write_cluster_tsv_blank_purity_when_no_taxonomy(tmp_path):
+    """Cluster with zero populated values at a rank → blank purity, distinct=0."""
+    rep = _cluster_seq("acc1")  # no taxonomy
+    result = RunResult(
+        mode="global", representatives=[rep],
+        clusters=[Cluster(cluster_id="c1", representative=rep, members=[])],
+    )
+    path = tmp_path / "c.tsv"
+    write_cluster_tsv(result, path)
+    header, row_str = path.read_text().splitlines()
+    row = dict(zip(header.split("\t"), row_str.split("\t")))
+    assert row["genus_purity"] == ""
+    assert row["genus_distinct"] == "0"
+    assert row["host_purity"] == ""
+
+
+def test_write_cluster_tsv_ignores_empty_values_in_purity(tmp_path):
+    """One member with no host shouldn't drag down host purity — empty
+    values are excluded from both numerator and denominator."""
+    rep = _cluster_seq("acc1", host="human")
+    members = [
+        _cluster_seq("acc2", host="human"),
+        _cluster_seq("acc3", host=None),  # no host annotation
+    ]
+    result = RunResult(
+        mode="global", representatives=[rep],
+        clusters=[Cluster(cluster_id="c1", representative=rep, members=members)],
+    )
+    path = tmp_path / "c.tsv"
+    write_cluster_tsv(result, path)
+    header, row_str = path.read_text().splitlines()
+    row = dict(zip(header.split("\t"), row_str.split("\t")))
+    # 2 of 2 populated values agree → purity 1.0.
+    assert row["host_purity"] == "1.000"
+    assert row["host_distinct"] == "1"
+
+
+# ---------------------------------------------------------------------------
+# HMM diagnostic TSV (#4)
+# ---------------------------------------------------------------------------
+
+def _hmm_hit(target, *, e, score=100.0, ali_from=1, ali_to=200, hmm_from=1,
+             hmm_to=200, hmm_len=250, passing=True):
+    return {
+        "target": target, "dom_evalue": e, "dom_score": score,
+        "ali_from": ali_from, "ali_to": ali_to,
+        "hmm_from": hmm_from, "hmm_to": hmm_to, "hmm_len": hmm_len,
+        "passing": passing,
+    }
+
+
+def _rep_with_hmm(acc, *, hits):
+    s = Sequence(
+        id=acc, header=acc, sequence="ACGT" * 100,
+        seq_type=SequenceType.NUCLEOTIDE, accession=acc,
+    )
+    s.proteins = [{
+        "protein_id": f"p_{acc}", "product": "marker",
+        "sequence": "M" * 300, "length": 300, "hmm_hits": list(hits),
+    }]
+    return s
+
+
+def test_hmm_diagnostic_emits_row_per_rep_per_profile(tmp_path):
+    """One declared HMM-bearing spec, two reps → 2 rows (single profile)."""
+    cfg = {
+        "segmented": {"enabled": False},
+        "clustering": {"cluster_protein": [
+            {"name": "RdRp", "hmms": ["RdRP_4"]},
+        ]},
+        "_hmm_runtime": {
+            "active": True,
+            "ga_cutoffs": {"RdRP_4": 25.0},
+            "hmm_cfg": {
+                "use_ga_when_available": True,
+                "default_evalue": 1e-5,
+                "relative_length_cutoff": 0.5,
+            },
+        },
+    }
+    reps = [
+        _rep_with_hmm("acc1", hits=[_hmm_hit("RdRP_4", e=1e-30, score=80.0)]),
+        _rep_with_hmm("acc2", hits=[_hmm_hit("RdRP_4", e=1e-3, score=15.0,
+                                              passing=False)]),
+    ]
+    result = RunResult(mode="global", representatives=reps)
+    path = tmp_path / "hmm.tsv"
+    assert write_hmm_diagnostic_tsv(result, cfg, None, path)
+    lines = path.read_text().splitlines()
+    assert len(lines) == 3  # header + 2 reps
+    header = lines[0].split("\t")
+    for col in ("spec_name", "profile", "hit", "best_dom_evalue",
+                "ga_cutoff", "cutoff_used", "passing"):
+        assert col in header
+    row1 = dict(zip(header, lines[1].split("\t")))
+    row2 = dict(zip(header, lines[2].split("\t")))
+    assert row1["accession"] == "acc1"
+    assert row1["profile"] == "RdRP_4"
+    assert row1["hit"] == "TRUE"
+    assert row1["passing"] == "TRUE"
+    assert row1["cutoff_used"] == "GA=25"
+    assert row1["ga_cutoff"] == "25.0"
+    assert row2["passing"] == "FALSE"
+
+
+def test_hmm_diagnostic_emits_hit_false_for_missing_profile(tmp_path):
+    """When a CDS has no hit on a declared profile, the row still appears
+    with hit=FALSE and the stats columns blank — this is the silent-
+    failure visibility the report exists to provide."""
+    cfg = {
+        "segmented": {"enabled": False},
+        "clustering": {"cluster_protein": [
+            {"name": "RdRp", "hmms": ["RdRP_4"]},
+            {"name": "Cap", "hmms": ["Capsid_X"]},
+        ]},
+        "_hmm_runtime": {
+            "active": True,
+            "ga_cutoffs": {},
+            "hmm_cfg": {"default_evalue": 1e-5},
+        },
+    }
+    reps = [_rep_with_hmm("acc1", hits=[_hmm_hit("RdRP_4", e=1e-30)])]
+    result = RunResult(mode="global", representatives=reps)
+    path = tmp_path / "hmm.tsv"
+    assert write_hmm_diagnostic_tsv(result, cfg, None, path)
+    lines = path.read_text().splitlines()
+    # 1 rep × 2 specs × 1 profile each = 2 rows.
+    assert len(lines) == 3
+    header = lines[0].split("\t")
+    rows = [dict(zip(header, l.split("\t"))) for l in lines[1:]]
+    by_profile = {r["profile"]: r for r in rows}
+    assert by_profile["RdRP_4"]["hit"] == "TRUE"
+    assert by_profile["Capsid_X"]["hit"] == "FALSE"
+    assert by_profile["Capsid_X"]["best_dom_evalue"] == ""
+    assert by_profile["Capsid_X"]["passing"] == ""
+
+
+def test_hmm_diagnostic_expands_multidomain_token_to_components(tmp_path):
+    """A multidomain token "A--B" must produce one row per HMM
+    (A, B) — diagnostic granularity is per profile, not per token."""
+    cfg = {
+        "segmented": {"enabled": False},
+        "clustering": {"cluster_protein": [
+            {"name": "Spike", "hmms": ["CoV_S1--CoV_S2"]},
+        ]},
+        "_hmm_runtime": {"active": True, "ga_cutoffs": {}, "hmm_cfg": {}},
+    }
+    reps = [_rep_with_hmm("acc1", hits=[
+        _hmm_hit("CoV_S1", e=1e-50, ali_from=10, ali_to=600),
+        _hmm_hit("CoV_S2", e=1e-40, ali_from=610, ali_to=1200),
+    ])]
+    result = RunResult(mode="global", representatives=reps)
+    path = tmp_path / "hmm.tsv"
+    write_hmm_diagnostic_tsv(result, cfg, None, path)
+    lines = path.read_text().splitlines()
+    profiles = {dict(zip(lines[0].split("\t"), l.split("\t")))["profile"]
+                for l in lines[1:]}
+    assert profiles == {"CoV_S1", "CoV_S2"}
+
+
+def test_hmm_diagnostic_skips_when_hmm_tier_inactive(tmp_path):
+    cfg = {
+        "segmented": {"enabled": False},
+        "clustering": {"cluster_protein": [
+            {"name": "RdRp", "hmms": ["RdRP_4"]},
+        ]},
+        # No _hmm_runtime.active flag, no populated hmm_hits.
+    }
+    reps = [Sequence(id="acc1", header="acc1", sequence="ACGT",
+                     seq_type=SequenceType.NUCLEOTIDE, accession="acc1")]
+    result = RunResult(mode="global", representatives=reps)
+    path = tmp_path / "hmm.tsv"
+    assert write_hmm_diagnostic_tsv(result, cfg, None, path) is False
+    assert not path.exists()
+
+
+def test_hmm_diagnostic_skips_when_no_specs_declare_hmms(tmp_path):
+    cfg = {
+        "segmented": {"enabled": False},
+        # Alias-only spec — no hmms declared.
+        "clustering": {"cluster_protein": [{"name": "RdRp", "aliases": ["polymerase"]}]},
+        "_hmm_runtime": {"active": True, "ga_cutoffs": {}, "hmm_cfg": {}},
+    }
+    reps = [_rep_with_hmm("acc1", hits=[])]
+    result = RunResult(mode="global", representatives=reps)
+    path = tmp_path / "hmm.tsv"
+    assert write_hmm_diagnostic_tsv(result, cfg, None, path) is False

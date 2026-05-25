@@ -480,3 +480,41 @@ def test_check_output_dir_aborts_when_path_is_a_file(tmp_path, capsys):
         _check_output_dir(cfg)
     assert exc.value.code == 1
     assert "not a directory" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# `repseq stats` — pre-flight input inspection (#5)
+# ---------------------------------------------------------------------------
+
+def test_print_input_stats_reports_basics(make_seq, capsys):
+    """Stats panel should show count, length distribution, and per-rank
+    taxonomy breakdown for taxa actually present in the input."""
+    from repseq.cli import _print_input_stats
+    from repseq.models import TaxonomyInfo
+
+    seqs = []
+    for i in range(5):
+        s = make_seq(f"acc{i}", "ACGT" * (250 + 10 * i))
+        s.organism = "Foo virus"
+        s.host = "human" if i < 3 else None
+        s.taxonomy = TaxonomyInfo(genus="Foovirus", family="Fooviridae")
+        seqs.append(s)
+    _print_input_stats(seqs, top_n=10)
+    out = capsys.readouterr().out
+    assert "5 sequence(s)" in out
+    assert "median" in out
+    # Metadata coverage table is present.
+    assert "Metadata coverage" in out
+    assert "host" in out
+    # Taxonomy panel shows the genus we set.
+    assert "Foovirus" in out
+    assert "Fooviridae" in out
+
+
+def test_print_input_stats_handles_no_taxonomy(make_seq, capsys):
+    from repseq.cli import _print_input_stats
+
+    seqs = [make_seq(f"acc{i}", "ACGT" * 100) for i in range(3)]
+    _print_input_stats(seqs, top_n=10)
+    out = capsys.readouterr().out
+    assert "no taxonomy resolved" in out

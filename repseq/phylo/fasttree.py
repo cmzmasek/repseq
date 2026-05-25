@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..utils.subprocess_stream import StreamedProcessError, run_streaming
+
 
 class FastTreeError(RuntimeError):
     pass
@@ -90,17 +92,16 @@ def run_fasttree(
     t0 = time.time()
 
     output_newick.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_newick, "w") as fh:
-        try:
-            subprocess.run(
-                cmd,
-                check=True,
-                stdout=fh,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except subprocess.CalledProcessError as e:
-            raise FastTreeError(f"FastTree failed:\n{e.stderr}") from e
+    # Stream FastTree's progress lines (it prints "Iteration N" / "ML…"
+    # to stderr) so a long run shows life.
+    try:
+        run_streaming(
+            cmd,
+            stdout_file=output_newick,
+            stream_prefix="[fasttree] ",
+        )
+    except StreamedProcessError as e:
+        raise FastTreeError(f"FastTree failed:\n{e.stderr}") from e
 
     print(
         f"[phylo] FastTree finished ({time.time() - t0:.1f}s)",

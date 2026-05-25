@@ -755,17 +755,100 @@ def write_sequence_proteins_tsv(
 # Cluster summary TSV
 # ---------------------------------------------------------------------------
 
+def _cluster_purity(values: list[Optional[str]]) -> tuple[Optional[float], int]:
+    """Return ``(majority_fraction, n_distinct)`` for a cluster's per-member
+    values at one rank.
+
+    ``majority_fraction`` is the fraction of *populated* values that match
+    the most common one (1.0 = every populated member agrees, < 1.0 =
+    cluster spans multiple taxa at this rank). ``n_distinct`` counts how
+    many distinct non-empty values appear; 1 = pure, > 1 = mixed.
+    Members with empty/None values are excluded from both numerator and
+    denominator — a member with no resolved genus shouldn't count against
+    the cluster's genus purity. Returns ``(None, 0)`` when *no* member
+    carries a value at this rank (the cluster is unclassifiable here).
+    """
+    populated = [v for v in values if v]
+    if not populated:
+        return None, 0
+    counts = Counter(populated)
+    top_count = max(counts.values())
+    return top_count / len(populated), len(counts)
+
+
 def write_cluster_tsv(result: RunResult, path: Path) -> None:
-    """Write per-cluster summary to TSV."""
+    """Write per-cluster summary to TSV with diagnostic purity columns.
+
+    Columns: ``cluster_id``, ``accession`` (the representative's),
+    ``organism``, ``cluster_size``, ``is_refseq``, ``is_reviewed``, then
+    diagnostic columns computed across every member (representative +
+    cluster.members):
+        - ``species_purity`` / ``species_distinct`` — majority-species
+          fraction and distinct-species count. ``species_purity < 1.0``
+          means the cluster mixes species; ``species_distinct > 1`` is
+          the same signal in raw form. Cells are blank when no member
+          carries a species label.
+        - ``genus_purity`` / ``genus_distinct`` — same at the genus rank.
+        - ``host_purity`` / ``host_distinct`` — same at the host field
+          (the literal ``/host`` qualifier, not taxonomy).
+        - ``member_length_min`` / ``member_length_max`` /
+          ``member_length_median`` — NT-length distribution of the
+          cluster's members in nucleotides, useful for catching
+          length-outlier inclusions.
+
+    The purity columns let a bench scientist immediately spot clusters
+    that span suspiciously many genera (likely the clustering threshold
+    was too lax for that stratum) or hosts (cross-host contamination /
+    mis-annotation). ``> 1`` distinct genera in a single cluster is
+    almost always worth investigating; a single distinct species is the
+    expected case at high identity thresholds.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fh:
-        fh.write("cluster_id\taccession\torganism\tcluster_size\tis_refseq\tis_reviewed\n")
+        fh.write(
+            "cluster_id\taccession\torganism\tcluster_size\t"
+            "is_refseq\tis_reviewed\t"
+            "species_purity\tspecies_distinct\t"
+            "genus_purity\tgenus_distinct\t"
+            "host_purity\thost_distinct\t"
+            "member_length_min\tmember_length_max\tmember_length_median\n"
+        )
         for cluster in result.clusters:
             rep = cluster.representative
+            members = [rep] + list(cluster.members)
+            species = [
+                (m.taxonomy.get_rank("species") if m.taxonomy else None)
+                for m in members
+            ]
+            genera = [
+                (m.taxonomy.get_rank("genus") if m.taxonomy else None)
+                for m in members
+            ]
+            hosts = [m.host for m in members]
+            sp_purity, sp_distinct = _cluster_purity(species)
+            gn_purity, gn_distinct = _cluster_purity(genera)
+            ho_purity, ho_distinct = _cluster_purity(hosts)
+            lengths = [m.length for m in members if m.length]
+            if lengths:
+                import statistics
+                len_min = str(min(lengths))
+                len_max = str(max(lengths))
+                len_med = str(int(round(statistics.median(lengths))))
+            else:
+                len_min = len_max = len_med = ""
+
+            def _fmt_purity(p: Optional[float]) -> str:
+                return f"{p:.3f}" if p is not None else ""
+
             fh.write(
-                f"{_tsv_safe(cluster.cluster_id)}\t{_tsv_safe(rep.accession or rep.id)}\t"
+                f"{_tsv_safe(cluster.cluster_id)}\t"
+                f"{_tsv_safe(rep.accession or rep.id)}\t"
                 f"{_tsv_safe(rep.organism)}\t{cluster.size}\t"
-                f"{_tsv_bool(rep.is_refseq)}\t{_tsv_bool(rep.is_reviewed)}\n"
+                f"{_tsv_bool(rep.is_refseq)}\t{_tsv_bool(rep.is_reviewed)}\t"
+                f"{_fmt_purity(sp_purity)}\t{sp_distinct}\t"
+                f"{_fmt_purity(gn_purity)}\t{gn_distinct}\t"
+                f"{_fmt_purity(ho_purity)}\t{ho_distinct}\t"
+                f"{len_min}\t{len_max}\t{len_med}\n"
             )
 
 
@@ -1471,6 +1554,167 @@ def _resolve_segment_order(
     return seen
 
 
+def _best_hit_on_profile(
+    proteins: list[dict], profile: str,
+) -> Optional[dict]:
+    """Return the hit dict with the lowest dom_evalue for ``profile`` across
+    every CDS in ``proteins``, or ``None`` if no CDS has a hit on it.
+
+    The pre-computed ``passing`` flag is preserved on the returned hit;
+    callers use it to decide whether the cutoff was cleared. Picking the
+    single best hit is the right diagnostic level — the user wants
+    "what's the BEST evidence for this marker on this isolate", not the
+    cross-product of every weak match.
+    """
+    best: Optional[dict] = None
+    for prot in proteins or []:
+        for h in prot.get("hmm_hits") or []:
+            if h.get("target") != profile:
+                continue
+            if best is None or h.get("dom_evalue", float("inf")) < best.get(
+                "dom_evalue", float("inf"),
+            ):
+                best = h
+    return best
+
+
+def write_hmm_diagnostic_tsv(
+    result: RunResult,
+    cfg: dict[str, Any],
+    complete_isolates: Optional[dict[str, list[Sequence]]],
+    path: Path,
+) -> bool:
+    """Write a per-(representative, profile) HMM diagnostic table.
+
+    One row for every (representative, marker_spec, declared HMM
+    profile) combination — including profiles that no CDS hit at all
+    (rendered as empty cells, ``hit=FALSE``). This surfaces the silent-
+    failure pattern the basic QC gate hides: "65 isolates had RdRP_4
+    hits at E=2e-5 but the default cutoff was 1e-5 — consider relaxing".
+
+    Columns:
+        - ``isolate_id`` / ``accession`` — the rep's identity.
+        - ``segment`` — empty in non-segmented mode.
+        - ``spec_name`` — the marker spec's ``name`` (or its single
+          token).
+        - ``profile`` — the individual HMM profile name (one of the
+          spec's tokens after splitting multidomain ``--``).
+        - ``hit`` — TRUE/FALSE: did any CDS in scope have a hit on this
+          profile?
+        - ``best_dom_evalue`` / ``best_dom_score`` / ``best_coverage`` —
+          the best (lowest-E) hit's stats. Empty when ``hit=FALSE``.
+        - ``ga_cutoff`` — the profile's Pfam GA threshold from the .hmm
+          headers (empty when the profile has no curated GA).
+        - ``cutoff_used`` — ``GA`` (when ``use_ga_when_available`` and a
+          curated GA exists) or ``default_evalue=<value>``.
+        - ``passing`` — TRUE/FALSE: did the best hit clear both the
+          similarity gate AND the coverage gate? Empty when no hit.
+
+    Only emits a file when the HMM tier ran this session (the
+    `_hmm_runtime.active` flag) AND at least one marker spec declares
+    HMMs. Returns True on write, False on skip.
+    """
+    from ..phylo.per_protein import (
+        _hmm_tier_ran,
+        _segment_proteins,
+        collect_marker_specs,
+    )
+    from ..hmm.runner import parse_hmm_token
+
+    if not _hmm_tier_ran(cfg, result.representatives):
+        return False
+    specs = collect_marker_specs(cfg)
+    if not specs:
+        return False
+
+    hmm_rt = (cfg.get("_hmm_runtime") or {})
+    hmm_cfg = hmm_rt.get("hmm_cfg") or (cfg.get("hmm") or {})
+    ga_cutoffs = hmm_rt.get("ga_cutoffs") or {}
+    use_ga = bool(hmm_cfg.get("use_ga_when_available", True))
+    default_e = float(hmm_cfg.get("default_evalue", 1.0e-5))
+
+    # For each spec, collect the SET of distinct profile names across all
+    # its tokens (multidomain "A--B--C" contributes A, B, C). Token-level
+    # OR / order info isn't relevant at the diagnostic level — the user
+    # wants "did this profile hit, and was it below the gate" per profile.
+    spec_profiles: list[tuple[str, list[str], list[str], Optional[str]]] = []
+    for label, tokens, _aliases, segment in specs:
+        profiles: list[str] = []
+        seen: set[str] = set()
+        for tok in tokens:
+            try:
+                for name in parse_hmm_token(tok):
+                    if name and name not in seen:
+                        profiles.append(name)
+                        seen.add(name)
+            except ValueError:
+                continue
+        if profiles:
+            spec_profiles.append((label, tokens, profiles, segment))
+    if not spec_profiles:
+        return False
+
+    # Build the rep list. Segmented runs read the per-segment proteins
+    # via concat_segments; non-segmented runs use the rep's own proteins.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(
+            "isolate_id\taccession\tsegment\tspec_name\tprofile\t"
+            "hit\tbest_dom_evalue\tbest_dom_score\tbest_coverage\t"
+            "ga_cutoff\tcutoff_used\tpassing\n"
+        )
+        for rep in result.representatives:
+            iso_id = rep.isolate_id or ""
+            # For non-segmented reps, accession is meaningful; for CONCAT
+            # reps it's None — emit the isolate_id alone.
+            acc = rep.accession or (rep.id if not rep.id.startswith("CONCAT|") else "")
+            for spec_label, _tokens, profiles, segment in spec_profiles:
+                proteins = _segment_proteins(rep, segment) if segment else (rep.proteins or [])
+                # Identify the parent segment's accession when applicable
+                # (more useful than the CONCAT id).
+                if segment is not None:
+                    parent_acc = ""
+                    for sub in rep.concat_segments or []:
+                        if sub.segment == segment:
+                            parent_acc = sub.accession or sub.id or ""
+                            break
+                    seg_cell = segment
+                    acc_cell = parent_acc or acc
+                else:
+                    seg_cell = ""
+                    acc_cell = acc
+                for profile in profiles:
+                    ga = ga_cutoffs.get(profile)
+                    if use_ga and ga is not None:
+                        cutoff_used = f"GA={ga:g}"
+                    else:
+                        cutoff_used = f"default_evalue={default_e:g}"
+                    best = _best_hit_on_profile(proteins, profile)
+                    if best is None:
+                        fh.write(
+                            f"{_tsv_safe(iso_id)}\t{_tsv_safe(acc_cell)}\t"
+                            f"{_tsv_safe(seg_cell)}\t{_tsv_safe(spec_label)}\t"
+                            f"{_tsv_safe(profile)}\t{_tsv_bool(False)}\t"
+                            f"\t\t\t"
+                            f"{_tsv_safe(ga) if ga is not None else ''}\t"
+                            f"{_tsv_safe(cutoff_used)}\t\n"
+                        )
+                        continue
+                    cov = coverage_of(best)
+                    fh.write(
+                        f"{_tsv_safe(iso_id)}\t{_tsv_safe(acc_cell)}\t"
+                        f"{_tsv_safe(seg_cell)}\t{_tsv_safe(spec_label)}\t"
+                        f"{_tsv_safe(profile)}\t{_tsv_bool(True)}\t"
+                        f"{best.get('dom_evalue', ''):.3g}\t"
+                        f"{best.get('dom_score', ''):.2f}\t"
+                        f"{cov:.3f}\t"
+                        f"{_tsv_safe(ga) if ga is not None else ''}\t"
+                        f"{_tsv_safe(cutoff_used)}\t"
+                        f"{_tsv_bool(bool(best.get('passing')))}\n"
+                    )
+    return True
+
+
 def write_nucleotide_taxonomic_report(
     before_seqs: list[Sequence],
     after_seqs: list[Sequence],
@@ -1621,6 +1865,18 @@ def write_all_reports(
         )
     write_cluster_tsv(result, out_dir / f"{prefix}_clusters.tsv")
     write_group_counts_tsv(result, out_dir / f"{prefix}_group_counts.tsv")
+    # HMM diagnostic table — emitted only when the HMM tier actually ran
+    # AND at least one marker spec declares HMMs. Per-(rep, profile) rows
+    # let the user spot near-miss patterns ("65 isolates barely missed
+    # the cutoff at E=2e-5") that the binary pass/fail gate hides.
+    try:
+        if write_hmm_diagnostic_tsv(
+            result, cfg, complete_isolates,
+            out_dir / f"{prefix}_hmm_diagnostic.tsv",
+        ):
+            output_files.append(out_dir / f"{prefix}_hmm_diagnostic.tsv")
+    except Exception as exc:
+        sys.stderr.write(f"[HMM diagnostic skipped] {exc}\n")
     if complete_isolates:
         rep_isolate_ids: set[str] = {
             seq.isolate_id for seq in result.representatives if seq.isolate_id

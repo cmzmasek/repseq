@@ -128,3 +128,74 @@ def test_mean_lca_specificity_rewards_consistent_grouping():
 def test_mean_lca_specificity_returns_zero_with_no_lineage():
     tree = _tree("((A:0.1,B:0.1):0.3,(C:0.1,D:0.1):0.3);")
     assert _mean_lca_specificity(tree, {"A": [], "B": [], "C": [], "D": []}) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Outgroup rooting (user-specified)
+# ---------------------------------------------------------------------------
+
+def _seq_with_acc(sid, accession, **kw):
+    s = _seq(sid, **kw)
+    s.accession = accession
+    return s
+
+
+def test_outgroup_rooting_by_single_accession():
+    """A single accession in `outgroup` should root the tree at that leaf."""
+    tree = _tree("((A:0.1,B:0.1):0.3,(C:0.1,D:0.1):0.3);")
+    reps = {
+        "A": _seq_with_acc("A", "AB001"),
+        "B": _seq_with_acc("B", "AB002"),
+        "C": _seq_with_acc("C", "AB003"),
+        "D": _seq_with_acc("D", "AB004"),
+    }
+    out, used = root_tree(tree, reps, method="outgroup", outgroup="AB003")
+    assert used == "outgroup"
+    # The rooted tree should have C reachable as an outgroup-side leaf.
+    leaf_names = {t.name for t in out.get_terminals()}
+    assert leaf_names == {"A", "B", "C", "D"}
+
+
+def test_outgroup_rooting_accession_match_is_case_insensitive():
+    tree = _tree("((A:0.1,B:0.1):0.3,(C:0.1,D:0.1):0.3);")
+    reps = {sid: _seq_with_acc(sid, f"ABC00{i}") for i, sid in enumerate("ABCD")}
+    _, used = root_tree(tree, reps, method="outgroup", outgroup="abc003")
+    assert used == "outgroup"
+
+
+def test_outgroup_rooting_by_clade_uses_mrca():
+    """A list of accessions naming a clade roots at their MRCA."""
+    tree = _tree("((A:0.1,B:0.1):0.3,(C:0.1,D:0.1):0.3);")
+    reps = {sid: _seq_with_acc(sid, f"AB00{i}") for i, sid in enumerate("ABCD", start=1)}
+    out, used = root_tree(
+        tree, reps, method="outgroup", outgroup=["AB003", "AB004"],
+    )
+    assert used == "outgroup"
+    assert {t.name for t in out.get_terminals()} == {"A", "B", "C", "D"}
+
+
+def test_outgroup_rooting_by_taxonomy_rank():
+    """outgroup_rank pulls every leaf with that taxon at that rank."""
+    tree = _tree("((A:0.1,B:0.1):0.3,(C:0.1,D:0.1):0.3);")
+    reps = {
+        "A": _seq("A", family="Hantaviridae"),
+        "B": _seq("B", family="Hantaviridae"),
+        "C": _seq("C", family="Peribunyaviridae"),
+        "D": _seq("D", family="Peribunyaviridae"),
+    }
+    _, used = root_tree(
+        tree, reps, method="outgroup",
+        outgroup_rank={"family": "Peribunyaviridae"},
+    )
+    assert used == "outgroup"
+
+
+def test_outgroup_rooting_falls_back_to_midpoint_on_no_match():
+    """A typo (no accession matches) must not abort — fall through to
+    midpoint so a usable tree still comes out."""
+    tree = _tree("((A:0.1,B:0.1):0.3,(C:0.1,D:0.1):0.3);")
+    reps = {sid: _seq_with_acc(sid, f"AB00{i}") for i, sid in enumerate("ABCD", start=1)}
+    _, used = root_tree(
+        tree, reps, method="outgroup", outgroup="DOES_NOT_EXIST",
+    )
+    assert used in ("midpoint", "none")

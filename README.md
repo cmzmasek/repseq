@@ -160,7 +160,16 @@ representatives. Add `--overflow trim` if you need *exactly* `-n` and not "about
 
 Every mode also accepts: `--input/-i`, `--output-dir/-o`, `--config/-c`,
 `--threads`, `--seed`, `--segmented`, `--dry-run`, `--no-resolve`,
-`--source {auto,uniprot,ncbi,ncbi_virus}`, `--overflow {keep,trim}`, `--plot`.
+`--source {auto,uniprot,ncbi,ncbi_virus}`, `--overflow {keep,trim}`, `--plot`,
+`--phylo`, `--per-protein-phylo`, `--per-segment-phylo` (segmented only),
+`--fast`, `--alphabet-for-clustering {protein,nucleotide}`.
+
+In addition to the selection modes, two diagnostic/utility subcommands:
+
+| Command | What it does |
+| --- | --- |
+| `repseq stats -i x.fasta` | Pre-flight inspection of an input FASTA — count, source breakdown, NT length distribution, per-field metadata coverage (organism, host, country, segment, taxonomy, …), RefSeq/reviewed flag counts, and a top-N taxonomy breakdown per rank. No clustering, no output files; use this before committing to a long run. Default `--no-resolve` (fast, network-free); pass `--resolve` to fetch taxonomy. |
+| `repseq doctor` | Self-test the install (dependencies, external tools, network, config). |
 
 ---
 
@@ -223,6 +232,8 @@ your FASTA file(s)
     •            (optional trimAl column trimming; off by default)
     • (optional) one tree per HMM marker      →  {prefix}_per_protein/      (--per-protein-phylo)
     •            one tree per extra_protein   →  {prefix}_extra_protein/    (--per-protein-phylo)
+    • (optional) one NT tree per segment      →  {prefix}_per_segment/      (--per-segment-phylo)
+    • per-(rep, HMM profile) diagnostic       →  {prefix}_hmm_diagnostic.tsv (when HMM tier ran)
 ```
 
 The run log (`{prefix}_run.log`) records exactly what settings were used
@@ -272,6 +283,8 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_iqtree_summary.txt` | only with `--phylo` + IQ-TREE | IQ-TREE ModelFinder report. |
 | `{prefix}_per_protein/` | only with `--per-protein-phylo` | One tree (MSA + Newick + phyloXML + id map) per marker; plus `_incongruence.tsv` of pairwise Robinson-Foulds distances. |
 | `{prefix}_extra_protein/` | `--per-protein-phylo` + `extra_protein:` declared | Same shape, accessory-protein trees (kept out of the incongruence table by design). |
+| `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment, from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
+| `{prefix}_hmm_diagnostic.tsv` | when the HMM tier ran AND a spec declares `hmms:` | One row per (representative, marker spec, declared HMM profile): `hit` T/F, `best_dom_evalue`, `best_dom_score`, `best_coverage`, `ga_cutoff`, `cutoff_used`, `passing`. Surfaces near-miss patterns the binary gate hides ("65 isolates barely missed the cutoff at E=2e-5"). v0.26.0. |
 | `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations). |
 
 "Segmented + GenBank" means: segmented mode is on **and** the GenBank source
@@ -509,12 +522,30 @@ analogue of `_representative_isolate_proteins.tsv`.
 
 #### `{prefix}_clusters.tsv` — always
 
-One row per cluster member. Columns: `cluster_id`, `accession` (of the
-*representative*), `organism`, `cluster_size`, `is_refseq`, `is_reviewed`.
+One row per cluster (NOT per member — the row shows the cluster's
+representative). Columns:
+
+| Column | What it is |
+| --- | --- |
+| `cluster_id` | Stable cluster identifier. |
+| `accession` | Accession of the representative. |
+| `organism` | Representative's organism. |
+| `cluster_size` | Total members in the cluster (representative + others). |
+| `is_refseq` / `is_reviewed` | Representative's quality flags. |
+| `species_purity` / `species_distinct` | **v0.26.0 diagnostic.** Fraction of populated species labels in the cluster that match the most common one (1.000 = pure) and the count of distinct species labels (1 = pure, >1 = mixed). |
+| `genus_purity` / `genus_distinct` | Same at the genus rank. **`genus_distinct > 1` is the actionable "threshold too lax for this stratum" signal** — a single cluster crossing genus boundaries is almost always worth investigating. |
+| `host_purity` / `host_distinct` | Same against the `/host` qualifier — flags cross-host contamination / mis-annotation. |
+| `member_length_min` / `_max` / `_median` | NT-length distribution across the cluster's members. A wide range can flag a length-outlier inclusion (partial sequence dragged into a full-genome cluster). |
+
+Purity is computed across populated values only — a member with no
+resolved genus does **not** count against the cluster's genus purity.
+Blank purity (with `_distinct = 0`) means no member carries a value at
+that rank.
 
 Use it for: tracing which sequences ended up in the same cluster, or for
 re-running selection with a different priority (e.g. "I want the reviewed
-UniProt entry not the longest one") without re-clustering.
+UniProt entry not the longest one") without re-clustering. The purity
+columns are your fastest tell that a stratum was clustered too aggressively.
 
 #### `{prefix}_group_counts.tsv` — always
 
@@ -557,6 +588,34 @@ Every sequence dropped during cleaning, with the reason. Two columns:
 **Check this file first when more was dropped than you expected.** Sort
 by `reason` to see which filter did the damage; the same information
 shows up summarised in `_run.log`.
+
+#### `{prefix}_hmm_diagnostic.tsv` — when the HMM tier ran (v0.26.0+)
+
+One row per (representative, declared marker spec, individual HMM
+profile). Emitted only when the HMM tier was active this session AND at
+least one marker spec declared `hmms:`. Multidomain tokens like
+`"CoV_S1--CoV_S2"` expand to **one row per component HMM**
+(`CoV_S1`, `CoV_S2`) so you see per-profile granularity.
+
+Columns:
+
+| Column | What it is |
+| --- | --- |
+| `isolate_id` / `accession` / `segment` | Identity of the rep (segment is blank in non-segmented mode). |
+| `spec_name` | The marker spec's `name:` (or its single token). |
+| `profile` | One declared HMM profile from any token in the spec. |
+| `hit` | `TRUE` if any CDS in scope produced a hit on this profile, else `FALSE`. |
+| `best_dom_evalue` / `best_dom_score` / `best_coverage` | The lowest-E hit's stats (blank when `hit=FALSE`). |
+| `ga_cutoff` | The profile's Pfam GA threshold from the .hmm headers (blank when the profile has no curated GA). |
+| `cutoff_used` | `GA=<value>` when `use_ga_when_available` AND a curated GA exists, else `default_evalue=<value>`. |
+| `passing` | `TRUE` if the best hit cleared BOTH the similarity gate AND the coverage gate; blank when no hit. |
+
+This is the **diagnostic that surfaces silent failures the binary
+HMM-QC gate hides**. Sort by `passing` to see borderline misses; group
+by `profile` to see whether a particular HMM is too strict for your
+dataset ("65 isolates barely missed RdRP_4 at E=2e-5, consider relaxing
+`hmm.default_evalue`"). Rows with `hit=FALSE` tell you when a profile
+is genuinely absent rather than just below the cutoff.
 
 ### Run record
 
@@ -709,6 +768,13 @@ nodes by LCA → phyloXML. Tree builder is auto-picked from your
 clustering alphabet: **IQ-TREE for protein** (ModelFinder + UFBoot
 bootstrap by default) and **FastTree for nucleotide** (with `-nt -gtr`).
 Set `phylo.tool: fasttree` (or `iqtree`) to pin one.
+
+Since **v0.26.0**, MAFFT / IQ-TREE / FastTree stderr is streamed live
+to your terminal (prefixed with `[mafft]` / `[iqtree]` / `[fasttree]`)
+instead of being captured silently and dumped only on failure — long
+runs no longer look hung. The same lines are still buffered, so the
+on-failure error message contains the full subprocess output as
+before.
 
 ##### Preliminary-run shortcut: `--fast` (v0.24.0+)
 
@@ -986,6 +1052,62 @@ history. Turn the table off with `phylo.per_protein.incongruence: false`.
 > representatives is skipped with a log note; if no family qualifies — or
 > the HMM tier didn't run — the whole step is skipped with one stderr
 > line, leaving the rest of the run intact.
+
+### Per-segment NT trees — `--per-segment-phylo` (v0.26.0+, segmented only)
+
+A complement to `--per-protein-phylo`. Where 2F builds one **protein**
+tree per declared marker (one CDS per segment), `--per-segment-phylo`
+builds one **nucleotide** tree per declared segment — every
+representative isolate contributes its raw per-segment NT (from
+`concat_segments`) to one tree per segment. Outputs land in a
+`{prefix}_per_segment/` subdirectory with the same per-tree shape
+(`<segment>_msa.fasta`, `<segment>_tree.nwk`, `<segment>_tree.xml`,
+`<segment>_tree_id_map.tsv` per segment).
+
+Why a per-**segment** tree on top of the per-**marker** tree set:
+reassortment can show up at the segment level without appearing in any
+single marker tree (a marker is one CDS within a segment, so per-marker
+incongruence is a lower-resolution view). The per-segment NT trees
+catch reassortment events the per-marker AA trees can miss, especially
+when a marker is conserved across the parent species. Same MAFFT /
+tree-builder / rooting / LCA / colouring as 2E and 2F; same `min_taxa`
+floor; same shared colour palette so a taxon stays the same colour
+across every tree of the run. Runs alone or alongside `--phylo` and
+`--per-protein-phylo`. Segmented-mode only; raises a stderr note on a
+non-segmented run.
+
+#### Outgroup rooting (v0.26.0+)
+
+Set `phylo.rooting.method: outgroup` and name the outgroup by accession
+or by taxon — the most common request from bench scientists who already
+know which lineage is basal:
+
+```yaml
+phylo:
+  rooting:
+    method: outgroup
+    # Single accession:
+    outgroup: "AB123456"
+    # …or a list (the tree is rooted at the MRCA of all matching leaves):
+    # outgroup: ["AB123456", "CD789012"]
+    # …or a whole clade by taxonomy rank:
+    # outgroup_rank: {family: "Hantaviridae"}
+```
+
+Accession matching is case-insensitive against each rep's `accession`,
+`id`, or `isolate_id` (so a CONCAT isolate id works too). A multi-leaf
+spec roots at the MRCA of all matching leaves. `outgroup` and
+`outgroup_rank` are unioned — you can mix "this specific reference
+accession plus every member of family X". When the spec matches no
+representative the rooter falls through to midpoint with a stderr
+note, so a typo never voids the tree. The summary's
+`{prefix}_summary.md` names the outgroup target honestly (it no longer
+falsely claims "MAD/midpoint fallbacks" for non-`auto` methods).
+
+The default remains `phylo.rooting.method: auto` (taxonomy → MAD →
+midpoint chain); the other accepted values are `taxonomy`, `mad`,
+`midpoint`, and `none` (no rooting — for an input tree already rooted
+upstream).
 
 ---
 

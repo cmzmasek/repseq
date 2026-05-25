@@ -492,6 +492,8 @@ def _finalize_tree(
     try:
         parsed_tree, rooting_method_used = root_tree(
             parsed_tree, reps_by_short_id, method=rooting_method_req,
+            outgroup=rooting_cfg.get("outgroup"),
+            outgroup_rank=rooting_cfg.get("outgroup_rank"),
         )
     except Exception as exc:
         # Rooting is a soft step — fall back to whatever the parser gave us.

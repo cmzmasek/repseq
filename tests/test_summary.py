@@ -590,3 +590,57 @@ def test_write_summary_creates_file_at_prefix_summary_md(make_seq, tmp_path):
     content = path.read_text()
     assert content.startswith("# Methods — ")
     assert "Auto-generated" in content
+
+
+def test_render_summary_phylo_describes_outgroup_rooting(make_seq, tmp_path):
+    """method=outgroup with an accession spec → prose names the
+    accession and the MRCA fallback, NOT 'MAD/midpoint fallbacks'."""
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {
+        "tool": "fasttree",
+        "rooting": {"method": "outgroup", "outgroup": "AB123456"},
+    }
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "AB123456" in md
+    assert "MRCA" in md
+    # The generic MAD/midpoint fallback phrasing must not appear for outgroup.
+    assert "minimum ancestor deviation" not in md
+
+
+def test_render_summary_phylo_describes_outgroup_rank(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {
+        "tool": "fasttree",
+        "rooting": {
+            "method": "outgroup",
+            "outgroup_rank": {"family": "Hantaviridae"},
+        },
+    }
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "Hantaviridae" in md
+    assert "family" in md
+
+
+def test_render_summary_phylo_describes_midpoint_rooting_honestly(
+    make_seq, tmp_path,
+):
+    """method=midpoint has no fallback chain; prose must not claim one."""
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"tool": "fasttree", "rooting": {"method": "midpoint"}}
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "midpoint rooting" in md
+    assert "fallback" not in md.lower()
+
+
+def test_render_summary_describes_per_segment_section_when_2h_ran(
+    make_seq, tmp_path,
+):
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"tool": "fasttree"}
+    md = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], per_segment_ran=True,
+    )
+    assert "nucleotide tree was also built per segment" in md
+    assert "{prefix}_per_segment/" in md
+    # Reassortment is the headline motivation — verify it's mentioned.
+    assert "reassortment" in md

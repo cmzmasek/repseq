@@ -368,6 +368,50 @@ def test_validate_config_rejects_unknown_rooting_method():
     assert any("phylo.rooting.method" in e for e in errors)
 
 
+def test_validate_config_accepts_outgroup_rooting_with_accession():
+    cfg = load_config(None)
+    cfg["phylo"]["rooting"]["method"] = "outgroup"
+    cfg["phylo"]["rooting"]["outgroup"] = "AB123456"
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_accepts_outgroup_rooting_with_clade_list():
+    cfg = load_config(None)
+    cfg["phylo"]["rooting"]["method"] = "outgroup"
+    cfg["phylo"]["rooting"]["outgroup"] = ["AB1", "AB2"]
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_accepts_outgroup_rooting_with_rank():
+    cfg = load_config(None)
+    cfg["phylo"]["rooting"]["method"] = "outgroup"
+    cfg["phylo"]["rooting"]["outgroup_rank"] = {"family": "Hantaviridae"}
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_outgroup_method_without_target():
+    cfg = load_config(None)
+    cfg["phylo"]["rooting"]["method"] = "outgroup"
+    errors = validate_config(cfg)
+    assert any(
+        "phylo.rooting.method='outgroup'" in e for e in errors
+    )
+
+
+def test_validate_config_rejects_outgroup_non_string():
+    cfg = load_config(None)
+    cfg["phylo"]["rooting"]["outgroup"] = 42
+    errors = validate_config(cfg)
+    assert any("phylo.rooting.outgroup" in e for e in errors)
+
+
+def test_validate_config_rejects_outgroup_rank_non_mapping():
+    cfg = load_config(None)
+    cfg["phylo"]["rooting"]["outgroup_rank"] = ["family"]
+    errors = validate_config(cfg)
+    assert any("phylo.rooting.outgroup_rank" in e for e in errors)
+
+
 def test_validate_config_default_lca():
     cfg = load_config(None)
     assert cfg["phylo"]["lca"]["enabled"] is True

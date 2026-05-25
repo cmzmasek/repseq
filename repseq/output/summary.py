@@ -536,8 +536,9 @@ def _describe_mode(mode: str, cfg: dict) -> str:
 
 
 def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
-                  versions: dict, per_protein_ran: bool = False) -> str:
-    if not phylo_ran and not per_protein_ran:
+                  versions: dict, per_protein_ran: bool = False,
+                  per_segment_ran: bool = False) -> str:
+    if not phylo_ran and not per_protein_ran and not per_segment_ran:
         return ""
     n_reps = len(result.representatives)
     alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
@@ -562,7 +563,41 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"**FastTree** v{versions.get('FastTree') or '?'} "
             f"({_CITATIONS['FastTree']}, {flag_note})."
         )
-    rooting = (phylo_cfg.get("rooting", {}) or {}).get("method", "taxonomy_guided")
+    rooting_cfg = (phylo_cfg.get("rooting", {}) or {})
+    rooting = rooting_cfg.get("method", "auto")
+    # Describe the rooting fallback chain honestly per method — the old
+    # phrasing claimed "MAD and midpoint as fallbacks" for every method,
+    # which lies for `outgroup` (falls back to midpoint), `none` (no
+    # fallback at all), and `midpoint` (no fallback either).
+    if rooting == "outgroup":
+        og = rooting_cfg.get("outgroup")
+        ogr = rooting_cfg.get("outgroup_rank")
+        og_bits: list[str] = []
+        if og:
+            og_str = og if isinstance(og, str) else ", ".join(og)
+            og_bits.append(f"accession(s) `{og_str}`")
+        if ogr:
+            og_bits.append(
+                "rank "
+                + ", ".join(f"{r}=`{t}`" for r, t in ogr.items())
+            )
+        target = " and ".join(og_bits) if og_bits else "user-specified outgroup"
+        rooting_clause = (
+            f"on the {target} (a multi-leaf spec roots at the MRCA), "
+            f"with midpoint as a fallback if the spec matches no rep"
+        )
+    elif rooting == "midpoint":
+        rooting_clause = "using midpoint rooting"
+    elif rooting == "none":
+        rooting_clause = (
+            "left as parsed (no rooting applied — the input is assumed "
+            "to be rooted already)"
+        )
+    else:
+        rooting_clause = (
+            f"using the **{rooting}** strategy (with minimum ancestor "
+            f"deviation and midpoint as fallbacks where applicable)"
+        )
     # Partitioned supermatrix is the default for protein + IQ-TREE runs; it
     # only applies when the HMM tier resolves >= 2 marker families, else the
     # pipeline falls back to concat-then-align (described in the else branch).
@@ -636,8 +671,7 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"lengths (`{linkage_flag}`) with ultrafast bootstrap (UFBoot). "
             f"This avoids aligning unrelated proteins across segment seams and "
             f"forcing a single model across distinct protein families. The "
-            f"tree was rooted using the **{rooting}** strategy (minimum "
-            f"ancestor deviation and midpoint as fallbacks) and internal nodes "
+            f"tree was rooted {rooting_clause} and internal nodes "
             f"annotated with the last common ancestor (LCA) of their "
             f"descendants. Outputs include the supermatrix alignment "
             f"(`{{prefix}}_msa.fasta`), the per-family alignments "
@@ -652,9 +686,8 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"A multiple sequence alignment of the **{_fmt_int(n_reps)}** "
             f"representative sequences was built with **MAFFT** "
             f"v{versions.get('mafft') or '?'} ({_CITATIONS['mafft']}, "
-            f"{genome_mafft_phrase}). {genome_trim_clause}{tree_sentence} The tree was rooted using the "
-            f"**{rooting}** strategy (with minimum ancestor deviation and "
-            f"midpoint as fallbacks where applicable) and internal nodes "
+            f"{genome_mafft_phrase}). {genome_trim_clause}{tree_sentence} The tree was rooted "
+            f"{rooting_clause} and internal nodes "
             f"were annotated with the last common ancestor (LCA) of their "
             f"descendants. The final tree was emitted as PhyloXML alongside "
             f"the underlying Newick file and FASTA alignment.\n"
@@ -738,6 +771,20 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
                 f"more topological disagreement; normalised by the maximum "
                 f"RF for the shared-taxon count).\n"
             )
+    if per_segment_ran:
+        paragraphs.append(
+            f"A separate **nucleotide tree was also built per segment** "
+            f"(one tree per declared segment, over the raw per-segment NT "
+            f"of each representative isolate) into the "
+            f"`{{prefix}}_per_segment/` subdirectory. This complements the "
+            f"per-marker (per-protein) trees above: reassortment may not "
+            f"surface in any single marker (one CDS per segment) but shows "
+            f"up as topological incongruence between the per-segment trees "
+            f"themselves. Each segment needed at least "
+            f"**{max(3, int((phylo_cfg.get('per_protein', {}) or {}).get('min_taxa', 3) or 3))}** "
+            f"carriers to be built. Same MAFFT / tree-builder / rooting / "
+            f"LCA / colour palette as 2E and 2F.\n"
+        )
     coloring_cfg = (phylo_cfg.get("coloring", {}) or {})
     if coloring_cfg.get("enabled", True):
         cranks = list(coloring_cfg.get("ranks") or ["genus"])
@@ -828,18 +875,23 @@ def render_summary(
     segment_names: Optional[list[str]] = None,
     phylo_ran: bool = False,
     per_protein_ran: bool = False,
+    per_segment_ran: bool = False,
     command: str = "",
 ) -> str:
     """Build the full Markdown summary as a single string."""
     versions = detect_tool_versions()
+    any_phylo = phylo_ran or per_protein_ran or per_segment_ran
     sections = [
         _render_header(cfg, command, result.mode),
         _render_input(qc_report, input_paths),
         _render_qc(qc_report, cfg),
         _render_segmented(cfg, qc_report, complete_isolates, segment_names),
         _render_selection(cfg, result, qc_report),
-        _render_phylo(cfg, result, phylo_ran, versions, per_protein_ran),
-        _render_software(cfg, versions, phylo_ran or per_protein_ran),
+        _render_phylo(
+            cfg, result, phylo_ran, versions,
+            per_protein_ran, per_segment_ran,
+        ),
+        _render_software(cfg, versions, any_phylo),
         _render_footer(),
     ]
     # Drop empty sections (segmented + phylo are conditional).
@@ -855,6 +907,7 @@ def write_summary(
     segment_names: Optional[list[str]] = None,
     phylo_ran: bool = False,
     per_protein_ran: bool = False,
+    per_segment_ran: bool = False,
     command: str = "",
 ) -> Path:
     """Render the summary and write it to ``{prefix}_summary.md``.
@@ -871,6 +924,7 @@ def write_summary(
         segment_names=segment_names,
         phylo_ran=phylo_ran,
         per_protein_ran=per_protein_ran,
+        per_segment_ran=per_segment_ran,
         command=command,
     )
     path.write_text(md)

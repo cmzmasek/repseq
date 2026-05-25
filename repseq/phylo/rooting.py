@@ -342,10 +342,94 @@ def _mad_root(tree: Tree) -> Optional[Tree]:
 
 
 # ---------------------------------------------------------------------------
+# Outgroup rooting (user-specified)
+# ---------------------------------------------------------------------------
+
+def _resolve_outgroup_short_ids(
+    outgroup_spec,
+    outgroup_rank,
+    reps_by_short_id: dict[str, Sequence],
+) -> set[str]:
+    """Resolve the user's outgroup spec to a set of short_ids on the tree.
+
+    ``outgroup_spec`` is a single accession string, a list of accession
+    strings, or ``None``; matched (case-insensitively) against each rep's
+    ``accession``, ``id``, or ``isolate_id``. ``outgroup_rank`` is an
+    optional ``{rank: taxon}`` dict; every rep whose taxonomy carries that
+    taxon at that rank is added. The two sources are unioned — a user can
+    name one explicit accession AND a clade by rank.
+    """
+    result: set[str] = set()
+
+    accs: list[str] = []
+    if isinstance(outgroup_spec, str):
+        accs = [outgroup_spec]
+    elif isinstance(outgroup_spec, list):
+        accs = [a for a in outgroup_spec if isinstance(a, str) and a.strip()]
+    if accs:
+        wanted = {a.strip().lower() for a in accs}
+        for sid, rep in reps_by_short_id.items():
+            candidates = (rep.accession, rep.id, rep.isolate_id)
+            if any(c and c.lower() in wanted for c in candidates):
+                result.add(sid)
+
+    if isinstance(outgroup_rank, dict):
+        for rank, taxon in outgroup_rank.items():
+            if not isinstance(rank, str) or not isinstance(taxon, str):
+                continue
+            tlower = taxon.strip().lower()
+            if not tlower:
+                continue
+            for sid, rep in reps_by_short_id.items():
+                if rep.taxonomy is None:
+                    continue
+                v = rep.taxonomy.get_rank(rank)
+                if v and v.lower() == tlower:
+                    result.add(sid)
+
+    return result
+
+
+def _outgroup_root(
+    tree: Tree,
+    reps_by_short_id: dict[str, Sequence],
+    outgroup_spec,
+    outgroup_rank,
+) -> Optional[Tree]:
+    """Root by a user-specified outgroup (single accession or a clade).
+
+    Returns the rooted copy on success, ``None`` if the spec resolves to
+    no leaves on the tree (the caller's chain then falls back to
+    taxonomy/MAD/midpoint). When multiple leaves resolve, the tree is
+    rooted on their MRCA so the user can name several accessions, or a
+    whole taxon via ``outgroup_rank``, as the outgroup clade.
+    """
+    wanted = _resolve_outgroup_short_ids(
+        outgroup_spec, outgroup_rank, reps_by_short_id,
+    )
+    if not wanted:
+        return None
+    rooted = copy.deepcopy(tree)
+    targets = [t for t in rooted.get_terminals() if t.name in wanted]
+    if not targets:
+        return None
+    try:
+        if len(targets) == 1:
+            rooted.root_with_outgroup(targets[0])
+        else:
+            mrca = rooted.common_ancestor(targets)
+            rooted.root_with_outgroup(mrca)
+    except Exception as exc:
+        logger.info("[phylo] outgroup rooting raised: %s", exc)
+        return None
+    return rooted
+
+
+# ---------------------------------------------------------------------------
 # Top-level entry point
 # ---------------------------------------------------------------------------
 
-VALID_METHODS = ("auto", "taxonomy", "mad", "midpoint", "none")
+VALID_METHODS = ("auto", "taxonomy", "mad", "midpoint", "outgroup", "none")
 
 
 def root_tree(
@@ -354,14 +438,18 @@ def root_tree(
     method: str = "auto",
     *,
     coverage_threshold: float = 0.5,
+    outgroup=None,
+    outgroup_rank=None,
 ) -> tuple[Tree, str]:
     """Root ``tree`` and return ``(rooted_tree, method_used)``.
 
     ``method`` is one of ``"auto"`` (default — taxonomy → MAD →
-    midpoint chain), ``"taxonomy"``, ``"mad"``, ``"midpoint"``, or
-    ``"none"`` (return the tree unchanged). When a specific method is
-    requested but fails, the function falls through to midpoint rather
-    than raising — a usable tree is more valuable than a perfect one.
+    midpoint chain), ``"taxonomy"``, ``"mad"``, ``"midpoint"``,
+    ``"outgroup"`` (user-specified, needs ``outgroup`` and/or
+    ``outgroup_rank``), or ``"none"`` (return the tree unchanged). When
+    a specific method is requested but fails, the function falls
+    through to midpoint rather than raising — a usable tree is more
+    valuable than a perfect one.
     """
     if method not in VALID_METHODS:
         method = "auto"
@@ -369,6 +457,16 @@ def root_tree(
         return tree, "none"
 
     short_id_lineage = _build_short_id_lineage_map(reps_by_short_id)
+
+    if method == "outgroup":
+        rooted = _outgroup_root(tree, reps_by_short_id, outgroup, outgroup_rank)
+        if rooted is not None:
+            return rooted, "outgroup"
+        logger.info(
+            "[phylo] outgroup rooting failed: no representative matched "
+            "the configured outgroup (`phylo.rooting.outgroup` / "
+            "`outgroup_rank`); falling back to midpoint"
+        )
 
     if method in ("auto", "taxonomy"):
         rooted = _taxonomy_guided_root(tree, short_id_lineage)

@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..utils.subprocess_stream import StreamedProcessError, run_streaming
+
 
 class MafftError(RuntimeError):
     pass
@@ -99,17 +101,17 @@ def run_mafft(
     t0 = time.time()
 
     output_fasta.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_fasta, "w") as fh:
-        try:
-            subprocess.run(
-                cmd,
-                check=True,
-                stdout=fh,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except subprocess.CalledProcessError as e:
-            raise MafftError(f"mafft failed:\n{e.stderr}") from e
+    # Stream stderr live so a long MAFFT run shows its iteration log
+    # instead of going silent for minutes; still buffer for error
+    # reporting on a non-zero exit.
+    try:
+        run_streaming(
+            cmd,
+            stdout_file=output_fasta,
+            stream_prefix="[mafft] ",
+        )
+    except StreamedProcessError as e:
+        raise MafftError(f"mafft failed:\n{e.stderr}") from e
 
     print(
         f"[phylo] MAFFT finished ({time.time() - t0:.1f}s)",

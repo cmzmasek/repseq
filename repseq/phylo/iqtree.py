@@ -24,6 +24,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from ..utils.subprocess_stream import StreamedProcessError, run_streaming
+
 
 class IQTreeError(RuntimeError):
     pass
@@ -211,16 +213,20 @@ def run_iqtree(
         )
         t0 = time.time()
 
+        # Stream IQ-TREE's stderr live so a long ModelFinder run shows its
+        # per-model progress instead of going silent. (IQ-TREE defaults to
+        # `--quiet` per the cmd assembly above, which suppresses most
+        # chatter; with --quiet there's little to stream, but the user can
+        # remove --quiet via phylo.iqtree.extra_args if they want the full
+        # log.) Stdout is discarded — IQ-TREE writes everything to files.
         try:
-            subprocess.run(
+            run_streaming(
                 cmd,
-                check=True,
-                capture_output=True,
-                text=True,
+                stdout_file=None,
+                stream_prefix="[iqtree] ",
             )
-        except subprocess.CalledProcessError as e:
-            err = (e.stderr or "") + (e.stdout or "")
-            raise IQTreeError(f"IQ-TREE failed:\n{err}") from e
+        except StreamedProcessError as e:
+            raise IQTreeError(f"IQ-TREE failed:\n{e.stderr}") from e
 
         print(
             f"[phylo] IQ-TREE finished ({time.time() - t0:.1f}s)",

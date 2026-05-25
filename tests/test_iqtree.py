@@ -24,25 +24,25 @@ def _write_msa(path: Path, n: int = 3) -> None:
 
 def _fake_run_writes_outputs(treefile_body: str = "(A:0.1,B:0.1,C:0.1);\n",
                              summary_body: str = "Best model: LG+G4\n"):
-    """Build a fake subprocess.run that drops the IQ-TREE output files."""
+    """Build a fake run_streaming that drops the IQ-TREE output files.
+
+    Matches the helper's signature: ``run_streaming(argv, *, stdout_file=None,
+    cwd=None, check=True, stream_prefix="", stderr_dest=None) -> str``.
+    """
     captured: dict = {}
 
-    def _run(cmd, **kwargs):
-        captured["cmd"] = list(cmd)
+    def _run(argv, **kwargs):
+        captured["cmd"] = list(argv)
         # Find --prefix's value; the wrapper writes outputs to <prefix>.*.
         prefix = None
-        for i, token in enumerate(cmd):
-            if token == "--prefix" and i + 1 < len(cmd):
-                prefix = Path(cmd[i + 1])
+        for i, token in enumerate(argv):
+            if token == "--prefix" and i + 1 < len(argv):
+                prefix = Path(argv[i + 1])
                 break
         assert prefix is not None, "wrapper must pass --prefix"
         Path(str(prefix) + ".treefile").write_text(treefile_body)
         Path(str(prefix) + ".iqtree").write_text(summary_body)
-
-        class _R:
-            stdout = ""
-            stderr = ""
-        return _R()
+        return ""  # run_streaming returns the buffered stderr string
 
     return _run, captured
 
@@ -94,7 +94,7 @@ def test_run_iqtree_prints_start_and_finish_to_stderr(tmp_path, capsys):
     cfg = {"temp_dir": str(tmp_path), "seed": 7, "threads": 2}
 
     fake_run, _ = _fake_run_writes_outputs()
-    with patch("repseq.phylo.iqtree.subprocess.run", side_effect=fake_run), \
+    with patch("repseq.phylo.iqtree.run_streaming", side_effect=fake_run), \
          patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
         run_iqtree(msa, out, cfg, is_protein=True)
 
@@ -119,7 +119,7 @@ def test_run_iqtree_writes_treefile_and_summary(tmp_path):
     fake_run, captured = _fake_run_writes_outputs(
         treefile_body="(A,B,C,D);\n", summary_body="Best model: WAG+G4\n",
     )
-    with patch("repseq.phylo.iqtree.subprocess.run", side_effect=fake_run), \
+    with patch("repseq.phylo.iqtree.run_streaming", side_effect=fake_run), \
          patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
         run_iqtree(msa, out, cfg, is_protein=True, summary_path=summary)
 
@@ -145,7 +145,7 @@ def test_run_iqtree_disables_ufboot_when_fewer_than_four_seqs(tmp_path, capsys):
     cfg = {"temp_dir": str(tmp_path), "seed": 7, "threads": 1}
 
     fake_run, captured = _fake_run_writes_outputs()
-    with patch("repseq.phylo.iqtree.subprocess.run", side_effect=fake_run), \
+    with patch("repseq.phylo.iqtree.run_streaming", side_effect=fake_run), \
          patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
         run_iqtree(msa, out, cfg, is_protein=True)
 
@@ -170,7 +170,7 @@ def test_run_iqtree_honours_explicit_model_and_extra_args(tmp_path):
     }
 
     fake_run, captured = _fake_run_writes_outputs()
-    with patch("repseq.phylo.iqtree.subprocess.run", side_effect=fake_run), \
+    with patch("repseq.phylo.iqtree.run_streaming", side_effect=fake_run), \
          patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
         run_iqtree(msa, out, cfg, is_protein=True)
 
@@ -192,7 +192,7 @@ def test_run_iqtree_can_disable_ufboot_via_config(tmp_path):
     }
 
     fake_run, captured = _fake_run_writes_outputs()
-    with patch("repseq.phylo.iqtree.subprocess.run", side_effect=fake_run), \
+    with patch("repseq.phylo.iqtree.run_streaming", side_effect=fake_run), \
          patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
         run_iqtree(msa, out, cfg, is_protein=True)
 
@@ -208,7 +208,7 @@ def test_run_iqtree_summary_path_optional(tmp_path):
     cfg = {"temp_dir": str(tmp_path), "seed": 1, "threads": 1}
 
     fake_run, _ = _fake_run_writes_outputs()
-    with patch("repseq.phylo.iqtree.subprocess.run", side_effect=fake_run), \
+    with patch("repseq.phylo.iqtree.run_streaming", side_effect=fake_run), \
          patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
         run_iqtree(msa, out, cfg, is_protein=True)  # no summary_path
 
@@ -221,12 +221,12 @@ def test_run_iqtree_raises_when_subprocess_fails(tmp_path):
     out = tmp_path / "out.nwk"
     cfg = {"temp_dir": str(tmp_path), "seed": 1, "threads": 1}
 
-    import subprocess as _sp
+    from repseq.utils.subprocess_stream import StreamedProcessError
 
-    def _fail(cmd, **kwargs):
-        raise _sp.CalledProcessError(2, cmd, output="", stderr="boom")
+    def _fail(argv, **kwargs):
+        raise StreamedProcessError(2, argv, output=None, stderr="boom")
 
-    with patch("repseq.phylo.iqtree.subprocess.run", side_effect=_fail), \
+    with patch("repseq.phylo.iqtree.run_streaming", side_effect=_fail), \
          patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
         with pytest.raises(IQTreeError, match="boom"):
             run_iqtree(msa, out, cfg, is_protein=True)
@@ -244,7 +244,7 @@ def test_run_iqtree_partition_uses_linkage_flag_and_drops_model(tmp_path):
     cfg = {"temp_dir": str(tmp_path), "seed": 7, "threads": 2}
 
     fake_run, captured = _fake_run_writes_outputs()
-    with patch("repseq.phylo.iqtree.subprocess.run", side_effect=fake_run), \
+    with patch("repseq.phylo.iqtree.run_streaming", side_effect=fake_run), \
          patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
         run_iqtree(
             msa, out, cfg, is_protein=True,
@@ -269,7 +269,7 @@ def test_run_iqtree_partition_linkage_defaults_to_proportional(tmp_path):
     cfg = {"temp_dir": str(tmp_path), "seed": 1, "threads": 1}
 
     fake_run, captured = _fake_run_writes_outputs()
-    with patch("repseq.phylo.iqtree.subprocess.run", side_effect=fake_run), \
+    with patch("repseq.phylo.iqtree.run_streaming", side_effect=fake_run), \
          patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
         run_iqtree(msa, out, cfg, is_protein=True, partition_file=part)
 
@@ -284,13 +284,12 @@ def test_run_iqtree_raises_when_treefile_missing(tmp_path):
     out = tmp_path / "out.nwk"
     cfg = {"temp_dir": str(tmp_path), "seed": 1, "threads": 1}
 
-    def _silent_success(cmd, **kwargs):
-        class _R:
-            stdout = ""
-            stderr = ""
-        return _R()
+    def _silent_success(argv, **kwargs):
+        # run_streaming returns the buffered stderr text; an empty string
+        # means a quiet successful run.
+        return ""
 
-    with patch("repseq.phylo.iqtree.subprocess.run", side_effect=_silent_success), \
+    with patch("repseq.phylo.iqtree.run_streaming", side_effect=_silent_success), \
          patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
         with pytest.raises(IQTreeError, match="did not produce a .treefile"):
             run_iqtree(msa, out, cfg, is_protein=True)

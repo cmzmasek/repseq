@@ -15,16 +15,16 @@ from repseq.phylo.fasttree import run_fasttree
 from repseq.phylo.mafft import run_mafft
 
 
-def _stub_subprocess_run_with_output(payload: str = "(A,B,C);\n"):
-    """A subprocess.run stub that writes ``payload`` to the requested
-    stdout file handle (the wrappers redirect stdout into the output
-    file)."""
-    def _run(cmd, check, stdout, stderr, text):
-        stdout.write(payload)
-
-        class _R:
-            returncode = 0
-        return _R()
+def _stub_run_streaming(payload: str = "(A,B,C);\n"):
+    """A run_streaming stub that writes ``payload`` to the requested
+    stdout_file (the wrappers redirect the tool's stdout into that
+    file). Returns the empty stderr string the real helper would on a
+    successful, silent run."""
+    def _run(argv, *, stdout_file=None, **_kw):
+        if stdout_file is not None:
+            stdout_file.parent.mkdir(parents=True, exist_ok=True)
+            stdout_file.write_text(payload)
+        return ""
 
     return _run
 
@@ -36,8 +36,8 @@ def test_mafft_prints_start_and_finish(tmp_path, capsys):
 
     with patch("repseq.phylo.mafft._check_mafft", return_value="/fake/mafft"), \
          patch(
-             "repseq.phylo.mafft.subprocess.run",
-             side_effect=_stub_subprocess_run_with_output(">a\nMKL\n>b\nMKL\n"),
+             "repseq.phylo.mafft.run_streaming",
+             side_effect=_stub_run_streaming(">a\nMKL\n>b\nMKL\n"),
          ):
         run_mafft(input_fasta, out, {"threads": 4})
 
@@ -61,8 +61,8 @@ def test_mafft_explicit_args_drop_auto(tmp_path, capsys):
 
     with patch("repseq.phylo.mafft._check_mafft", return_value="/fake/mafft"), \
          patch(
-             "repseq.phylo.mafft.subprocess.run",
-             side_effect=_stub_subprocess_run_with_output(">a\nMKL\n>b\nMKL\n"),
+             "repseq.phylo.mafft.run_streaming",
+             side_effect=_stub_run_streaming(">a\nMKL\n>b\nMKL\n"),
          ):
         run_mafft(
             input_fasta, out, {"threads": 8},
@@ -83,8 +83,8 @@ def test_fasttree_prints_start_and_finish_nt(tmp_path, capsys):
 
     with patch("repseq.phylo.fasttree._check_fasttree", return_value="/fake/FastTree"), \
          patch(
-             "repseq.phylo.fasttree.subprocess.run",
-             side_effect=_stub_subprocess_run_with_output("(a,b);\n"),
+             "repseq.phylo.fasttree.run_streaming",
+             side_effect=_stub_run_streaming("(a,b);\n"),
          ):
         run_fasttree(msa, out, {}, is_protein=False)
 
@@ -106,8 +106,8 @@ def test_fasttree_protein_omits_nt_flags(tmp_path, capsys):
 
     with patch("repseq.phylo.fasttree._check_fasttree", return_value="/fake/FastTree"), \
          patch(
-             "repseq.phylo.fasttree.subprocess.run",
-             side_effect=_stub_subprocess_run_with_output("(a,b);\n"),
+             "repseq.phylo.fasttree.run_streaming",
+             side_effect=_stub_run_streaming("(a,b);\n"),
          ):
         run_fasttree(msa, out, {}, is_protein=True)
 

@@ -517,3 +517,64 @@ def test_raises_when_no_family_clears_min_taxa(tmp_path):
     reps = [_concat_rep("iso0", {"S": _S_proteins()})]  # only 1 rep
     with pytest.raises(PhyloError, match="nothing built"):
         _run(reps, cfg, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# run_per_segment_phylogeny (2H)
+# ---------------------------------------------------------------------------
+
+
+def _run_per_segment(reps, cfg, tmp_path, prefix="bunya"):
+    from repseq.phylo.per_protein import run_per_segment_phylogeny
+    with patch("repseq.phylo.pipeline.run_mafft", side_effect=_stub_mafft), \
+         patch("repseq.phylo.pipeline.run_fasttree", side_effect=_stub_fasttree):
+        return run_per_segment_phylogeny(reps, cfg, tmp_path, prefix)
+
+
+def test_per_segment_builds_one_tree_per_segment(tmp_path):
+    """Every declared segment with >= min_taxa carriers gets one NT tree."""
+    cfg = _seg_cfg({})  # no HMM tokens needed for 2H — it's NT, no markers
+    cfg["phylo"]["tool"] = "fasttree"
+    reps = [
+        _concat_rep(f"iso{i}", {"S": _S_proteins(), "M": _M_proteins()})
+        for i in range(3)
+    ]
+    files = _run_per_segment(reps, cfg, tmp_path)
+    sub = tmp_path / "bunya_per_segment"
+    for seg in ("M", "S"):
+        for ext in ("_msa.fasta", "_tree.nwk", "_tree.xml", "_tree_id_map.tsv"):
+            assert (sub / f"{seg}{ext}").exists(), f"missing {seg}{ext}"
+    assert all(str(f).startswith(str(sub)) for f in files)
+
+
+def test_per_segment_segment_below_min_taxa_skipped(tmp_path):
+    """A segment carried by fewer than min_taxa reps is skipped, the
+    others still build."""
+    cfg = _seg_cfg({})
+    cfg["phylo"]["tool"] = "fasttree"
+    # 3 reps carry S, only 1 carries M (others have empty M Sequence).
+    reps = [
+        _concat_rep("iso0", {"S": _S_proteins(), "M": _M_proteins()}),
+        _concat_rep("iso1", {"S": _S_proteins()}),
+        _concat_rep("iso2", {"S": _S_proteins()}),
+    ]
+    files = _run_per_segment(reps, cfg, tmp_path)
+    sub = tmp_path / "bunya_per_segment"
+    assert (sub / "S_tree.xml").exists()
+    assert not (sub / "M_tree.xml").exists()
+
+
+def test_per_segment_raises_when_non_segmented(tmp_path):
+    """Per-segment trees are segmented-only by construction."""
+    from repseq.phylo.per_protein import run_per_segment_phylogeny
+    cfg = {"segmented": {"enabled": False}}
+    with pytest.raises(PhyloError, match="only apply to segmented"):
+        run_per_segment_phylogeny([], cfg, tmp_path, "x")
+
+
+def test_per_segment_raises_when_no_segment_clears_min_taxa(tmp_path):
+    cfg = _seg_cfg({})
+    cfg["phylo"]["tool"] = "fasttree"
+    reps = [_concat_rep("iso0", {"S": _S_proteins()})]  # only 1 rep
+    with pytest.raises(PhyloError, match="no segment had"):
+        _run_per_segment(reps, cfg, tmp_path)

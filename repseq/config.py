@@ -378,7 +378,22 @@ DEFAULTS: dict[str, Any] = {
         #   none       — leave the tree as parsed (use when the input
         #                is already rooted, e.g. by an outgroup).
         "rooting": {
+            # method: "auto" | "taxonomy" | "mad" | "midpoint" |
+            #         "outgroup" | "none"
+            #
+            # "outgroup" uses a user-specified accession or clade as the
+            # outgroup. Configure via either or both:
+            #   outgroup:      "AB123456"  OR  ["AB123456", "CD789012"]
+            #   outgroup_rank: {family: "Hantaviridae"}
+            # Accessions match against rep.accession / rep.id / rep.isolate_id
+            # (case-insensitive). outgroup_rank pulls every rep whose
+            # taxonomy carries that taxon at that rank. The two sources are
+            # unioned; multi-leaf outgroups root at the leaves' MRCA. When
+            # the spec matches no representative the rooter falls through
+            # to midpoint with a stderr note (so a typo never voids the tree).
             "method": "auto",
+            "outgroup": None,
+            "outgroup_rank": None,
         },
         # Internal-node LCA labels. After rooting, every internal
         # clade is labelled with the lowest common ancestor of its
@@ -1304,10 +1319,38 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
 
     rooting_cfg = phylo_cfg.get("rooting", {}) or {}
     rmethod = rooting_cfg.get("method", "auto")
-    if rmethod not in ("auto", "taxonomy", "mad", "midpoint", "none"):
+    if rmethod not in ("auto", "taxonomy", "mad", "midpoint", "outgroup", "none"):
         errors.append(
             f"phylo.rooting.method '{rmethod}' is not supported "
-            "(use 'auto', 'taxonomy', 'mad', 'midpoint', or 'none')"
+            "(use 'auto', 'taxonomy', 'mad', 'midpoint', 'outgroup', "
+            "or 'none')"
+        )
+    og = rooting_cfg.get("outgroup")
+    if og is not None and not (
+        isinstance(og, str)
+        or (isinstance(og, list) and all(isinstance(x, str) for x in og))
+    ):
+        errors.append(
+            "phylo.rooting.outgroup must be a string (single accession) "
+            "or a list of accession strings"
+        )
+    ogr = rooting_cfg.get("outgroup_rank")
+    if ogr is not None and not (
+        isinstance(ogr, dict)
+        and all(
+            isinstance(k, str) and isinstance(v, str) and v.strip()
+            for k, v in ogr.items()
+        )
+    ):
+        errors.append(
+            "phylo.rooting.outgroup_rank must be a mapping of "
+            "rank-name → taxon name (strings)"
+        )
+    if rmethod == "outgroup" and not og and not ogr:
+        errors.append(
+            "phylo.rooting.method='outgroup' requires either "
+            "phylo.rooting.outgroup (an accession or list) or "
+            "phylo.rooting.outgroup_rank (a rank → taxon mapping)"
         )
 
     lca_cfg = phylo_cfg.get("lca", {}) or {}

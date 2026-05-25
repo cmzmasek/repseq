@@ -105,6 +105,20 @@ def _shared_options(fn):
         ),
     )(fn)
     fn = click.option(
+        "--per-segment-phylo", is_flag=True, default=False,
+        help=(
+            "Segmented mode only. Build one nucleotide tree per segment "
+            "over the representative isolates, into the "
+            "{prefix}_per_segment/ subdirectory. Each isolate contributes "
+            "its raw per-segment NT (from concat_segments). Complements "
+            "--per-protein-phylo: reassortment can show up as topological "
+            "incongruence between the per-segment trees themselves, even "
+            "when no single marker tree captures it. Needs 'mafft' plus "
+            "a tree builder; each segment needs >= phylo.per_protein.min_taxa "
+            "representatives. Runs alone or alongside --phylo / --per-protein-phylo."
+        ),
+    )(fn)
+    fn = click.option(
         "--fast", "fast", is_flag=True, default=False,
         help=(
             "Preliminary-run mode for fast tree building. Overrides the "
@@ -1367,7 +1381,7 @@ def _handle_segmented(sequences, cfg, qc_report):
 
 def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names,
                   pre_clustering_sequences=None, plot: bool = False, phylo: bool = False,
-                  per_protein_phylo: bool = False):
+                  per_protein_phylo: bool = False, per_segment_phylo: bool = False):
     out_files = write_results(result, cfg, complete_isolates, segment_names)
     if plot:
         out_dir = Path(cfg["output"]["dir"])
@@ -1410,6 +1424,19 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
             click.echo(f"[per-protein phylo skipped] {exc}", err=True)
         except Exception as exc:
             click.echo(f"[per-protein phylo failed] {exc}", err=True)
+    if per_segment_phylo:
+        out_dir = Path(cfg["output"]["dir"])
+        prefix = cfg["output"].get("prefix", "repseq")
+        try:
+            from .phylo import PhyloError, run_per_segment_phylogeny
+            ps_files = run_per_segment_phylogeny(
+                result.representatives, cfg, out_dir, prefix,
+            )
+            out_files.extend(ps_files)
+        except PhyloError as exc:
+            click.echo(f"[per-segment phylo skipped] {exc}", err=True)
+        except Exception as exc:
+            click.echo(f"[per-segment phylo failed] {exc}", err=True)
     write_all_reports(
         result, qc_report, cfg, list(input_paths), out_files,
         complete_isolates=complete_isolates,
@@ -1483,6 +1510,7 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
             segment_names=segment_names,
             phylo_ran=phylo,
             per_protein_ran=per_protein_phylo,
+            per_segment_ran=per_segment_phylo,
             command=" ".join(sys.argv),
         )
         out_files.append(summary_path)
@@ -1671,7 +1699,7 @@ def run_doctor_cmd(config_path, no_network):
 @click.option("--n-select", "-n", default=None, type=int,
               help="Number of representative sequences to select.")
 def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, source_override, alphabet_for_clustering, fast, threshold, n_select):
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, threshold, n_select):
     """Global mode: cluster at a threshold or select N diverse sequences."""
     if threshold is None and n_select is None:
         raise click.UsageError("Provide --threshold or --n-select.")
@@ -1702,7 +1730,7 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -1716,7 +1744,7 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-group", "-n", required=True, type=int,
               help="Target representatives per taxonomic group.")
 def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, source_override, alphabet_for_clustering, fast, rank, n_per_group):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, rank, n_per_group):
     """Taxonomic mode 1: N representatives per taxonomic rank group."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, fast=fast)
@@ -1743,7 +1771,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -1755,7 +1783,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--rank-levels", "-r", required=True,
               help='JSON list of {rank, n_per_group} dicts. E.g. \'[{"rank":"family","n_per_group":20},{"rank":"genus","n_per_group":5}]\'')
 def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, source_override, alphabet_for_clustering, fast, rank_levels):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, rank_levels):
     """Taxonomic mode 2: hierarchical multi-rank nested clustering."""
     import json as _json
     try:
@@ -1788,7 +1816,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -1800,7 +1828,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-host", "-n", required=True, type=int,
               help="Target representatives per host organism.")
 def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, source_override, alphabet_for_clustering, fast, n_per_host):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, n_per_host):
     """Host-stratified mode: N representatives per host organism."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, fast=fast)
@@ -1827,7 +1855,7 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -1841,7 +1869,7 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--window", default="year",
               help='Time window: "year", "decade", or a number (e.g. "5" for 5-year bins).')
 def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, source_override, alphabet_for_clustering, fast, n_per_window, window):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, n_per_window, window):
     """Time-stratified mode: N representatives per time window."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, fast=fast)
@@ -1868,7 +1896,7 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -1880,7 +1908,7 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-country", "-n", required=True, type=int,
               help="Target representatives per country.")
 def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, source_override, alphabet_for_clustering, fast, n_per_country):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, n_per_country):
     """Geographic mode: N representatives per country."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, fast=fast)
@@ -1907,7 +1935,7 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -1925,7 +1953,7 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--field-regex", default=None,
               help="Regex to extract the field value from FASTA headers.")
 def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, source_override, alphabet_for_clustering, fast, field, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, field, n_per_group,
                metadata_table, field_regex):
     """Custom metadata mode: group by any field or metadata table column."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
@@ -1958,7 +1986,7 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -1974,7 +2002,7 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--metadata-table", default=None,
               help="Path to TSV/CSV metadata table with accession column.")
 def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, source_override, alphabet_for_clustering, fast, fields, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, fields, n_per_group,
                metadata_table):
     """Hybrid mode: multi-dimensional stratification (e.g. genus × host × year)."""
     field_list = [f.strip() for f in fields.split(",")]
@@ -2006,7 +2034,7 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
     result = mode.run(sequences)
     result.qc_report = qc_report
 
-    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo)
+    _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names, pre_clustering_sequences=sequences, plot=plot, phylo=phylo, per_protein_phylo=per_protein_phylo, per_segment_phylo=per_segment_phylo)
 
 
 # ---------------------------------------------------------------------------
@@ -2062,6 +2090,134 @@ def cache_purge(config_path):
     cache = TaxonomyCache(cfg["cache_dir"])
     n = cache.purge_expired()
     click.echo(f"Purged {n} expired cache entries.")
+
+
+# ---------------------------------------------------------------------------
+# stats — pre-flight inspection of an input FASTA
+# ---------------------------------------------------------------------------
+
+@main.command("stats")
+@click.option("--input", "-i", "input_paths", multiple=True, required=True,
+              help="Input FASTA file(s). Repeat for multiple files.")
+@click.option("--source", "source_override",
+              type=click.Choice(["auto", "uniprot", "ncbi", "ncbi_virus"]),
+              default="auto",
+              help="Force input source instead of auto-detecting from headers.")
+@click.option("--top-n", default=10, type=int,
+              help="Top N taxa per rank in the breakdown (default 10).")
+@click.option("--resolve/--no-resolve", default=False,
+              help=(
+                  "Resolve taxonomy via NCBI/UniProt before stats — slower but "
+                  "fills in missing organism/taxonomy. Default: don't resolve "
+                  "(use header-derived metadata only — fast, no network)."
+              ))
+@click.option("--config", "-c", "config_path", default=None,
+              help="Path to YAML config file (only needed with --resolve).")
+def run_stats(input_paths, source_override, top_n, resolve, config_path):
+    """Pre-flight inspection of an input FASTA — count, taxonomy spread,
+    length distribution, missing-metadata fractions. No clustering, no
+    output files. Use this to decide whether your input is shaped the way
+    you expect before committing to a long run.
+    """
+    sequences = _load_sequences(input_paths, source_override)
+    if not sequences:
+        click.echo("No sequences loaded.", err=True)
+        sys.exit(1)
+
+    if resolve:
+        cfg = load_config(config_path)
+        _resolve_metadata(sequences, cfg, no_resolve=False)
+
+    _print_input_stats(sequences, top_n=top_n)
+
+
+def _print_input_stats(sequences, *, top_n: int = 10) -> None:
+    """Render the stats panel to stdout. Pure presentation — no I/O
+    beyond ``click.echo``."""
+    from collections import Counter
+    import statistics
+
+    n = len(sequences)
+    click.echo("")
+    click.echo("=" * 60)
+    click.echo(f"Input statistics — {n:,} sequence(s)")
+    click.echo("=" * 60)
+
+    # Source breakdown.
+    src_counts: Counter = Counter(s.source.value for s in sequences)
+    click.echo("\nSource:")
+    for src, c in src_counts.most_common():
+        click.echo(f"  {src:<15} {c:>8,}  ({100*c/n:.1f}%)")
+
+    # Length distribution.
+    lengths = [s.length for s in sequences if s.length]
+    if lengths:
+        click.echo("\nSequence length (nucleotides):")
+        click.echo(f"  min     {min(lengths):>10,}")
+        click.echo(f"  max     {max(lengths):>10,}")
+        click.echo(f"  median  {int(statistics.median(lengths)):>10,}")
+        if len(lengths) >= 4:
+            q1, _q2, q3 = statistics.quantiles(lengths, n=4)
+            click.echo(f"  Q3-Q1   {int(round(q3 - q1)):>10,}")
+
+    # Missing-metadata fractions — the actionable "what's empty" report.
+    fields = (
+        ("organism", lambda s: s.organism),
+        ("accession", lambda s: s.accession),
+        ("strain", lambda s: s.strain),
+        ("host", lambda s: s.host),
+        ("collection_date", lambda s: s.collection_date),
+        ("country", lambda s: s.country),
+        ("segment", lambda s: s.segment),
+        ("isolate_id", lambda s: s.isolate_id),
+        ("taxonomy", lambda s: s.taxonomy),
+    )
+    click.echo("\nMetadata coverage (populated / total):")
+    name_w = max(len(name) for name, _ in fields)
+    for name, getter in fields:
+        c = sum(1 for s in sequences if getter(s))
+        click.echo(
+            f"  {name:<{name_w}}  {c:>6,} / {n:<6,}  ({100*c/n:.1f}%)"
+        )
+
+    # RefSeq / reviewed flags.
+    n_refseq = sum(1 for s in sequences if s.is_refseq)
+    n_reviewed = sum(1 for s in sequences if s.is_reviewed)
+    click.echo("\nQuality flags:")
+    click.echo(f"  is_refseq        {n_refseq:>6,}  ({100*n_refseq/n:.1f}%)")
+    click.echo(f"  is_reviewed      {n_reviewed:>6,}  ({100*n_reviewed/n:.1f}%)")
+
+    # Taxonomy breakdown — top N per rank with any populated value.
+    rank_names = ("species", "genus", "family", "order", "class")
+    click.echo(f"\nTaxonomy (top {top_n} per rank by count):")
+    any_tax = False
+    for rank in rank_names:
+        c: Counter = Counter()
+        for s in sequences:
+            if s.taxonomy is None:
+                continue
+            v = s.taxonomy.get_rank(rank)
+            if v:
+                c[v] += 1
+        if not c:
+            continue
+        any_tax = True
+        n_distinct = len(c)
+        suffix = (
+            f" ({n_distinct} distinct, top {top_n} shown)"
+            if n_distinct > top_n
+            else f" ({n_distinct} distinct)"
+        )
+        click.echo(f"  {rank}{suffix}:")
+        for name, count in c.most_common(top_n):
+            click.echo(f"    {count:>6,}  {name}")
+    if not any_tax:
+        click.echo(
+            "  (no taxonomy resolved on input; rerun with --resolve "
+            "to fetch from NCBI/UniProt)"
+        )
+
+    click.echo("")
 
 
 # ---------------------------------------------------------------------------
