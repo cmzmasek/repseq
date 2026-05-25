@@ -67,10 +67,21 @@ def test_resolve_segment_hmms_returns_empty_when_no_spec():
 
 
 def test_resolve_segment_hmms_returns_empty_when_spec_has_no_hmms():
-    """Alias-only specs don't trigger the HMM QC gate."""
+    """Alias-only segment_markers entry, no cluster_protein → no HMM gate."""
     sm = {"S": {"aliases": ["nucleocapsid"]}}
     name, tokens = _resolve_segment_hmms("S", sm, {})
     assert tokens == []
+
+
+def test_resolve_segment_hmms_falls_through_when_segment_markers_alias_only():
+    """When segment_markers[seg] exists but is alias-only AND
+    cluster_protein[seg] supplies HMMs, the HMM gate must still fire —
+    user split aliases into one block and HMMs into the other."""
+    sm = {"L": {"aliases": ["polymerase"]}}
+    cp = {"L": [{"name": "L_marker", "hmms": ["RdRP_4"]}]}
+    name, tokens = _resolve_segment_hmms("L", sm, cp)
+    assert tokens == ["RdRP_4"]
+    assert name == "L_marker"
 
 
 # ---------------------------------------------------------------------------

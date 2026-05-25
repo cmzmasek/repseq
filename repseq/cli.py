@@ -464,7 +464,7 @@ def _run_hmm_scan(sequences, cfg, ncbi) -> None:
         return
 
     import time
-    cache = ncbi._cache if ncbi is not None else None
+    cache = ncbi.cache if ncbi is not None else None
     t0 = time.time()
     try:
         results = hmm_pkg.scan_proteins(proteins_to_scan, cfg, cache=cache)
@@ -604,18 +604,26 @@ def _resolve_segment_hmms(
     """Return ``(spec_name, token_list)`` for the segment's HMM gate.
 
     Lookup order: ``segment_markers[seg]`` first (the v0.13+ HMM-aware
-    form), then per-segment ``cluster_protein[seg]`` (legacy: any dict-
-    form entry's ``hmms`` are pulled into a flat token list). Returns
+    form). If it declares ``hmms:``, those tokens win. If it exists
+    but its ``hmms:`` is empty (alias-only segment_markers entry),
+    fall through to per-segment ``cluster_protein[seg]`` (legacy: any
+    dict-form entry's ``hmms`` pulled into a flat token list) so a user
+    who split aliases into ``segment_markers`` and HMMs into
+    ``cluster_protein`` still gets the HMM gate fired. Returns
     ``(name, [])`` when no HMM gate is configured for the segment —
     that segment isn't QC'd by HMMs (alias-only / longest fallback in
     marker selection).
     """
     if seg_name in segment_markers:
         spec = segment_markers[seg_name] or {}
-        return seg_name, list(spec.get("hmms") or [])
+        tokens = list(spec.get("hmms") or [])
+        if tokens:
+            return seg_name, tokens
+        # Fall through: segment_markers is alias-only for this segment —
+        # consult cluster_protein for HMM tokens.
     if seg_name in cluster_protein_per_seg:
         entries = cluster_protein_per_seg[seg_name] or []
-        tokens: list[str] = []
+        tokens = []
         spec_name: Optional[str] = None
         for entry in entries:
             if isinstance(entry, dict):

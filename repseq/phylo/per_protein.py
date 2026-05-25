@@ -83,24 +83,33 @@ def _resolve_segment_marker(
 
     Replicated here (rather than imported) because ``cli`` imports the
     phylo package, so importing back would be circular. Lookup order:
-    ``segment_markers[seg]`` first (v0.13+ HMM-aware form), then any
-    dict-form ``cluster_protein[seg]`` entry's ``hmms``. The spec name —
-    when present on the marker dict — is used for the family label;
-    ``segment_markers`` entries usually have none (the segment is the
-    identity), so the segment prefix carries the meaning.
+    ``segment_markers[seg]`` first (v0.13+ HMM-aware form). If it carries
+    ``hmms:``, those tokens win. If it exists but is alias-only (empty
+    ``hmms:``), fall through to any dict-form ``cluster_protein[seg]``
+    entry's ``hmms`` so a user who split aliases into ``segment_markers``
+    and HMMs into ``cluster_protein`` still gets per-protein trees built
+    for the segment. The spec name — when present on the marker dict —
+    is used for the family label; ``segment_markers`` entries usually
+    have none (the segment is the identity), so the segment prefix
+    carries the meaning.
     """
+    name_from_sm: Optional[str] = None
     if seg_name in segment_markers:
         spec = segment_markers[seg_name] or {}
-        return spec.get("name"), list(spec.get("hmms") or [])
+        tokens = list(spec.get("hmms") or [])
+        if tokens:
+            return spec.get("name"), tokens
+        name_from_sm = spec.get("name")
+        # Fall through: segment_markers is alias-only here — try cluster_protein.
     if seg_name in cluster_protein_per_seg:
-        tokens: list[str] = []
-        name: Optional[str] = None
+        tokens = []
+        name: Optional[str] = name_from_sm
         for entry in cluster_protein_per_seg[seg_name] or []:
             if isinstance(entry, dict):
                 name = name or entry.get("name")
                 tokens.extend(entry.get("hmms") or [])
         return name, tokens
-    return None, []
+    return name_from_sm, []
 
 
 def _family_label(
@@ -142,19 +151,28 @@ def _resolve_segment_marker_full(
     Returns ``(name, hmm_tokens, aliases)``. ``segment_markers`` wins over
     ``cluster_protein`` (legacy); for the legacy form (a list of strings or
     dicts) plain-string entries are treated as alias strings, and each
-    dict entry contributes its ``aliases:`` / ``hmms:`` lists.
+    dict entry contributes its ``aliases:`` / ``hmms:`` lists. When
+    ``segment_markers[seg]`` exists but its ``hmms:`` is empty (alias-only),
+    we additionally pull ``hmms:`` from any ``cluster_protein[seg]`` dict
+    entries so a split alias/HMM config still gets a usable HMM gate —
+    ``segment_markers``'s own aliases are preserved and merged with any
+    from ``cluster_protein``.
     """
+    sm_name: Optional[str] = None
+    sm_tokens: list[str] = []
+    sm_aliases: list[str] = []
     if seg_name in segment_markers:
         spec = segment_markers[seg_name] or {}
-        return (
-            spec.get("name"),
-            list(spec.get("hmms") or []),
-            list(spec.get("aliases") or []),
-        )
+        sm_name = spec.get("name")
+        sm_tokens = list(spec.get("hmms") or [])
+        sm_aliases = list(spec.get("aliases") or [])
+        if sm_tokens:
+            return sm_name, sm_tokens, sm_aliases
+        # Fall through to cluster_protein for HMMs (and any extra aliases).
     if seg_name in cluster_protein_per_seg:
-        tokens: list[str] = []
-        aliases: list[str] = []
-        name: Optional[str] = None
+        tokens: list[str] = list(sm_tokens)
+        aliases: list[str] = list(sm_aliases)
+        name: Optional[str] = sm_name
         for entry in cluster_protein_per_seg[seg_name] or []:
             if isinstance(entry, str):
                 aliases.append(entry)
@@ -163,7 +181,7 @@ def _resolve_segment_marker_full(
                 tokens.extend(entry.get("hmms") or [])
                 aliases.extend(entry.get("aliases") or [])
         return name, tokens, aliases
-    return None, [], []
+    return sm_name, sm_tokens, sm_aliases
 
 
 def collect_marker_specs(

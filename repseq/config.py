@@ -1167,6 +1167,10 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         if not isinstance(extra, list) or not all(isinstance(x, str) for x in extra):
             errors.append(f"phylo.{tool_name}.extra_args must be a list of strings")
 
+    mafft_cfg = phylo_cfg.get("mafft", {}) or {}
+    if "use_auto" in mafft_cfg and not isinstance(mafft_cfg["use_auto"], bool):
+        errors.append("phylo.mafft.use_auto must be a boolean")
+
     iq_cfg = phylo_cfg.get("iqtree", {}) or {}
     if "model" in iq_cfg and not isinstance(iq_cfg["model"], str):
         errors.append("phylo.iqtree.model must be a string (e.g. 'MFP', 'LG+G4')")

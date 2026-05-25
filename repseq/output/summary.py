@@ -668,6 +668,12 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f" (then trimmed with **trimAl** `-{pp_trim.get('mode', 'automated1')}`)"
             if pp_trim.get("enabled") else ""
         )
+        # Recognise specific common strategies so the prose stays honest:
+        # `--retree 1` is the `--fast` preliminary-run setting, and
+        # `--maxiterate ... --localpair` is L-INS-i. Anything else is
+        # described as "user-supplied flags" — describing arbitrary args as
+        # L-INS-i would be a lie. (L-INS-i strictly requires --localpair;
+        # --maxiterate alone is iterative-refinement on FFT-NS, not L-INS-i.)
         if pp_mafft == ["--retree", "1"]:
             align_sentence = (
                 f"aligned with MAFFT (`--retree 1`; single-pass FFT-NS-1, "
@@ -675,11 +681,17 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
                 f"the publication run){pp_trim_clause} and inferred with "
                 f"{chosen}"
             )
-        elif pp_mafft:
+        elif pp_mafft and "--localpair" in pp_mafft and "--maxiterate" in pp_mafft:
             align_sentence = (
                 f"aligned with MAFFT (`{' '.join(pp_mafft)}`; high-accuracy "
                 f"L-INS-i for these single-gene sets){pp_trim_clause} and "
                 f"inferred with {chosen}"
+            )
+        elif pp_mafft:
+            align_sentence = (
+                f"aligned with MAFFT (`{' '.join(pp_mafft)}`; user-supplied "
+                f"per-protein MAFFT flags){pp_trim_clause} and inferred with "
+                f"{chosen}"
             )
         else:
             align_sentence = (

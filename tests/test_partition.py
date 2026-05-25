@@ -362,6 +362,32 @@ def test_build_partitioned_trims_per_family_and_retains_untrimmed(tmp_path):
     assert "trim=" in (tmp_path / "test_tree.xml").read_text()
 
 
+def test_build_partitioned_honors_mafft_use_auto_from_cfg(tmp_path):
+    """Each per-family MAFFT call must honor ``phylo.mafft.use_auto`` from
+    cfg, not hardcode True — otherwise a user-set ``use_auto: false`` (or
+    the ``--fast`` flag, when partition is somehow re-enabled in YAML) would
+    silently re-introduce ``--auto``."""
+    reps = _three_reps()
+    cfg = _cfg(_TWO_FAMILIES)
+    cfg["phylo"]["mafft"] = {"extra_args": ["--retree", "1"], "use_auto": False}
+
+    captured: list[dict] = []
+
+    def _capture_mafft(in_fa, out_fa, cfg, **kwargs):
+        captured.append(dict(kwargs))
+        _stub_mafft(in_fa, out_fa, cfg, **kwargs)
+
+    with patch("repseq.phylo.partition.run_mafft", side_effect=_capture_mafft), \
+         patch("repseq.phylo.partition.run_iqtree", side_effect=_stub_iqtree):
+        build_partitioned_phylogeny(reps, cfg, tmp_path, "test")
+
+    # One MAFFT call per declared marker family (two families in _TWO_FAMILIES).
+    assert len(captured) == 2
+    for kw in captured:
+        assert kw.get("use_auto") is False
+        assert kw.get("extra_args") == ["--retree", "1"]
+
+
 def test_run_phylogeny_skips_partition_for_fasttree(tmp_path):
     reps = _three_reps()
     cfg = _cfg(_TWO_FAMILIES, tool="fasttree")

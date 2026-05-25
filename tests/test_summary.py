@@ -331,6 +331,30 @@ def test_render_summary_per_protein_describes_linsi_mafft(make_seq, tmp_path):
     assert "L-INS-i" in md
 
 
+def test_render_summary_per_protein_non_linsi_args_not_called_linsi(
+    make_seq, tmp_path,
+):
+    """User passing arbitrary MAFFT args (not the L-INS-i combo) must not
+    have the prose claim they ran L-INS-i — the previous wording lied about
+    any non-default flag set."""
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {
+        "tool": "fasttree",
+        "per_protein": {
+            "min_taxa": 3,
+            # --maxiterate alone is iterative refinement on FFT-NS, NOT
+            # L-INS-i (which strictly requires --localpair).
+            "mafft": {"extra_args": ["--maxiterate", "2"]},
+        },
+    }
+    md = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], per_protein_ran=True,
+    )
+    assert "--maxiterate 2" in md
+    assert "L-INS-i" not in md
+    assert "user-supplied" in md
+
+
 def test_render_summary_incongruence_omitted_when_disabled(make_seq, tmp_path):
     cfg = _base_cfg(tmp_path)
     cfg["phylo"] = {

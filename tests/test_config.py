@@ -226,6 +226,20 @@ def test_validate_config_rejects_phylo_non_string_extra_args():
     assert any("phylo.mafft.extra_args" in e for e in errors)
 
 
+def test_validate_config_rejects_phylo_mafft_use_auto_non_bool():
+    cfg = load_config(None)
+    cfg["phylo"]["mafft"]["use_auto"] = "yes"
+    errors = validate_config(cfg)
+    assert any("phylo.mafft.use_auto" in e for e in errors)
+
+
+def test_validate_config_accepts_phylo_mafft_use_auto_bool():
+    cfg = load_config(None)
+    for v in (True, False):
+        cfg["phylo"]["mafft"]["use_auto"] = v
+        assert validate_config(cfg) == []
+
+
 def test_validate_config_default_phylo_tool_is_auto():
     cfg = load_config(None)
     assert cfg["phylo"]["tool"] == "auto"

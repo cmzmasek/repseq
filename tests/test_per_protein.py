@@ -152,6 +152,26 @@ def test_collect_family_specs_empty_when_no_tokens():
     assert collect_family_specs(cfg) == []
 
 
+def test_collect_family_specs_falls_through_when_segment_markers_alias_only():
+    """segment_markers[seg] with aliases only must fall through to
+    cluster_protein[seg]'s hmms so the family still gets a tree built."""
+    cfg = {
+        "segmented": {
+            "enabled": True, "virus": "Bunya",
+            "viruses": {"Bunya": {
+                "segments": ["L"],
+                "segment_markers": {"L": {"aliases": ["polymerase"]}},
+                "cluster_protein": {
+                    "L": [{"name": "L_marker", "hmms": ["RdRP_4"]}],
+                },
+            }},
+        },
+        "_hmm_runtime": {"active": True},
+    }
+    specs = collect_family_specs(cfg)
+    assert specs == [("L_L_marker", ["RdRP_4"], "L")]
+
+
 # ---------------------------------------------------------------------------
 # CDS selection + segment scoping
 # ---------------------------------------------------------------------------

@@ -37,6 +37,15 @@ class NCBITaxonomy:
         self._last_request: float = 0.0
         self._throttle_lock = threading.Lock()
 
+    @property
+    def cache(self) -> TaxonomyCache:
+        """Read-only handle to the underlying TaxonomyCache.
+
+        Exposed so siblings that share the cache (e.g. the HMM scan
+        cache) don't have to reach into ``_cache`` privately.
+        """
+        return self._cache
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

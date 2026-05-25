@@ -292,10 +292,9 @@ def build_partitioned_phylogeny(
 
     id_map = _build_id_map(leaf_reps)
     labels = _leaf_labels(leaf_reps, id_map, cfg)
-    mafft_extra = list(
-        ((cfg or {}).get("phylo", {}).get("mafft", {}) or {}).get("extra_args", [])
-        or []
-    )
+    mafft_cfg = ((cfg or {}).get("phylo", {}).get("mafft", {}) or {})
+    mafft_extra = list(mafft_cfg.get("extra_args", []) or [])
+    mafft_use_auto = bool(mafft_cfg.get("use_auto", True))
     # The genome-tree trimAl setting governs the per-partition trimming;
     # families are trimmed BEFORE concatenation so the charset ranges
     # reflect the trimmed widths.
@@ -324,7 +323,10 @@ def build_partitioned_phylogeny(
             family_label, len(fam_reps),
         )
         try:
-            run_mafft(in_fa, msa_fa, cfg, extra_args=mafft_extra, use_auto=True)
+            run_mafft(
+                in_fa, msa_fa, cfg,
+                extra_args=mafft_extra, use_auto=mafft_use_auto,
+            )
         except MafftError as exc:
             raise PhyloError(
                 f"MAFFT failed on partition {family_label}: {exc}"
