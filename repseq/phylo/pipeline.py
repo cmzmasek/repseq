@@ -50,6 +50,11 @@ from . import iqtree as iqtree_mod
 from . import mafft as mafft_mod
 from .fasttree import FastTreeError, run_fasttree
 from .iqtree import IQTreeError, run_iqtree
+from .iqtree_parse import (
+    format_models_for_description,
+    parse_chosen_models,
+    write_iqtree_model_file,
+)
 from .labels import format_leaf_label, labeling_options, pick_format_string
 from .lca import (
     annotate_internal_nodes,
@@ -387,6 +392,7 @@ def _build_tree(
                 except OSError:
                     pass
 
+    chosen_models: dict[str, str] = {}
     if tree_tool == "iqtree":
         try:
             run_iqtree(
@@ -398,17 +404,32 @@ def _build_tree(
             raise PhyloError(str(exc)) from exc
         if iqtree_summary_path.exists():
             written_extras.append(iqtree_summary_path)
+            # ModelFinder records its pick deep in the .iqtree report;
+            # extract it for the phyloXML description, _summary.md, and a
+            # grep-friendly sidecar. Soft-fail (empty dict) when the
+            # format changes — the tree itself is unaffected.
+            chosen_models = parse_chosen_models(iqtree_summary_path)
+            if chosen_models:
+                model_file = out_dir / f"{file_prefix}_iqtree_model.txt"
+                write_iqtree_model_file(chosen_models, model_file)
+                if model_file.exists():
+                    written_extras.append(model_file)
     else:
         try:
             run_fasttree(msa_fasta, newick_path, cfg, is_protein=is_protein)
         except FastTreeError as exc:
             raise PhyloError(str(exc)) from exc
 
-    model_label = (
-        ("JTT" if is_protein else "GTR")
-        if tree_tool == "fasttree"
-        else _resolved_model(cfg, tree_tool)
-    )
+    if tree_tool == "fasttree":
+        model_label = "JTT" if is_protein else "GTR"
+    else:
+        # Prefer the actual ModelFinder pick when we parsed one; fall
+        # back to the configured input (typically "MFP") so the
+        # description always says *something*.
+        model_label = (
+            format_models_for_description(chosen_models)
+            or _resolved_model(cfg, tree_tool)
+        )
     return _finalize_tree(
         representatives=representatives,
         id_map=id_map,

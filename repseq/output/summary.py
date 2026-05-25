@@ -535,6 +535,39 @@ def _describe_mode(mode: str, cfg: dict) -> str:
     return descriptions.get(mode, f"Selection mode: `{mode}`.")
 
 
+def _read_iqtree_model_file(cfg: dict) -> dict[str, str]:
+    """Load ``{prefix}_iqtree_model.txt`` into ``{label: model}``.
+
+    The file is written by the phylo pipeline after parsing the actual
+    ModelFinder picks out of IQ-TREE's ``.iqtree`` report. Returns ``{}``
+    when the file is absent (FastTree run, IQ-TREE soft-failed, or the
+    parser couldn't locate the picks) — the renderer falls back to the
+    generic "ModelFinder for substitution-model selection" prose.
+    """
+    try:
+        out_dir = Path(cfg["output"]["dir"])
+        prefix = cfg["output"].get("prefix", "repseq")
+    except (KeyError, TypeError):
+        return {}
+    path = out_dir / f"{prefix}_iqtree_model.txt"
+    if not path.exists():
+        return {}
+    chosen: dict[str, str] = {}
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+            label, model = line.split(":", 1)
+            label = label.strip()
+            model = model.strip()
+            if label and model:
+                chosen[label] = model
+    except OSError:
+        return {}
+    return chosen
+
+
 def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
                   versions: dict, per_protein_ran: bool = False,
                   per_segment_ran: bool = False) -> str:
@@ -549,12 +582,23 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
         chosen = "iqtree2" if alphabet == "protein" else "FastTree"
     else:
         chosen = "iqtree2" if tool_pref == "iqtree" else "FastTree"
+    chosen_models = _read_iqtree_model_file(cfg) if phylo_ran else {}
     if chosen == "iqtree2":
+        # Append the actual ModelFinder pick when we have it — buried in
+        # the .iqtree report otherwise. For non-partitioned the file has
+        # a single GENOME entry; for partitioned the per-partition picks
+        # land in the partitioned paragraph below instead.
+        model_pick_clause = ""
+        if chosen_models and len(chosen_models) == 1 and "GENOME" in chosen_models:
+            model_pick_clause = (
+                f" ModelFinder selected **{chosen_models['GENOME']}** "
+                f"as the best-fit substitution model."
+            )
         tree_sentence = (
             f"A maximum-likelihood tree was inferred with **IQ-TREE** "
             f"v{versions.get('iqtree2') or '?'} ({_CITATIONS['iqtree2']}) "
             f"using ModelFinder for substitution-model selection and "
-            f"ultrafast bootstrap approximation (UFBoot)."
+            f"ultrafast bootstrap approximation (UFBoot).{model_pick_clause}"
         )
     else:
         flag_note = "`-nt -gtr`" if alphabet != "protein" else "default protein model"
@@ -656,6 +700,23 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
         linkage_flag = {
             "proportional": "-p", "equal": "-q", "unlinked": "-Q",
         }.get(linkage, "-p")
+        # Surface the per-partition ModelFinder picks if available. We
+        # exclude any spurious "GENOME" key (only emitted for the
+        # non-partitioned single-MFP path) so a stale sidecar from a
+        # prior run can't poison this paragraph.
+        partition_picks = {
+            k: v for k, v in chosen_models.items() if k != "GENOME"
+        }
+        if partition_picks:
+            picks_str = ", ".join(
+                f"{k}=`{v}`" for k, v in partition_picks.items()
+            )
+            partition_picks_clause = (
+                f" ModelFinder selected: {picks_str} (also written to "
+                f"`{{prefix}}_iqtree_model.txt`)."
+            )
+        else:
+            partition_picks_clause = ""
         paragraphs.append(
             f"The whole-genome tree of the **{_fmt_int(n_reps)}** "
             f"representatives was built as a **partitioned supermatrix**. "
@@ -668,7 +729,8 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"then inferred with **IQ-TREE** v{versions.get('iqtree2') or '?'} "
             f"({_CITATIONS['iqtree2']}) fitting a substitution model **per "
             f"partition** (ModelFinder) under **{linkage}**-linkage branch "
-            f"lengths (`{linkage_flag}`) with ultrafast bootstrap (UFBoot). "
+            f"lengths (`{linkage_flag}`) with ultrafast bootstrap (UFBoot)."
+            f"{partition_picks_clause} "
             f"This avoids aligning unrelated proteins across segment seams and "
             f"forcing a single model across distinct protein families. The "
             f"tree was rooted {rooting_clause} and internal nodes "

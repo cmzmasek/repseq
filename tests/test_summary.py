@@ -203,6 +203,45 @@ def test_render_summary_phylo_describes_partitioned_supermatrix(make_seq, tmp_pa
     assert "{prefix}_partition.nex" in md
 
 
+def test_render_summary_phylo_surfaces_iqtree_chosen_model(make_seq, tmp_path):
+    """Non-partitioned IQ-TREE run: when {prefix}_iqtree_model.txt is on
+    disk, the renderer must quote ModelFinder's actual pick rather than
+    leaving the generic 'ModelFinder for substitution-model selection'
+    line standing alone."""
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"tool": "iqtree", "partition": {"enabled": False}}
+    (tmp_path / "test_iqtree_model.txt").write_text("GENOME: LG+I+G4\n")
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "ModelFinder selected **LG+I+G4**" in md
+
+
+def test_render_summary_phylo_omits_model_clause_when_file_missing(make_seq, tmp_path):
+    """No sidecar (e.g. FastTree run, IQ-TREE soft-failed) → no
+    pretend pick line."""
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"tool": "iqtree", "partition": {"enabled": False}}
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "ModelFinder selected" not in md
+
+
+def test_render_summary_phylo_partitioned_lists_per_partition_picks(make_seq, tmp_path):
+    """Partitioned IQ-TREE run with a multi-line sidecar: every
+    partition's ModelFinder pick should land in the partitioned paragraph."""
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {
+        "tool": "iqtree",
+        "partition": {"enabled": True, "linkage": "proportional"},
+    }
+    (tmp_path / "test_iqtree_model.txt").write_text(
+        "CoV_S1: LG+I+G4\nCoV_M: JTT+G4\n"
+    )
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "ModelFinder selected:" in md
+    assert "CoV_S1=`LG+I+G4`" in md
+    assert "CoV_M=`JTT+G4`" in md
+    assert "{prefix}_iqtree_model.txt" in md
+
+
 def test_render_summary_phylo_describes_trimal_when_enabled(make_seq, tmp_path):
     cfg = _base_cfg(tmp_path)
     # FastTree path → concat branch; trimming enabled on the genome tree.

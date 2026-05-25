@@ -50,6 +50,11 @@ from ..hmm.runner import parse_hmm_token
 from ..models import Sequence
 from .coloring import ColorScheme
 from .iqtree import IQTreeError, run_iqtree
+from .iqtree_parse import (
+    format_models_for_description,
+    parse_chosen_models,
+    write_iqtree_model_file,
+)
 from .labels import format_leaf_label, labeling_options, pick_format_string
 from .mafft import MafftError, run_mafft
 from . import trimal as trimal_mod
@@ -410,15 +415,35 @@ def build_partitioned_phylogeny(
     id_map_path = out_dir / f"{prefix}_tree_id_map.tsv"
     _write_id_map(id_map, id_map_path)
 
+    # Parse the per-partition ModelFinder picks and persist them as a
+    # grep-friendly sidecar; the same dict is folded into the
+    # phyloXML <description> and the _summary.md Methods section.
+    partition_labels = [label for label, _nx, _al in fam_msas]
+    chosen_models = (
+        parse_chosen_models(summary_path, partition_labels=partition_labels)
+        if summary_path.exists()
+        else {}
+    )
+    if chosen_models:
+        model_file = out_dir / f"{prefix}_iqtree_model.txt"
+        write_iqtree_model_file(chosen_models, model_file)
+        if model_file.exists():
+            written_extras.append(model_file)
+
     extra_outputs = (
         [nexus_path]
         + [out_dir / f"{prefix}_msa_{label}.fasta" for label, _nx, _al in fam_msas]
         + extra_files
     )
-    model_label = (
-        f"partitioned: {len(blocks)} charsets, ModelFinder per partition "
-        f"({_LINKAGE_FLAGS.get(linkage, '-p')} {linkage})"
-    )
+    linkage_phrase = f"linkage: {_LINKAGE_FLAGS.get(linkage, '-p')} {linkage}"
+    if chosen_models:
+        picks = format_models_for_description(chosen_models)
+        model_label = f"partitioned ({picks}; {linkage_phrase})"
+    else:
+        model_label = (
+            f"partitioned: {len(blocks)} charsets, ModelFinder per partition "
+            f"({linkage_phrase})"
+        )
     return _finalize_tree(
         representatives=leaf_reps,
         id_map=id_map,

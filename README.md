@@ -281,6 +281,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_partition.nex`, `_msa_<family>.fasta` | `--phylo`, protein + IQ-TREE | NEXUS partition file + per-family alignments (partitioned-supermatrix tree). |
 | `{prefix}_msa_untrimmed.fasta` | `--phylo` + `phylo.trimal.enabled` | Raw MAFFT alignment retained when trimAl trimming ran (`_msa.fasta` is then the trimmed tree input). |
 | `{prefix}_iqtree_summary.txt` | only with `--phylo` + IQ-TREE | IQ-TREE ModelFinder report. |
+| `{prefix}_iqtree_model.txt` | only with `--phylo` + IQ-TREE | Grep-friendly sidecar with the ModelFinder pick(s): one `<label>: <model>` line per partition (or a single `GENOME: <model>` line for the non-partitioned path). v0.28.0. |
 | `{prefix}_per_protein/` | only with `--per-protein-phylo` | One tree (MSA + Newick + phyloXML + id map) per marker; plus `_incongruence.tsv` of pairwise Robinson-Foulds distances. |
 | `{prefix}_extra_protein/` | `--per-protein-phylo` + `extra_protein:` declared | Same shape, accessory-protein trees (kept out of the incongruence table by design). |
 | `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment, from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
@@ -933,6 +934,18 @@ trace a leaf in `_tree.nwk` or the MSA back to a real sequence id.
 The IQ-TREE ModelFinder report — which substitution model was selected
 and why, plus the log-likelihood and bootstrap settings. Worth a glance
 before quoting a model in a methods section.
+
+#### `{prefix}_iqtree_model.txt` — only when IQ-TREE ran (v0.28.0)
+
+The same ModelFinder pick(s), distilled to one `<label>: <model>` line
+per partition so you don't have to grep through the long `.iqtree`
+report. Non-partitioned runs emit a single `GENOME: <model>` line (e.g.
+`GENOME: LG+I+G4`); partitioned-supermatrix runs emit one line per
+charset, in partition order (e.g. `CoV_S1: LG+I+G4`, `CoV_M: JTT+G4`).
+The same picks also land in the phyloXML `<description>`'s `model=`
+field (so a phyloXML viewer can show them) and in the `_summary.md`
+Methods section (so the auto-generated prose says which model fit
+rather than the generic "ModelFinder for substitution-model selection").
 
 > **Fail-soft:** if MAFFT, IQ-TREE, or FastTree are missing, or fewer
 > than 3 representatives survived, the phylogeny step is skipped with a
