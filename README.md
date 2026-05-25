@@ -162,7 +162,7 @@ Every mode also accepts: `--input/-i`, `--output-dir/-o`, `--config/-c`,
 `--threads`, `--seed`, `--segmented`, `--dry-run`, `--no-resolve`,
 `--source {auto,uniprot,ncbi,ncbi_virus}`, `--overflow {keep,trim}`, `--plot`,
 `--phylo`, `--per-protein-phylo`, `--per-segment-phylo` (segmented only),
-`--fast`, `--alphabet-for-clustering {protein,nucleotide}`.
+`--fast`, `--verbose`, `--alphabet-for-clustering {protein,nucleotide}`.
 
 In addition to the selection modes, two diagnostic/utility subcommands:
 
@@ -769,12 +769,16 @@ clustering alphabet: **IQ-TREE for protein** (ModelFinder + UFBoot
 bootstrap by default) and **FastTree for nucleotide** (with `-nt -gtr`).
 Set `phylo.tool: fasttree` (or `iqtree`) to pin one.
 
-Since **v0.26.0**, MAFFT / IQ-TREE / FastTree stderr is streamed live
-to your terminal (prefixed with `[mafft]` / `[iqtree]` / `[fasttree]`)
-instead of being captured silently and dumped only on failure — long
-runs no longer look hung. The same lines are still buffered, so the
-on-failure error message contains the full subprocess output as
-before.
+Since **v0.27.0**, MAFFT / IQ-TREE / FastTree print one start line and
+one finish line each (`[phylo] starting MAFFT (...)` / `[phylo] MAFFT
+finished (Ns)`), so the terminal stays readable. Pass **`--verbose`**
+to also stream the live child stderr (prefixed with `[mafft]` /
+`[iqtree]` / `[fasttree]`) — useful for diagnosing a step that looks
+stuck or for picking up an IQ-TREE ModelFinder banner mid-run. The
+stderr is buffered either way, so the on-failure error message still
+contains the full subprocess output regardless of `--verbose`.
+(v0.26.0 introduced the streaming; v0.27.0 made it opt-in because the
+firehose was too noisy for a successful run.)
 
 ##### Preliminary-run shortcut: `--fast` (v0.24.0+)
 

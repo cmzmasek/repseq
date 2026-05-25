@@ -219,11 +219,14 @@ def run_iqtree(
         # chatter; with --quiet there's little to stream, but the user can
         # remove --quiet via phylo.iqtree.extra_args if they want the full
         # log.) Stdout is discarded — IQ-TREE writes everything to files.
+        # The live tee is gated on cfg["verbose"] (--verbose); by default
+        # only the start/finish lines below appear on the terminal.
         try:
             run_streaming(
                 cmd,
                 stdout_file=None,
                 stream_prefix="[iqtree] ",
+                stream_stderr=bool(cfg.get("verbose", False)),
             )
         except StreamedProcessError as e:
             raise IQTreeError(f"IQ-TREE failed:\n{e.stderr}") from e

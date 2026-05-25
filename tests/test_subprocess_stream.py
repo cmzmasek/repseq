@@ -79,3 +79,38 @@ def test_run_streaming_creates_stdout_file_parent_dir(tmp_path):
     cmd = [sys.executable, "-c", "print('ok')"]
     run_streaming(cmd, stdout_file=target)
     assert target.read_text().strip() == "ok"
+
+
+def test_run_streaming_stream_stderr_false_buffers_but_does_not_emit():
+    """With stream_stderr=False (the no-`--verbose` path), the child's
+    stderr is still consumed line-by-line and returned in the buffered
+    string so the on-failure error message keeps its full text, but
+    nothing is written to the live stderr_dest — the terminal stays
+    quiet between the wrappers' own start/finish lines."""
+    cmd = [
+        sys.executable, "-c",
+        "import sys; sys.stderr.write('a\\nb\\n')",
+    ]
+    sink = io.StringIO()
+    out = run_streaming(
+        cmd, stream_prefix="[tag] ", stderr_dest=sink, stream_stderr=False,
+    )
+    assert "a" in out and "b" in out
+    assert sink.getvalue() == ""
+
+
+def test_run_streaming_stream_stderr_false_still_buffers_on_failure():
+    """Even when streaming is suppressed, a non-zero exit must still
+    carry the full buffered stderr on the raised exception so the user
+    gets actionable diagnostics."""
+    cmd = [
+        sys.executable, "-c",
+        "import sys; sys.stderr.write('boom\\n'); sys.exit(3)",
+    ]
+    sink = io.StringIO()
+    with pytest.raises(StreamedProcessError) as exc:
+        run_streaming(cmd, stderr_dest=sink, stream_stderr=False)
+    assert exc.value.returncode == 3
+    assert "boom" in (exc.value.stderr or "")
+    # And nothing was leaked to the live sink.
+    assert sink.getvalue() == ""

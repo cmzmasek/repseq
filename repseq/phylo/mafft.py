@@ -103,12 +103,15 @@ def run_mafft(
     output_fasta.parent.mkdir(parents=True, exist_ok=True)
     # Stream stderr live so a long MAFFT run shows its iteration log
     # instead of going silent for minutes; still buffer for error
-    # reporting on a non-zero exit.
+    # reporting on a non-zero exit. The live tee is gated on
+    # cfg["verbose"] (the --verbose CLI flag) — by default only the
+    # start/finish lines below appear on the terminal.
     try:
         run_streaming(
             cmd,
             stdout_file=output_fasta,
             stream_prefix="[mafft] ",
+            stream_stderr=bool(cfg.get("verbose", False)),
         )
     except StreamedProcessError as e:
         raise MafftError(f"mafft failed:\n{e.stderr}") from e

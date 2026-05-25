@@ -132,6 +132,16 @@ def _shared_options(fn):
         ),
     )(fn)
     fn = click.option(
+        "--verbose", "verbose", is_flag=True, default=False,
+        help=(
+            "Stream the live stderr (heartbeat) of MAFFT, IQ-TREE and "
+            "FastTree to the terminal as it arrives. Without --verbose "
+            "only one start line and one finish line per subprocess "
+            "appears, so the log stays compact. The on-failure error "
+            "message still carries the full buffered stderr either way."
+        ),
+    )(fn)
+    fn = click.option(
         "--source", "source_override",
         type=click.Choice(["auto", "uniprot", "ncbi", "ncbi_virus"]),
         default="auto",
@@ -159,7 +169,8 @@ def _shared_options(fn):
 
 
 def _load_and_validate(config_path, output_dir, prefix, threads, seed,
-                       alphabet_for_clustering=None, fast=False) -> dict:
+                       alphabet_for_clustering=None, fast=False,
+                       verbose=False) -> dict:
     cfg = load_config(config_path)
     if output_dir:
         cfg["output"]["dir"] = output_dir
@@ -171,6 +182,10 @@ def _load_and_validate(config_path, output_dir, prefix, threads, seed,
         cfg["seed"] = seed
     if alphabet_for_clustering is not None:
         cfg.setdefault("clustering", {})["alphabet_for_clustering"] = alphabet_for_clustering
+    # Stash --verbose on the cfg so the MAFFT / IQ-TREE / FastTree
+    # wrappers can read it via cfg.get("verbose", False) without having
+    # to thread an extra arg through every call site.
+    cfg["verbose"] = bool(verbose)
     errors = validate_config(cfg)
     if errors:
         for e in errors:
@@ -1699,13 +1714,14 @@ def run_doctor_cmd(config_path, no_network):
 @click.option("--n-select", "-n", default=None, type=int,
               help="Number of representative sequences to select.")
 def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, threshold, n_select):
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, threshold, n_select):
     """Global mode: cluster at a threshold or select N diverse sequences."""
     if threshold is None and n_select is None:
         raise click.UsageError("Provide --threshold or --n-select.")
 
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
-                             alphabet_for_clustering=alphabet_for_clustering, fast=fast)
+                             alphabet_for_clustering=alphabet_for_clustering, fast=fast,
+                             verbose=verbose)
     if segmented:
         cfg["segmented"]["enabled"] = True
 
@@ -1744,10 +1760,11 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-group", "-n", required=True, type=int,
               help="Target representatives per taxonomic group.")
 def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, rank, n_per_group):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, rank, n_per_group):
     """Taxonomic mode 1: N representatives per taxonomic rank group."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
-                             alphabet_for_clustering=alphabet_for_clustering, fast=fast)
+                             alphabet_for_clustering=alphabet_for_clustering, fast=fast,
+                             verbose=verbose)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -1783,7 +1800,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--rank-levels", "-r", required=True,
               help='JSON list of {rank, n_per_group} dicts. E.g. \'[{"rank":"family","n_per_group":20},{"rank":"genus","n_per_group":5}]\'')
 def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, rank_levels):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, rank_levels):
     """Taxonomic mode 2: hierarchical multi-rank nested clustering."""
     import json as _json
     try:
@@ -1792,7 +1809,8 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
         raise click.UsageError("--rank-levels must be valid JSON.")
 
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
-                             alphabet_for_clustering=alphabet_for_clustering, fast=fast)
+                             alphabet_for_clustering=alphabet_for_clustering, fast=fast,
+                             verbose=verbose)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -1828,10 +1846,11 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-host", "-n", required=True, type=int,
               help="Target representatives per host organism.")
 def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, n_per_host):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, n_per_host):
     """Host-stratified mode: N representatives per host organism."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
-                             alphabet_for_clustering=alphabet_for_clustering, fast=fast)
+                             alphabet_for_clustering=alphabet_for_clustering, fast=fast,
+                             verbose=verbose)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -1869,10 +1888,11 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--window", default="year",
               help='Time window: "year", "decade", or a number (e.g. "5" for 5-year bins).')
 def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, n_per_window, window):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, n_per_window, window):
     """Time-stratified mode: N representatives per time window."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
-                             alphabet_for_clustering=alphabet_for_clustering, fast=fast)
+                             alphabet_for_clustering=alphabet_for_clustering, fast=fast,
+                             verbose=verbose)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -1908,10 +1928,11 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-country", "-n", required=True, type=int,
               help="Target representatives per country.")
 def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, n_per_country):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, n_per_country):
     """Geographic mode: N representatives per country."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
-                             alphabet_for_clustering=alphabet_for_clustering, fast=fast)
+                             alphabet_for_clustering=alphabet_for_clustering, fast=fast,
+                             verbose=verbose)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -1953,11 +1974,12 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--field-regex", default=None,
               help="Regex to extract the field value from FASTA headers.")
 def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, field, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, field, n_per_group,
                metadata_table, field_regex):
     """Custom metadata mode: group by any field or metadata table column."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
-                             alphabet_for_clustering=alphabet_for_clustering, fast=fast)
+                             alphabet_for_clustering=alphabet_for_clustering, fast=fast,
+                             verbose=verbose)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2002,12 +2024,13 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--metadata-table", default=None,
               help="Path to TSV/CSV metadata table with accession column.")
 def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, fields, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, fast, verbose, fields, n_per_group,
                metadata_table):
     """Hybrid mode: multi-dimensional stratification (e.g. genus × host × year)."""
     field_list = [f.strip() for f in fields.split(",")]
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
-                             alphabet_for_clustering=alphabet_for_clustering, fast=fast)
+                             alphabet_for_clustering=alphabet_for_clustering, fast=fast,
+                             verbose=verbose)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:

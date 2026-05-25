@@ -93,12 +93,15 @@ def run_fasttree(
 
     output_newick.parent.mkdir(parents=True, exist_ok=True)
     # Stream FastTree's progress lines (it prints "Iteration N" / "ML…"
-    # to stderr) so a long run shows life.
+    # to stderr) so a long run shows life. Gated on cfg["verbose"]
+    # (--verbose); without --verbose only the start/finish lines below
+    # are emitted.
     try:
         run_streaming(
             cmd,
             stdout_file=output_newick,
             stream_prefix="[fasttree] ",
+            stream_stderr=bool(cfg.get("verbose", False)),
         )
     except StreamedProcessError as e:
         raise FastTreeError(f"FastTree failed:\n{e.stderr}") from e

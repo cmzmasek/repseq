@@ -36,6 +36,7 @@ def run_streaming(
     check: bool = True,
     stream_prefix: str = "",
     stderr_dest=None,
+    stream_stderr: bool = True,
 ) -> str:
     """Run ``argv`` and stream its stderr live; buffer for error reporting.
 
@@ -54,6 +55,13 @@ def run_streaming(
         stderr_dest: file-like object the live stream is written to.
             Defaults to ``sys.stderr``; tests pass a ``StringIO`` to
             assert on the streamed output.
+        stream_stderr: when True (default), each stderr line is echoed
+            to ``stderr_dest`` as it arrives (the heartbeat). When
+            False, stderr is still consumed line-by-line and buffered
+            so the on-failure error message keeps its full text, but
+            nothing is written to ``stderr_dest`` during the run — the
+            terminal stays quiet. The ``--verbose`` CLI flag toggles
+            this in the MAFFT / IQ-TREE / FastTree wrappers.
 
     Returns:
         The full buffered stderr text as a single string.
@@ -88,15 +96,16 @@ def run_streaming(
         assert proc.stderr is not None  # subprocess.PIPE guarantees this
         for line in proc.stderr:
             buf.append(line)
-            if stream_prefix:
-                stderr_dest.write(stream_prefix + line)
-            else:
-                stderr_dest.write(line)
-            try:
-                stderr_dest.flush()
-            except Exception:
-                # A test StringIO or a closed terminal must not break the run.
-                pass
+            if stream_stderr:
+                if stream_prefix:
+                    stderr_dest.write(stream_prefix + line)
+                else:
+                    stderr_dest.write(line)
+                try:
+                    stderr_dest.flush()
+                except Exception:
+                    # A test StringIO or a closed terminal must not break the run.
+                    pass
         rc = proc.wait()
     finally:
         if stdout_handle is not None:
