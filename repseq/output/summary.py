@@ -868,21 +868,23 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
         )
     if conservation_ran:
         paragraphs.append(
-            "Per-marker **conservation heatmaps** were rendered to "
+            "Per-marker **conservation plots** were rendered to "
             "`{prefix}_conservation/{prefix}_<family>.png`, one PNG per "
             "declared HMM marker spec. Each figure stacks two metric "
-            "tracks — per-column **Shannon entropy** (bits, gaps "
+            "line charts — per-column **Shannon entropy** (bits, gaps "
             "excluded) and **fraction matching consensus** (non-gap "
-            "rows whose residue equals the column mode) — over a "
+            "rows whose residue equals the column mode), both smoothed "
+            "with a **15-residue centered sliding window** so single-"
+            "column spikes (especially from low-coverage columns) "
+            "don't drown out real conservation patterns — over a "
             "**domain-architecture ribbon** drawn from the HMM hits on "
             "the longest satisfying CDS across representatives, "
-            "projected from ungapped CDS coordinates onto MSA columns. "
-            "The heatmap cells use a sequential viridis colormap; the "
-            "domain boxes use a stable golden-angle family colour so "
-            "the same marker is visually identifiable across runs. "
-            "Computed in-process from the per-protein MSAs already "
-            "written by `--per-protein-phylo` — no fresh alignment is "
-            "run for the heatmaps.\n"
+            "projected from ungapped CDS coordinates onto MSA columns "
+            "and labelled with the HMM profile name. Domain boxes use "
+            "a stable golden-angle family colour so the same marker is "
+            "visually identifiable across runs. Computed in-process "
+            "from the per-protein MSAs already written by "
+            "`--per-protein-phylo` — no fresh alignment is run.\n"
         )
     return "\n".join(paragraphs)
 

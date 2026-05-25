@@ -145,14 +145,16 @@ def _shared_options(fn):
         "--conservation-heatmap", "conservation_heatmap", is_flag=True,
         default=False,
         help=(
-            "Write one per-marker conservation heatmap PNG to "
+            "Write one per-marker conservation plot PNG to "
             "{prefix}_conservation/{prefix}_<family>.png. Each figure "
-            "stacks per-column Shannon entropy + fraction-matching-"
-            "consensus over a domain-architecture ribbon (HMM hits on "
-            "the longest satisfying CDS across reps, projected onto "
-            "MSA columns). Requires --per-protein-phylo to have built "
-            "the per-family MSA (the heatmap reuses that alignment — no "
-            "fresh MAFFT call). Matplotlib only: pip install 'repseq[viz]'."
+            "stacks two line charts — per-column Shannon entropy + "
+            "fraction-matching-consensus, smoothed with a 15-residue "
+            "centered sliding window — over a domain-architecture "
+            "ribbon labelled with every HMM profile name (HMM hits on "
+            "the longest satisfying CDS across reps, projected onto MSA "
+            "columns). Requires --per-protein-phylo to have built the "
+            "per-family MSA (the plot reuses that alignment — no fresh "
+            "MAFFT call). Matplotlib only: pip install 'repseq[viz]'."
         ),
     )(fn)
     fn = click.option(

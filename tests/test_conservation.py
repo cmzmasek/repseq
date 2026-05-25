@@ -17,12 +17,14 @@ from pathlib import Path
 import pytest
 
 from repseq.viz.conservation import (
+    DEFAULT_WINDOW_AA,
     compute_consensus_fraction,
     compute_shannon_entropy,
     family_color_hex,
     pick_reference_row,
     project_hits_to_alignment,
     read_msa,
+    sliding_window_mean,
     write_conservation_heatmap,
 )
 
@@ -79,6 +81,57 @@ def test_entropy_case_insensitive():
     h = compute_shannon_entropy(rows)
     # Every column is 100% A — entropy should be 0 everywhere.
     assert h == [0.0, 0.0, 0.0, 0.0]
+
+
+# ---------------------------------------------------------------------------
+# sliding_window_mean — the v0.31.0 smoother behind the line charts
+# ---------------------------------------------------------------------------
+
+def test_sliding_window_default_is_15():
+    """The bench-scientist default is documented as 15aa — guard against
+    silent drift."""
+    assert DEFAULT_WINDOW_AA == 15
+
+
+def test_sliding_window_identity_when_window_le_1():
+    """A window of 1 (or 0) returns the input unchanged."""
+    src = [1.0, 2.0, 3.0]
+    assert sliding_window_mean(src, 1) == [1.0, 2.0, 3.0]
+    assert sliding_window_mean(src, 0) == [1.0, 2.0, 3.0]
+
+
+def test_sliding_window_empty_input():
+    assert sliding_window_mean([], 5) == []
+
+
+def test_sliding_window_centered_mean_interior():
+    """Interior points see a full window, so the result is the mean
+    of (i-half) to (i+half) inclusive. With window=3 on [1,2,3,4,5]
+    the centred mean at index 2 is (2+3+4)/3 = 3.0."""
+    out = sliding_window_mean([1.0, 2.0, 3.0, 4.0, 5.0], 3)
+    assert out[2] == pytest.approx(3.0)
+
+
+def test_sliding_window_shrinks_at_edges():
+    """Window shrinks at edges rather than zero-padding, so the
+    smoothed curve doesn't fake-dip to zero at the boundaries."""
+    out = sliding_window_mean([1.0, 2.0, 3.0, 4.0, 5.0], 3)
+    # Index 0 has window=[1,2] (i-1 clamped) → mean = 1.5
+    assert out[0] == pytest.approx(1.5)
+    # Last index has window=[4,5] → mean = 4.5
+    assert out[-1] == pytest.approx(4.5)
+
+
+def test_sliding_window_constant_input_preserves_value():
+    """A flat input stays flat regardless of window size."""
+    out = sliding_window_mean([0.5] * 10, 5)
+    assert all(v == pytest.approx(0.5) for v in out)
+
+
+def test_sliding_window_larger_than_input_returns_global_mean():
+    """If window > n, every output position is the global mean."""
+    out = sliding_window_mean([1.0, 2.0, 3.0], 99)
+    assert all(v == pytest.approx(2.0) for v in out)
 
 
 # ---------------------------------------------------------------------------

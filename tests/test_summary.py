@@ -244,7 +244,7 @@ def test_render_summary_phylo_partitioned_lists_per_partition_picks(make_seq, tm
 
 def test_render_summary_conservation_paragraph_when_run(make_seq, tmp_path):
     """When conservation_ran=True, the phylo section gains a paragraph
-    describing the {prefix}_conservation/ heatmaps. Without the flag,
+    describing the {prefix}_conservation/ plots. Without the flag,
     no such paragraph is present."""
     cfg = _base_cfg(tmp_path)
     cfg["phylo"] = {"tool": "fasttree"}
@@ -252,14 +252,17 @@ def test_render_summary_conservation_paragraph_when_run(make_seq, tmp_path):
         cfg, _qc(), _result(make_seq), ["a.fasta"],
         phylo_ran=True, conservation_ran=True,
     )
-    assert "conservation heatmaps" in md_on
+    assert "conservation plots" in md_on
     assert "{prefix}_conservation/" in md_on
     assert "Shannon entropy" in md_on
     assert "fraction matching consensus" in md_on
+    # v0.31.0: prose mentions the 15aa sliding window + line charts.
+    assert "15-residue" in md_on
+    assert "sliding window" in md_on
     md_off = render_summary(
         cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True,
     )
-    assert "conservation heatmaps" not in md_off
+    assert "conservation plots" not in md_off
 
 
 def test_render_summary_conservation_paragraph_without_other_phylo(make_seq, tmp_path):
@@ -271,7 +274,7 @@ def test_render_summary_conservation_paragraph_without_other_phylo(make_seq, tmp
         cfg, _qc(), _result(make_seq), ["a.fasta"], conservation_ran=True,
     )
     assert "## Phylogenetic inference" in md
-    assert "conservation heatmaps" in md
+    assert "conservation plots" in md
 
 
 def test_render_summary_phylo_describes_trimal_when_enabled(make_seq, tmp_path):

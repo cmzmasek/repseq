@@ -53,6 +53,14 @@ _HSV_SATURATION = 0.65
 _HSV_VALUE = 0.90
 _GOLDEN_ANGLE = 137.5077640500378  # 360 / phi^2
 
+# Default smoothing window for the entropy / consensus line charts.
+# 15 residues is a single-residue-resolution-smoothing default — wide
+# enough to suppress single-column spikes (especially from columns with
+# few non-gap rows) but narrow enough to keep real conservation peaks
+# in their actual structural location. Override via the
+# ``window`` kwarg to :func:`write_conservation_heatmap`.
+DEFAULT_WINDOW_AA = 15
+
 
 def _require_matplotlib() -> None:
     """Import matplotlib eagerly so a missing/broken install fails fast
@@ -136,6 +144,29 @@ def compute_shannon_entropy(rows: list[str]) -> list[float]:
             if p > 0:
                 h -= p * math.log2(p)
         out[col] = h
+    return out
+
+
+def sliding_window_mean(values: list[float], window: int) -> list[float]:
+    """Centered sliding-window mean over ``values``.
+
+    For each position ``i``, returns the mean of
+    ``values[max(0, i-w//2) : min(n, i+w//2+1)]``. The window shrinks
+    at the edges rather than zero-padding, so the smoothed series
+    starts and ends at meaningful values rather than dipping to zero.
+    ``window <= 1`` returns a copy of the input (identity smoothing).
+    An empty input returns an empty list.
+    """
+    n = len(values)
+    if n == 0 or window <= 1:
+        return list(values)
+    half = window // 2
+    out: list[float] = []
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        slc = values[lo:hi]
+        out.append(sum(slc) / len(slc) if slc else 0.0)
     return out
 
 
@@ -280,8 +311,18 @@ def write_conservation_heatmap(
     family_color: str,
     hmm_hits_on_reference: Optional[list[dict]] = None,
     title_suffix: Optional[str] = None,
+    window: int = DEFAULT_WINDOW_AA,
 ) -> Optional[Path]:
     """Render the three-track conservation figure to ``out_png``.
+
+    Two metric tracks (Shannon entropy + fraction matching consensus)
+    drawn as line charts smoothed by a ``window``-residue centered
+    sliding mean, over a domain-architecture ribbon with one labelled
+    rectangle per HMM hit on the reference CDS. The line-chart
+    rendering supersedes the v0.29.0 viridis heatmap: at MSA scales
+    of hundreds-to-thousands of columns the heatmap reduces to a
+    near-uniform smear, while a line chart shows the peaks and
+    valleys that matter biologically.
 
     Returns the path on success, ``None`` when the MSA was empty or
     degenerate (no columns, no rows) — the caller treats ``None`` as
@@ -308,68 +349,67 @@ def write_conservation_heatmap(
     if n_cols == 0 or n_rows == 0:
         return None
 
-    entropy = compute_shannon_entropy(rows)
-    consensus = compute_consensus_fraction(rows)
+    entropy_raw = compute_shannon_entropy(rows)
+    consensus_raw = compute_consensus_fraction(rows)
+    entropy = sliding_window_mean(entropy_raw, window)
+    consensus = sliding_window_mean(consensus_raw, window)
 
-    # Layout: two stacked heatmap rows + a thin domain ribbon. Width
+    # Layout: two stacked line-chart panels + a thin domain ribbon. Width
     # scales gently with MSA length so a 2000-column protein doesn't
     # produce a postage-stamp figure; floor + ceiling so the artefact
     # stays printable.
     width = max(7.0, min(20.0, n_cols / 90.0))
     has_domains = bool(hmm_hits_on_reference)
-    height = 3.4 if has_domains else 2.6
+    height = 4.6 if has_domains else 3.6
 
     fig = plt.figure(figsize=(width, height))
-    # 3-row gridspec when domains are drawn (entropy, consensus, ribbon).
-    # 2-row when not. Height ratios keep the ribbon thin.
     if has_domains:
         gs = fig.add_gridspec(
-            nrows=3, ncols=1, height_ratios=[3, 3, 1], hspace=0.35,
+            nrows=3, ncols=1, height_ratios=[5, 5, 1], hspace=0.30,
         )
     else:
-        gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1, 1], hspace=0.45)
+        gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1, 1], hspace=0.40)
 
-    # Entropy track. imshow with a 1xN array gives a horizontal heatmap;
-    # set aspect='auto' so the cells stretch to the axis width.
+    x_vals = list(range(1, n_cols + 1))
+
+    # Shannon entropy track — line chart in bits.
     ax_h = fig.add_subplot(gs[0])
-    im_h = ax_h.imshow(
-        [entropy], aspect="auto", cmap="viridis",
-        vmin=0.0, vmax=max(0.001, max(entropy) if entropy else 0.001),
-        interpolation="nearest",
+    ax_h.plot(x_vals, entropy, color="#2c3e50", linewidth=1.1)
+    ax_h.fill_between(x_vals, entropy, color="#2c3e50", alpha=0.12)
+    ax_h.set_ylabel(
+        f"Shannon entropy (bits)\n[{window}-aa window]",
+        fontsize=8,
     )
-    ax_h.set_yticks([])
-    ax_h.set_ylabel("Shannon\nentropy", fontsize=8, rotation=0,
-                    ha="right", va="center", labelpad=18)
-    ax_h.set_xlim(-0.5, n_cols - 0.5)
-    ax_h.tick_params(axis="x", labelsize=7)
-    cb_h = fig.colorbar(im_h, ax=ax_h, fraction=0.02, pad=0.01)
-    cb_h.ax.tick_params(labelsize=6)
-    cb_h.set_label("bits", fontsize=7)
+    ax_h.set_xlim(0.5, n_cols + 0.5)
+    ax_h.set_ylim(bottom=0.0)
+    ax_h.grid(True, axis="y", linewidth=0.4, alpha=0.4)
+    ax_h.tick_params(axis="both", labelsize=7)
 
-    # Consensus track.
+    # Fraction-matching-consensus track — line chart in [0, 1].
     ax_c = fig.add_subplot(gs[1], sharex=ax_h)
-    im_c = ax_c.imshow(
-        [consensus], aspect="auto", cmap="viridis",
-        vmin=0.0, vmax=1.0, interpolation="nearest",
+    ax_c.plot(x_vals, consensus, color="#1f5e8c", linewidth=1.1)
+    ax_c.fill_between(x_vals, consensus, color="#1f5e8c", alpha=0.12)
+    ax_c.set_ylabel(
+        f"Fraction matching consensus\n[{window}-aa window]",
+        fontsize=8,
     )
-    ax_c.set_yticks([])
-    ax_c.set_ylabel("Fraction matching\nconsensus", fontsize=8, rotation=0,
-                    ha="right", va="center", labelpad=18)
-    ax_c.set_xlim(-0.5, n_cols - 0.5)
-    ax_c.tick_params(axis="x", labelsize=7)
-    cb_c = fig.colorbar(im_c, ax=ax_c, fraction=0.02, pad=0.01)
-    cb_c.ax.tick_params(labelsize=6)
-    cb_c.set_label("0–1", fontsize=7)
+    ax_c.set_xlim(0.5, n_cols + 0.5)
+    ax_c.set_ylim(0.0, 1.05)
+    ax_c.grid(True, axis="y", linewidth=0.4, alpha=0.4)
+    ax_c.tick_params(axis="both", labelsize=7)
 
-    # Domain-architecture ribbon. One rectangle per HMM hit, labelled
-    # with the HMM profile name when there's room.
+    # Domain-architecture ribbon. Every hit gets a labelled rectangle —
+    # very short hits have their label overflow the box rather than
+    # vanish, because the user explicitly asked for every domain to be
+    # labelled (long labels on narrow domains read fine in practice
+    # since the ribbon row has no other content competing for space).
     if has_domains:
         ax_d = fig.add_subplot(gs[2], sharex=ax_h)
         ax_d.set_ylim(0, 1)
         ax_d.set_yticks([])
         ax_d.set_ylabel("Domains", fontsize=8, rotation=0,
                         ha="right", va="center", labelpad=18)
-        ax_d.set_xlim(-0.5, n_cols - 0.5)
+        ax_d.set_xlim(0.5, n_cols + 0.5)
         ax_d.set_xlabel("MSA column", fontsize=8)
         ax_d.tick_params(axis="x", labelsize=7)
         ax_d.set_frame_on(False)
@@ -378,22 +418,22 @@ def write_conservation_heatmap(
             at = hit.get("aln_to")
             if af is None or at is None:
                 continue
-            x = af - 1  # 1-based inclusive → 0-based left edge
             w = max(1, at - af + 1)
             rect = Rectangle(
-                (x - 0.5, 0.15), w, 0.7,
+                (af - 0.5, 0.15), w, 0.7,
                 facecolor=family_color, edgecolor="#202020",
                 linewidth=0.6, alpha=0.85,
             )
             ax_d.add_patch(rect)
             name = hit.get("hmm_name") or hit.get("name") or ""
-            if name and w >= max(8, n_cols * 0.04):
+            if name:
                 ax_d.text(
-                    x + w / 2.0 - 0.5, 0.5, name,
+                    af + w / 2.0 - 0.5, 0.5, name,
                     ha="center", va="center", fontsize=7, color="#101010",
+                    clip_on=False,
                 )
     else:
-        ax_h.set_xlabel("MSA column", fontsize=8)
+        ax_c.set_xlabel("MSA column", fontsize=8)
 
     title = f"Conservation — {family_label}  ({n_rows} sequences, {n_cols} columns)"
     if title_suffix:
