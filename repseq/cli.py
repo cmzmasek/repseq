@@ -1562,6 +1562,21 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
         out_files.append(summary_path)
     except Exception as exc:
         click.echo(f"[summary skipped] {exc}", err=True)
+    # Lockfile — machine-readable reproducibility record. Always
+    # emitted (no flag); soft-fails so a serialisation bug never
+    # voids a real selection.
+    try:
+        from .lockfile import build_lockfile, write_lockfile
+        out_dir = Path(cfg["output"]["dir"])
+        prefix = cfg["output"].get("prefix", "repseq")
+        lf_path = out_dir / f"{prefix}_lockfile.json"
+        lockfile = build_lockfile(
+            cfg, result, list(input_paths), command=" ".join(sys.argv),
+        )
+        write_lockfile(lockfile, lf_path)
+        out_files.append(lf_path)
+    except Exception as exc:
+        click.echo(f"[lockfile skipped] {exc}", err=True)
     click.echo(f"\nOutput written to: {cfg['output']['dir']}")
     for f in out_files:
         click.echo(f"  {f.name}")
@@ -2092,6 +2107,15 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
 
 
 # ---------------------------------------------------------------------------
+# replay — re-materialise representatives from a lockfile
+# ---------------------------------------------------------------------------
+
+from .replay import replay_command as _replay_command  # noqa: E402
+
+main.add_command(_replay_command)
+
+
+# ---------------------------------------------------------------------------
 # cache management
 # ---------------------------------------------------------------------------
 
@@ -2123,6 +2147,7 @@ def cache_stats(config_path):
               help=(
                   "Clear only this source. Common values: 'ncbi_taxonomy' "
                   "(lineages), 'ncbi_proteins' (GenBank CDS records), "
+                  "'ncbi_nuc_seq' (nucleotide bodies for `repseq replay`), "
                   "'uniprot' (UniProt entries), 'hmmscan' (HMM hit lists). "
                   "Run 'repseq cache stats' to see which sources are present."
               ))

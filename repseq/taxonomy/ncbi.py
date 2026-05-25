@@ -19,6 +19,7 @@ _RATE_LIMIT_DELAY = 0.34  # ~3 req/s without API key; 0.1 with key
 _SOURCE = "ncbi_taxonomy"
 _SOURCE_NUCCORE = "ncbi_nuccore"
 _SOURCE_PROTEINS = "ncbi_proteins"
+_SOURCE_NUC_SEQ = "ncbi_nuc_seq"
 _GENBANK_BATCH_SIZE = 200
 _NOT_FOUND: dict = {"_not_found": True}
 
@@ -267,6 +268,115 @@ class NCBITaxonomy:
             "isolate": None, "strain": None, "segment": None,
         }
         return {acc: dict(rec.get("source") or empty) for acc, rec in records.items()}
+
+    # ------------------------------------------------------------------
+    # Nucleotide-body fetching — used exclusively by `repseq replay` to
+    # re-materialise a representative's body from its accession alone.
+    # The existing GenBank fetch path (rettype=gb) does not preserve
+    # the body in the cache, and we don't want to invalidate every
+    # existing cached entry just to add it — so this is a separate
+    # path using rettype=fasta with its own cache source.
+    # ------------------------------------------------------------------
+
+    def fetch_nucleotide_batch(
+        self,
+        accessions: list[str],
+        batch_size: int = _GENBANK_BATCH_SIZE,
+    ) -> dict[str, Optional[str]]:
+        """Fetch raw nucleotide sequence bodies by accession.
+
+        Returns ``accession → "ACGT..."`` (uppercase, gaps stripped)
+        on success, or ``accession → None`` for an accession NCBI
+        wouldn't return. Cached under ``ncbi_nuc_seq`` so a re-run of
+        the same replay only pays one round trip per accession.
+        """
+        results: dict[str, Optional[str]] = {}
+        to_fetch: list[str] = []
+        for acc in accessions:
+            cached = self._cache.get(_SOURCE_NUC_SEQ, acc)
+            if cached is not None:
+                # Cached _NOT_FOUND sentinel resolves to None.
+                if isinstance(cached, dict) and cached.get("_not_found"):
+                    results[acc] = None
+                else:
+                    results[acc] = cached.get("sequence") if isinstance(cached, dict) else None
+            else:
+                to_fetch.append(acc)
+
+        for i in range(0, len(to_fetch), batch_size):
+            chunk = to_fetch[i : i + batch_size]
+            try:
+                fetched = self._fetch_nucleotide_chunk(chunk)
+            except Exception as exc:
+                logger.warning(
+                    "Nucleotide batch fetch failed for %d accessions: %s",
+                    len(chunk), exc,
+                )
+                fetched = {}
+            for acc in chunk:
+                body = fetched.get(acc)
+                if body:
+                    self._cache.set(_SOURCE_NUC_SEQ, acc, {"sequence": body})
+                    results[acc] = body
+                else:
+                    self._cache.set(_SOURCE_NUC_SEQ, acc, _NOT_FOUND)
+                    results[acc] = None
+        return results
+
+    def _fetch_nucleotide_chunk(
+        self, accessions: list[str],
+    ) -> dict[str, Optional[str]]:
+        """One efetch ``rettype=fasta`` call → ``accession → body``.
+
+        Each FASTA header carries the versioned accession
+        (``>MW626064.1 ...``); we strip the version when matching
+        back to the caller's request so ``MW626064`` and ``MW626064.1``
+        both resolve.
+        """
+        self._throttle()
+        params: dict[str, Any] = {
+            "db": "nuccore",
+            "id": ",".join(accessions),
+            "rettype": "fasta",
+            "retmode": "text",
+        }
+        if self._email:
+            params["email"] = self._email
+        if self._api_key:
+            params["api_key"] = self._api_key
+
+        resp = requests.get(
+            f"{_ENTREZ_BASE}/efetch.fcgi", params=params, timeout=120,
+        )
+        resp.raise_for_status()
+
+        by_full: dict[str, str] = {}
+        by_no_version: dict[str, str] = {}
+        current_acc: Optional[str] = None
+        buf: list[str] = []
+        for line in resp.text.splitlines():
+            if line.startswith(">"):
+                if current_acc is not None and buf:
+                    seq = "".join(buf).upper().replace("-", "")
+                    by_full[current_acc] = seq
+                    by_no_version[current_acc.split(".")[0]] = seq
+                header = line[1:].split()
+                current_acc = header[0] if header else None
+                buf = []
+            elif line.strip():
+                buf.append(line.strip())
+        if current_acc is not None and buf:
+            seq = "".join(buf).upper().replace("-", "")
+            by_full[current_acc] = seq
+            by_no_version[current_acc.split(".")[0]] = seq
+
+        results: dict[str, Optional[str]] = {}
+        for acc in accessions:
+            if acc in by_full:
+                results[acc] = by_full[acc]
+            else:
+                results[acc] = by_no_version.get(acc.split(".")[0])
+        return results
 
     def _fetch_genbank_batch(
         self,

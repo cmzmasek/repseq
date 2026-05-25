@@ -170,6 +170,7 @@ In addition to the selection modes, two diagnostic/utility subcommands:
 | Command | What it does |
 | --- | --- |
 | `repseq stats -i x.fasta` | Pre-flight inspection of an input FASTA — count, source breakdown, NT length distribution, per-field metadata coverage (organism, host, country, segment, taxonomy, …), RefSeq/reviewed flag counts, and a top-N taxonomy breakdown per rank. No clustering, no output files; use this before committing to a long run. Default `--no-resolve` (fast, network-free); pass `--resolve` to fetch taxonomy. |
+| `repseq replay <lockfile.json> -o <out>` | Re-materialise representatives from a `{prefix}_lockfile.json` written by an earlier run: re-fetches the listed accessions from NCBI (via the cache) and re-emits the same representative FASTAs into a fresh output directory. QC, clustering, and selection are **not** re-run — the lockfile is authoritative. Trees are skipped unless `--rebuild-trees`. v0.30.0. |
 | `repseq doctor` | Self-test the install (dependencies, external tools, network, config). |
 
 ---
@@ -289,6 +290,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment, from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
 | `{prefix}_hmm_diagnostic.tsv` | when the HMM tier ran AND a spec declares `hmms:` | One row per (representative, marker spec, declared HMM profile): `hit` T/F, `best_dom_evalue`, `best_dom_score`, `best_coverage`, `ga_cutoff`, `cutoff_used`, `passing`. Surfaces near-miss patterns the binary gate hides ("65 isolates barely missed the cutoff at E=2e-5"). v0.26.0. |
 | `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations). |
+| `{prefix}_lockfile.json` | every run | Machine-readable reproducibility record: the elected representative IDs, their parent accessions, the post-mutation config, tool versions, input-FASTA + HMM-DB sha256. Replayable via `repseq replay`. v0.30.0. |
 
 "Segmented + GenBank" means: segmented mode is on **and** the GenBank source
 features are reachable (either cached or fetched on demand) so the per-isolate
@@ -632,6 +634,81 @@ makes the selection fully reproducible.
 The "QC SUMMARY" block also shows the new **per-segment length-filter
 breakdown** (since v0.9.1) so you can tell *which* segment caused
 isolates to fall out, not just that "some did".
+
+#### `{prefix}_lockfile.json` — structured reproducibility record (v0.30.0+)
+
+A machine-readable companion to `_summary.md`: where the summary
+records *what was done* in prose, the lockfile records *what came out*
+in JSON — the elected representative IDs, their parent accessions,
+the post-mutation config the pipeline actually ran under, the version
+of every external tool that ran, an sha256 fingerprint of every input
+FASTA, and (when the HMM tier ran) an sha256 of the HMM database.
+Always written, no flag.
+
+Top-level keys (`schema_version: 1`):
+
+```jsonc
+{
+  "schema_version": 1,
+  "repseq_version": "0.30.0",
+  "created_utc": "2026-05-25T12:00:00Z",
+  "mode": "taxonomic1",
+  "command": "repseq taxonomic1 ...",
+  "python_version": "3.11.6",
+  "config": { ... },                       // post-mutation cfg
+  "inputs": [{"path": "in.fasta", "sha256": "…", "size_bytes": 12345}],
+  "tools": {"mafft": "v7.520", "iqtree2": "2.3.2", ...},
+  "hmm_db": {"path": "...", "sha256": "...", "bundled": true, "n_profiles": 47},
+  "representatives": [
+    {"id": "AB1234", "kind": "sequence", "accession": "AB1234", "organism": "Virus X"},
+    {"id": "CONCAT|iso1", "kind": "isolate",
+     "isolate_id": "iso1", "organism": "Virus Y",
+     "segment_accessions": {"L": "AB1", "M": "AB2", "S": "AB3"}}
+  ]
+}
+```
+
+Sequences are **not** embedded — they're re-fetched on demand by
+`repseq replay`. Cluster membership is **not** recorded; the
+authoritative source for that is `{prefix}_clusters.tsv` (recording it
+twice would let the two go out of sync). The JSON is written with
+sorted keys + 2-space indent, so two lockfiles from identical pipelines
+diff cleanly on `created_utc` and nothing else.
+
+#### `repseq replay <lockfile.json>` — re-materialise the representatives
+
+Reads a lockfile and re-emits the representative FASTAs into a fresh
+output directory, without re-running QC, clustering, or selection:
+
+```bash
+repseq replay run1/run1_lockfile.json -o replay_of_run1/
+# Optional: re-build trees too (slower; bootstrap variance even at same seed)
+repseq replay run1/run1_lockfile.json -o replay_of_run1/ --rebuild-trees
+```
+
+What it does:
+
+1. Validate the lockfile's `schema_version` and `repseq_version` (major
+   mismatch is a hard error; minor difference is a stderr note).
+2. Verify the HMM database content sha256 if the original run used the
+   HMM tier — a mismatch is a loud stderr warning so the user knows
+   HMM-derived state may differ.
+3. Re-fetch each accession from NCBI via the cache (new cache source
+   `ncbi_nuc_seq`); for segmented reps, fetch all three segments and
+   rebuild the CONCAT.
+4. Re-emit `{prefix}_representatives.fasta` (non-segmented) or
+   `{prefix}_concatenated.fasta` + `{prefix}_segment_<NAME>.fasta`
+   (segmented).
+5. If `--rebuild-trees`: run the phylogeny step against the
+   re-fetched reps using the lockfile's `phylo:` config.
+6. Write a short `{prefix}_replay.md` pointing at the original
+   lockfile and listing what was emitted.
+
+When NCBI can't return an accession (retired, network down), the replay
+**warns loudly + continues with survivors** — better to deliver
+partial output than crash. The dropped accessions land in
+`{prefix}_replay_missing.tsv` (representative_id, accession) so the
+discrepancy is auditable.
 
 ### Taxonomic reports
 
@@ -1723,6 +1800,7 @@ A few different "kinds" of lookups share this cache, each under its own
 |---------------------|------------------------------------------------------------------------|
 | `ncbi_taxonomy`     | Taxonomy lineages for accessions / taxon IDs.                          |
 | `ncbi_proteins`     | GenBank CDS records (the `/isolate`, `/segment`, protein translations). |
+| `ncbi_nuc_seq`      | Nucleotide bodies fetched by `repseq replay` (separate from `ncbi_proteins` because old cached entries don't carry the body). v0.30.0. |
 | `uniprot`           | UniProt entries pulled by accession.                                   |
 | `hmmscan`           | Per-CDS HMM hit lists from `hmmscan` (see below).                       |
 
