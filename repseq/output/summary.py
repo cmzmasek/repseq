@@ -909,6 +909,151 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
     return "\n".join(paragraphs)
 
 
+def _collect_polyprotein_specs_for_summary(cfg: dict) -> list[dict]:
+    """Lightweight enumeration of polyprotein specs for the summary prose.
+
+    Returns one dict per declared spec with the fields the renderer
+    needs: ``name``, ``segment`` (or ``None``), ``cut_strategy``,
+    ``peptides`` (list of peptide-name strings). Lives here rather than
+    pulling :func:`repseq.polyprotein.collect_polyprotein_specs` so this
+    module stays free of the cycle (summary is consumed by cli; the
+    polyprotein package eventually imports config which eventually
+    imports summary in some entry points). The shape is enough for
+    prose; the writer module does the real heavy lifting.
+    """
+    out: list[dict] = []
+    segmented = bool((cfg.get("segmented", {}) or {}).get("enabled"))
+    if segmented:
+        seg = cfg.get("segmented", {}) or {}
+        virus_name = seg.get("virus")
+        viruses = seg.get("viruses", {}) or {}
+        virus = viruses.get(virus_name) or {}
+        per_seg = virus.get("polyprotein") or {}
+        seg_order = list(virus.get("segments") or [])
+        for extra in per_seg.keys():
+            if extra not in seg_order:
+                seg_order.append(extra)
+        for seg_name in seg_order:
+            for entry in per_seg.get(seg_name, []) or []:
+                if not isinstance(entry, dict):
+                    continue
+                name = (entry.get("name") or "").strip()
+                if not name:
+                    continue
+                peptides = [
+                    (p.get("name") or "").strip()
+                    for p in (entry.get("peptides") or [])
+                    if isinstance(p, dict) and (p.get("name") or "").strip()
+                ]
+                if len(peptides) < 2:
+                    continue
+                has_motif = any(
+                    isinstance(p, dict) and (p.get("cleavage_motif") or "")
+                    for p in (entry.get("peptides") or [])
+                )
+                default_strat = "motif" if has_motif else "bisect"
+                out.append({
+                    "name": name,
+                    "segment": seg_name,
+                    "cut_strategy": entry.get("cut_strategy") or default_strat,
+                    "peptides": peptides,
+                })
+    else:
+        for entry in (cfg.get("clustering", {}) or {}).get("polyprotein", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            name = (entry.get("name") or "").strip()
+            if not name:
+                continue
+            peptides = [
+                (p.get("name") or "").strip()
+                for p in (entry.get("peptides") or [])
+                if isinstance(p, dict) and (p.get("name") or "").strip()
+            ]
+            if len(peptides) < 2:
+                continue
+            has_motif = any(
+                isinstance(p, dict) and (p.get("cleavage_motif") or "")
+                for p in (entry.get("peptides") or [])
+            )
+            default_strat = "motif" if has_motif else "bisect"
+            out.append({
+                "name": name,
+                "segment": None,
+                "cut_strategy": entry.get("cut_strategy") or default_strat,
+                "peptides": peptides,
+            })
+    return out
+
+
+def _render_polyprotein(cfg: dict) -> str:
+    """Polyprotein cutting section.
+
+    Fires when at least one ``clustering.polyprotein`` /
+    ``virus.polyprotein`` spec is declared AND the HMM tier was active
+    this session (otherwise :func:`write_polyprotein_outputs` soft-fails
+    with a stderr line and emits no FASTAs, so the summary should match).
+    """
+    specs = _collect_polyprotein_specs_for_summary(cfg)
+    if not specs:
+        return ""
+    hmm_active = bool((cfg.get("_hmm_runtime", {}) or {}).get("active"))
+    if not hmm_active:
+        return ""
+
+    strategies_used = sorted({s["cut_strategy"] for s in specs})
+    strat_phrases = {
+        "boundary": (
+            "**boundary** (each peptide spans its HMM hit's "
+            "`ali_from`..`ali_to` verbatim; deterministic but lossy "
+            "at the seams)"
+        ),
+        "bisect": (
+            "**bisect** (cuts placed at the midpoint between adjacent "
+            "peptide hits; no residues dropped, but cut sites are "
+            "geometric rather than biological)"
+        ),
+        "motif": (
+            "**motif** (cuts snap to the user-declared cleavage motif "
+            "— e.g. `LQ` for coronavirus 3CL, `Q` for picornavirus 3C "
+            "— within ±`motif_window_aa` of the bisect point, falling "
+            "back to bisect when no motif lies in the window)"
+        ),
+    }
+    strat_clause = "; ".join(
+        strat_phrases.get(s, s) for s in strategies_used
+    )
+    bullet_lines = []
+    for s in specs:
+        scope = f" (segment {s['segment']})" if s["segment"] else ""
+        pep_list = ", ".join(s["peptides"])
+        bullet_lines.append(
+            f"* **{s['name']}**{scope} — {len(s['peptides'])} peptides "
+            f"in N→C order: {pep_list}; cut strategy `{s['cut_strategy']}`."
+        )
+    bullets = "\n".join(bullet_lines)
+
+    return (
+        "## Polyprotein cutting\n\n"
+        f"For each declared polyprotein spec, the elected representatives' "
+        f"polyprotein CDS was sliced into its mature peptides using one "
+        f"HMM per peptide. The parent CDS was identified by counting "
+        f"peptide-HMM hits (with a configurable minimum number of distinct "
+        f"matches), and the protein was cut according to the configured "
+        f"strategy: {strat_clause}.\n\n"
+        f"Declared specs:\n\n"
+        f"{bullets}\n\n"
+        f"Outputs are written under `{{prefix}}_polyprotein/` — one FASTA "
+        f"per peptide of each spec, plus a `{{prefix}}_<spec>_peptides.tsv` "
+        f"audit table recording every (representative × peptide) attempt "
+        f"with status (`ok`, `missing`, `out_of_order`, `overlap`, "
+        f"`no_parent_cds`) so the bench scientist can see which cuts are "
+        f"clean and which carry caveats. Polyprotein cutting is purely "
+        f"additive — the polyprotein itself still drives clustering and "
+        f"the whole-genome tree.\n"
+    )
+
+
 def _render_software(cfg: dict, versions: dict, phylo_ran: bool) -> str:
     backend = cfg.get("clustering", {}).get("backend", "mmseqs2")
     alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
@@ -1001,6 +1146,7 @@ def render_summary(
             conservation_ran=conservation_ran,
             pre_cluster_ran=pre_cluster_ran,
         ),
+        _render_polyprotein(cfg),
         _render_software(cfg, versions, any_phylo),
         _render_footer(),
     ]

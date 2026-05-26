@@ -564,6 +564,233 @@ def write_extra_protein_fastas(
     )
 
 
+# ---------------------------------------------------------------------------
+# Polyprotein-cutting outputs (v0.33.0+)
+# ---------------------------------------------------------------------------
+
+def _write_sliced_peptide_record(
+    fh,
+    sliced,  # SlicedPeptide
+    spec_name: str,
+    parent_seq: Sequence,
+    isolate_id: Optional[str],
+    line_width: int = 70,
+) -> None:
+    """Emit one FASTA record for a mature peptide.
+
+    Headers reuse the existing protein-FASTA bracket-tag set
+    (organism + 9-rank taxonomy + isolate + segment + host + country +
+    collection_date + length + parent) and append polyprotein-specific
+    tags so a downstream consumer can grep them: ``[polyprotein=...]``,
+    ``[peptide=...]``, ``[peptide_range_aa=from-to]``, ``[cut_method=...]``.
+    The ``>{header_id}`` is built as ``<parent_protein_id>:<peptide_name>``
+    so two peptides of the same polyprotein on the same isolate have
+    distinct first-token ids (no other writer cares; this just keeps
+    things grep-friendly).
+    """
+    parent_pid = sliced.parent_protein_id or "unknown"
+    pep_name = sliced.peptide_name or "peptide"
+    parent_acc = sliced.parent_accession or parent_seq.accession or parent_seq.id
+    tax = parent_seq.taxonomy
+
+    tag_specs: list[tuple[str, Any]] = [
+        ("organism", parent_seq.organism),
+        ("ncbi_taxon_id", tax.taxid if tax else None),
+    ]
+    if tax:
+        tag_specs.extend(
+            (rank, tax.get_rank(rank)) for rank in _TAX_RANKS
+        )
+    tag_specs.extend([
+        ("isolate", isolate_id),
+        ("segment", parent_seq.segment),
+        ("host", parent_seq.host),
+        ("country", parent_seq.country),
+        ("collection_date", parent_seq.collection_date),
+        ("length", sliced.length_aa),
+        ("polyprotein", spec_name),
+        ("peptide", pep_name),
+        (
+            "peptide_range_aa",
+            f"{sliced.range_aa_from}-{sliced.range_aa_to}"
+            if sliced.range_aa_from and sliced.range_aa_to else None,
+        ),
+        ("cut_method", sliced.cut_method_actual or None),
+        ("parent", parent_acc),
+    ])
+    tags = [
+        f"[{key}={_fasta_safe(val)}]"
+        for key, val in tag_specs
+        if val not in (None, "")
+    ]
+
+    header_id = f"{parent_pid}:{pep_name}"
+    header_parts = [f">{_fasta_safe(header_id)}", _fasta_safe(pep_name)]
+    header_parts.extend(tags)
+    fh.write(" ".join(p for p in header_parts if p) + "\n")
+
+    seq = sliced.sequence
+    for i in range(0, len(seq), line_width):
+        fh.write(seq[i : i + line_width] + "\n")
+
+
+def _polyprotein_proteins(rep: Sequence, segment: Optional[str]) -> list[dict]:
+    """Proteins to search for ``rep`` under a polyprotein spec.
+
+    Non-segmented (``segment is None``): the rep's own ``proteins``.
+    Segmented: the matching entry in ``concat_segments`` (per-segment
+    Sequence objects on a CONCAT rep); falls back to the rep itself
+    when a non-CONCAT rep happens to carry that segment label.
+    """
+    if segment is None:
+        return rep.proteins or []
+    for seg in rep.concat_segments or []:
+        if seg.segment == segment:
+            return seg.proteins or []
+    if rep.segment == segment:
+        return rep.proteins or []
+    return []
+
+
+def _polyprotein_parent_seq(rep: Sequence, segment: Optional[str]) -> Sequence:
+    """The Sequence whose metadata drives the peptide FASTA header tags.
+
+    Mirrors the segment-scoping in :func:`_polyprotein_proteins`. Falls
+    back to ``rep`` itself when the segment isn't found, so the writer
+    never crashes on a malformed CONCAT rep — the header will just
+    lack segment-specific metadata.
+    """
+    if segment is None:
+        return rep
+    for seg in rep.concat_segments or []:
+        if seg.segment == segment:
+            return seg
+    return rep
+
+
+def write_polyprotein_outputs(
+    result: RunResult,
+    cfg: dict[str, Any],
+    out_dir: Path,
+    prefix: str,
+) -> list[Path]:
+    """Slice each polyprotein spec across every representative.
+
+    One FASTA per peptide of each spec at
+    ``{prefix}_polyprotein/{prefix}_{spec_name}_{peptide_name}.fasta``,
+    plus one audit TSV per spec at
+    ``{prefix}_polyprotein/{prefix}_{spec_name}_peptides.tsv``. The
+    audit TSV records every (rep × peptide) attempt with status (``ok``
+    / ``missing`` / ``out_of_order`` / ``overlap`` / ``no_parent_cds``),
+    so the bench scientist can see at a glance which reps were cleanly
+    sliced and which carry caveats.
+
+    Soft-fails (returns ``[]`` with a stderr line) when the HMM tier
+    didn't run this session — no peptide HMMs can hit, nothing to do.
+    Specs whose every rep yields ``no_parent_cds`` still write the
+    audit TSV (so the user sees *why* no FASTAs appeared) but no FASTA.
+    """
+    from ..polyprotein import collect_polyprotein_specs, slice_polyprotein
+    from ..phylo.per_protein import _hmm_tier_ran
+
+    specs = collect_polyprotein_specs(cfg)
+    if not specs:
+        return []
+
+    hmm_active = _hmm_tier_ran(cfg, result.representatives)
+    if not hmm_active:
+        sys.stderr.write(
+            "[polyprotein cutting skipped] HMM tier did not run this "
+            "session — peptide HMMs can't be located on any CDS\n"
+        )
+        return []
+
+    sub_dir = out_dir / f"{prefix}_polyprotein"
+    written: list[Path] = []
+
+    for spec in specs:
+        records: list[tuple[Sequence, Optional[str], list]] = []
+        for rep in result.representatives:
+            proteins = _polyprotein_proteins(rep, spec.segment)
+            parent_seq = _polyprotein_parent_seq(rep, spec.segment)
+            isolate_id = parent_seq.isolate_id or rep.isolate_id
+            if not isolate_id and rep.id.startswith("CONCAT|"):
+                parts = rep.id.split("|")
+                if len(parts) > 1:
+                    isolate_id = parts[1]
+            _parent_cds, sliced = slice_polyprotein(proteins, spec)
+            records.append((parent_seq, isolate_id, sliced))
+
+        # The audit TSV is always written (even when zero sequences came
+        # out) so the user sees the per-rep status decisions.
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        audit_path = sub_dir / f"{prefix}_{spec.file_basename}_peptides.tsv"
+        with open(audit_path, "w") as fh:
+            fh.write(
+                "isolate_id\tpeptide_name\tparent_accession\t"
+                "parent_protein_id\trange_aa_from\trange_aa_to\t"
+                "length_aa\tcut_method_actual\tstatus\tnote\n"
+            )
+            for parent_seq, iso_id, sliced_list in records:
+                effective_iso = iso_id or parent_seq.accession or parent_seq.id
+                for s in sliced_list:
+                    fh.write(
+                        "\t".join([
+                            _tsv_safe(effective_iso),
+                            _tsv_safe(s.peptide_name),
+                            _tsv_safe(s.parent_accession),
+                            _tsv_safe(s.parent_protein_id),
+                            _tsv_safe(s.range_aa_from or ""),
+                            _tsv_safe(s.range_aa_to or ""),
+                            _tsv_safe(s.length_aa or ""),
+                            _tsv_safe(s.cut_method_actual),
+                            _tsv_safe(s.status),
+                            _tsv_safe(s.note),
+                        ]) + "\n"
+                    )
+        written.append(audit_path)
+
+        # One FASTA per declared peptide. We only emit a record when the
+        # status is "ok" or "overlap" (overlap-affected slices are still
+        # usable AA strings — the overlap is noted in the audit TSV).
+        peptide_to_records: dict[str, list[tuple[Sequence, Optional[str], object]]] = {
+            pep.name: [] for pep in spec.peptides
+        }
+        for parent_seq, iso_id, sliced_list in records:
+            for s in sliced_list:
+                if s.status in ("ok", "overlap") and s.sequence:
+                    peptide_to_records[s.peptide_name].append((parent_seq, iso_id, s))
+
+        for pep in spec.peptides:
+            bucket = peptide_to_records.get(pep.name) or []
+            if not bucket:
+                continue
+            safe_pep = _sanitize_for_path(pep.name)
+            path = sub_dir / f"{prefix}_{spec.file_basename}_{safe_pep}.fasta"
+            with open(path, "w") as fh:
+                for parent_seq, iso_id, sliced in bucket:
+                    _write_sliced_peptide_record(
+                        fh, sliced, spec.name, parent_seq, iso_id,
+                    )
+            written.append(path)
+
+    return written
+
+
+_PATH_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _sanitize_for_path(name: str) -> str:
+    """Filesystem-safe basename component for peptide filenames.
+
+    Same shape as the per-protein writer's family-name sanitisation:
+    keep alphanumerics + ``.`` ``_`` ``-`` (so a peptide name like
+    ``NSP3.4`` survives), collapse anything else to ``_``.
+    """
+    cleaned = _PATH_SAFE_RE.sub("_", (name or "").strip()).strip("_")
+    return cleaned or "peptide"
+
+
 _TAX_RANKS = (
     "species",
     "subgenus",
@@ -1946,3 +2173,16 @@ def write_all_reports(
         output_files.extend(ep_files)
     except Exception as exc:
         sys.stderr.write(f"[extra-protein FASTA skipped] {exc}\n")
+    # Always-on polyprotein cutting (v0.33.0+). For each declared
+    # clustering.polyprotein / virus.polyprotein spec, slice every
+    # representative's polyprotein CDS into mature peptides via one HMM
+    # per peptide. Lives in its own {prefix}_polyprotein/ subdirectory
+    # (peptide FASTAs + audit TSV); polyprotein still drives clustering
+    # and the whole-genome tree, so this is purely additive.
+    try:
+        poly_files = write_polyprotein_outputs(
+            result, cfg, out_dir, prefix,
+        )
+        output_files.extend(poly_files)
+    except Exception as exc:
+        sys.stderr.write(f"[polyprotein cutting skipped] {exc}\n")

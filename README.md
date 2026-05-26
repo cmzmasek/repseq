@@ -221,6 +221,7 @@ your FASTA file(s)
     • all proteins of each representative (one big AA FASTA + per-CDS TSV)
     • one AA FASTA per declared marker        →  {prefix}_per_protein_fasta/
     • one AA FASTA per declared extra_protein →  {prefix}_extra_protein_fasta/
+    • mature peptides for declared polyproteins →  {prefix}_polyprotein/        (peptide FASTAs + audit TSV)
     • per-rep metadata spreadsheet
     • per-stratum + per-cluster + per-drop TSVs
     • taxonomic diversity report              →  {prefix}_taxonomic_report.txt
@@ -274,6 +275,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_representative_sequence_proteins.fasta` | non-segmented + GenBank | AA FASTA of every protein of every representative sequence. |
 | `{prefix}_per_protein_fasta/{prefix}_<family>.fasta` | any run with `cluster_protein` / `segment_markers` declared | Unaligned per-marker protein FASTA, one CDS per rep carrying that marker (always-on since v0.22.0). |
 | `{prefix}_extra_protein_fasta/{prefix}_<name>.fasta` | any run with `extra_protein:` declared | Same shape, for accessory proteins that aren't required everywhere (v0.22.0). |
+| `{prefix}_polyprotein/{prefix}_<spec>_<peptide>.fasta` + `{prefix}_<spec>_peptides.tsv` | any run with `polyprotein:` declared and HMM tier active | Mature peptides sliced from each representative's polyprotein CDS, one FASTA per peptide of each spec, plus an audit TSV recording every (rep × peptide) attempt with status (`ok` / `missing` / `out_of_order` / `overlap` / `no_parent_cds`). v0.33.0. |
 | `{prefix}_representatives_protein.fasta` | when `alphabet_for_clustering: protein` (default) | The AA strings actually fed into the clusterer. |
 | `{prefix}_taxonomic_report.txt` | every run | Per-rank diversity table: distinct taxa before vs after clustering. |
 | `{prefix}_protein_taxonomic_report.txt` | any run with `cluster_protein` / `segment_markers` / `extra_protein` declared | Per-rank protein coverage + AA length statistics (v0.22.0). |
@@ -1859,6 +1861,124 @@ segmented:
 Names must be unique across all `extra_protein` entries for a virus
 (the name is used as the filename and also has to identify the protein
 unambiguously in the protein-taxonomic report).
+
+---
+
+## Polyprotein cutting (`polyprotein`) — v0.33.0+
+
+Some virus families express their CDS as one giant precursor protein
+that is then post-translationally cleaved into mature peptides:
+picornavirus P1/P2/P3 (VP4/VP2/VP3/VP1, 2A/2B/2C, 3A/3B/3C/3D),
+coronavirus ORF1ab (NSP1..NSP16), flavivirus polyprotein (C/prM/E/NS1/
+NS2A/NS2B/NS3/…). Representative-level analysis on the polyprotein as a
+whole loses signal — diversity comparisons, alignments, and trees are
+far more biologically informative on the **mature peptides**.
+
+`polyprotein:` declares one or more polyproteins, each with the list of
+mature peptides it cleaves into and one HMM per peptide. After
+representatives are elected, repseq finds each rep's polyprotein CDS
+(by counting peptide-HMM hits), slices it into mature peptides, and
+emits them as accessory artifacts. **Clustering and the whole-genome
+tree are untouched** — the polyprotein still drives those; mature
+peptides are additive output.
+
+### Config shape
+
+Non-segmented (one polyprotein per virus, common case for
+Picornaviridae and Coronaviridae):
+
+```yaml
+clustering:
+  polyprotein:
+    - name: ORF1ab                       # required, unique; keys the output filenames
+      peptides:                          # required, ordered N→C, ≥2 entries
+        - {name: NSP3, hmm: CoV_NSP3}
+        - {name: NSP5, hmm: CoV_3CLpro, cleavage_motif: "LQ"}
+        - {name: NSP12, hmm: CoV_RdRp}
+      cut_strategy: motif                # boundary | bisect | motif (see below)
+      motif_window_aa: 10                # ±aa around bisect to search for the motif
+      min_peptides_hit: 2                # parent-CDS identification threshold
+```
+
+Segmented mode uses a per-segment dict (parity with `extra_protein`):
+
+```yaml
+segmented:
+  viruses:
+    flavivirus:
+      ...
+      polyprotein:
+        genome:
+          - name: polyprotein
+            peptides:
+              - {name: C, hmm: Flavi_C}
+              - {name: M, hmm: Flavi_M}
+              - {name: E, hmm: Flavi_E}
+              - {name: NS1, hmm: Flavi_NS1}
+              ...
+```
+
+Spec names must be unique across all `polyprotein:` entries within a
+virus (they key the output filenames).
+
+### Cut strategies (the load-bearing science choice)
+
+1. **`boundary`** — each peptide spans its HMM hit's `ali_from..ali_to`
+   verbatim. Deterministic, but loses the inter-domain residues at the
+   seams.
+2. **`bisect`** — cuts placed at the midpoint between adjacent peptide
+   HMM hits; endpoints extend to the protein N-/C-term. No residues
+   dropped; cut sites are geometric rather than biological.
+3. **`motif`** (default when any peptide declares `cleavage_motif`) —
+   start from `bisect`, then snap each inter-peptide cut to the last
+   occurrence of the downstream peptide's `cleavage_motif` within
+   ±`motif_window_aa` of the bisect point. Falls back to `bisect` for
+   that cut if no motif lies in the window. `cleavage_motif:` is the
+   residues found just **N-terminal** of the cut that liberates that
+   peptide — `LQ` for coronavirus 3CL (Q is the recognised residue),
+   `Q` for picornavirus 3C, `RR`/`R[RK]` for flavivirus NS2B-3.
+
+The default cut strategy is `motif` if any peptide declared
+`cleavage_motif`, else `bisect`. `boundary` is opt-in.
+
+### Edge cases
+
+- **Peptide HMM doesn't hit** the parent CDS → peptide skipped,
+  neighbours bisect/snap across the gap; audit row marks `missing`.
+- **Peptide HMMs hit out of N→C order** on the parent → spec fails for
+  that rep, all rows for it land as `out_of_order`. (Real polyproteins
+  are linear; this is almost always an HMM-database problem.)
+- **Adjacent peptide HMM hits overlap** on the parent → cut placed at
+  the midpoint of the hit centres; sequences still emitted but rows
+  flagged `overlap` so the user can audit.
+- **No CDS has hits from ≥ `min_peptides_hit` peptide HMMs** → no
+  parent identified; the spec emits no peptide FASTAs for that rep, and
+  the audit TSV records one `no_parent_cds` row per peptide so the user
+  sees *why*.
+
+### Outputs
+
+`{prefix}_polyprotein/{prefix}_<spec>_<peptide>.fasta` — one FASTA per
+peptide of each spec, with all clean (`ok` / `overlap`) slices across
+representatives. Headers carry the standard protein-FASTA bracket-tag
+set (organism, taxonomy ladder, isolate, segment, host, country, date,
+length, parent) plus polyprotein-specific tags:
+`[polyprotein=<spec>]`, `[peptide=<peptide>]`,
+`[peptide_range_aa=<from>-<to>]`, `[cut_method=<actual>]`.
+
+`{prefix}_polyprotein/{prefix}_<spec>_peptides.tsv` — audit TSV, one row
+per (representative × peptide) attempt: `isolate_id`, `peptide_name`,
+`parent_accession`, `parent_protein_id`, `range_aa_from`, `range_aa_to`,
+`length_aa`, `cut_method_actual`, `status`, `note`. Use this to spot
+peptides whose cuts are purely heuristic vs. motif-supported.
+
+### Soft-fail posture
+
+When the HMM tier didn't run this session (HMMER not installed, no
+HMMs declared, etc.), polyprotein cutting prints a single stderr line
+and emits no outputs. Specs whose every rep yields `no_parent_cds`
+still write the audit TSV (so the user sees why no FASTAs appeared)
+but no FASTAs.
 
 ---
 

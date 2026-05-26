@@ -422,6 +422,14 @@ def _any_marker_has_hmms(cfg: dict) -> bool:
     for entry in (cfg.get("clustering", {}).get("extra_protein", []) or []):
         if isinstance(entry, dict) and (entry.get("hmms") or []):
             return True
+    # Polyprotein specs (v0.33.0): every peptide carries a single `hmm:`
+    # string. The hmmscan step needs to fire if any are declared so the
+    # slicer has hits to work with.
+    for entry in (cfg.get("clustering", {}).get("polyprotein", []) or []):
+        if isinstance(entry, dict):
+            for pep in (entry.get("peptides") or []):
+                if isinstance(pep, dict) and (pep.get("hmm") or "").strip():
+                    return True
     virus_cfg = get_virus_config(cfg)
     if virus_cfg:
         for entries in (virus_cfg.get("cluster_protein") or {}).values():
@@ -435,6 +443,12 @@ def _any_marker_has_hmms(cfg: dict) -> bool:
             for entry in (entries or []):
                 if isinstance(entry, dict) and (entry.get("hmms") or []):
                     return True
+        for entries in (virus_cfg.get("polyprotein") or {}).values():
+            for entry in (entries or []):
+                if isinstance(entry, dict):
+                    for pep in (entry.get("peptides") or []):
+                        if isinstance(pep, dict) and (pep.get("hmm") or "").strip():
+                            return True
     return False
 
 
@@ -464,6 +478,15 @@ def _collect_config_hmm_names(cfg: dict) -> set[str]:
     for entry in (cfg.get("clustering", {}).get("extra_protein", []) or []):
         if isinstance(entry, dict):
             _add_tokens(entry.get("hmms", []))
+    # Polyprotein peptide HMMs — single-name strings rather than tokens,
+    # but they still need to be present in the database.
+    for entry in (cfg.get("clustering", {}).get("polyprotein", []) or []):
+        if isinstance(entry, dict):
+            for pep in (entry.get("peptides") or []):
+                if isinstance(pep, dict):
+                    hmm = (pep.get("hmm") or "").strip()
+                    if hmm:
+                        names.add(hmm)
     virus_cfg = get_virus_config(cfg)
     if virus_cfg:
         for entries in (virus_cfg.get("cluster_protein") or {}).values():
@@ -477,6 +500,14 @@ def _collect_config_hmm_names(cfg: dict) -> set[str]:
             for entry in (entries or []):
                 if isinstance(entry, dict):
                     _add_tokens(entry.get("hmms", []))
+        for entries in (virus_cfg.get("polyprotein") or {}).values():
+            for entry in (entries or []):
+                if isinstance(entry, dict):
+                    for pep in (entry.get("peptides") or []):
+                        if isinstance(pep, dict):
+                            hmm = (pep.get("hmm") or "").strip()
+                            if hmm:
+                                names.add(hmm)
     return names
 
 

@@ -159,6 +159,23 @@ DEFAULTS: dict[str, Any] = {
         # across taxa (e.g. coronavirus ORF7) — clustering them would
         # systematically drop representatives that lack the protein.
         "extra_protein": [],
+        # Polyprotein cutting (v0.33.0+): slice each representative's
+        # polyprotein CDS into its mature peptides using one HMM per
+        # peptide. PURELY ADDITIVE — the polyprotein still drives
+        # clustering and the whole-genome tree; mature peptides are
+        # emitted as accessory artifacts (per-peptide FASTAs in
+        # {prefix}_polyprotein/, plus an audit TSV per spec). Each list
+        # entry is a dict:
+        #   { name: <spec_name, unique>,
+        #     peptides: [ {name, hmm, cleavage_motif?}, ... ],  # N→C order
+        #     cut_strategy: "boundary" | "bisect" | "motif",
+        #     motif_window_aa: 10,
+        #     min_peptides_hit: 2 }     # parent-CDS identification floor
+        # cut_strategy defaults to "motif" if any peptide carries
+        # cleavage_motif, else "bisect". Requires the HMM tier active and
+        # each peptide HMM present in the HMM database. Soft-fails with a
+        # stderr line when the HMM tier didn't run.
+        "polyprotein": [],
         # Diagnostic: for each stratum where binary-search clustering ran,
         # also run the clustering backend at each of these identity
         # thresholds and report the cluster count as additional columns
@@ -737,6 +754,131 @@ def _validate_segment_markers(
     return errs
 
 
+_POLYPROTEIN_CUT_STRATEGIES = ("boundary", "bisect", "motif")
+
+
+def _validate_polyprotein_list(entries: Any, path: str) -> list[str]:
+    """Validate a list of polyprotein specs (clustering or per-segment).
+
+    Each entry must be a dict with:
+      * ``name`` (non-empty string; used as the output basename component)
+      * ``peptides`` (list, length ≥ 2, ordered N→C). Each peptide is a dict
+        with ``name`` and ``hmm`` (both non-empty strings); optional
+        ``cleavage_motif`` (non-empty string, residues just N-terminal of
+        the cut that liberates this peptide).
+      * Optional ``cut_strategy`` in {"boundary", "bisect", "motif"};
+        defaults to "motif" if any peptide declares ``cleavage_motif``,
+        else "bisect".
+      * Optional ``motif_window_aa`` (positive int; default 10).
+      * Optional ``min_peptides_hit`` (positive int; default 2; clamped at
+        ≥ 1 since 0 would accept any CDS).
+    Spec names must be unique within the same list (the caller is
+    responsible for cross-list uniqueness — handled separately in the
+    segmented validator since names key the output filenames globally).
+    """
+    errs: list[str] = []
+    if not isinstance(entries, list):
+        errs.append(
+            f"{path} must be a list of {{name, peptides, ...}} dicts"
+        )
+        return errs
+
+    seen_names: set[str] = set()
+    for i, entry in enumerate(entries):
+        ipath = f"{path}[{i}]"
+        if not isinstance(entry, dict):
+            errs.append(
+                f"{ipath} must be a dict "
+                f"{{name, peptides, cut_strategy?, ...}}"
+            )
+            continue
+
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            errs.append(f"{ipath} must include a non-empty 'name'")
+        else:
+            key = name.strip().lower()
+            if key in seen_names:
+                errs.append(
+                    f"{ipath}: duplicate spec name '{name}' "
+                    f"(names key the output filenames)"
+                )
+            seen_names.add(key)
+
+        peptides = entry.get("peptides")
+        if not isinstance(peptides, list) or len(peptides) < 2:
+            errs.append(
+                f"{ipath}.peptides must be a list of at least 2 peptide "
+                f"dicts ordered N-to-C"
+            )
+        else:
+            seen_pep: set[str] = set()
+            for j, pep in enumerate(peptides):
+                ppath = f"{ipath}.peptides[{j}]"
+                if not isinstance(pep, dict):
+                    errs.append(
+                        f"{ppath} must be a dict "
+                        f"{{name, hmm, cleavage_motif?}}"
+                    )
+                    continue
+                pname = pep.get("name")
+                phmm = pep.get("hmm")
+                if not isinstance(pname, str) or not pname.strip():
+                    errs.append(f"{ppath}.name must be a non-empty string")
+                else:
+                    pkey = pname.strip().lower()
+                    if pkey in seen_pep:
+                        errs.append(
+                            f"{ppath}: duplicate peptide name '{pname}' "
+                            f"within this polyprotein"
+                        )
+                    seen_pep.add(pkey)
+                if not isinstance(phmm, str) or not phmm.strip():
+                    errs.append(
+                        f"{ppath}.hmm must be a non-empty HMM profile "
+                        f"name (one HMM per mature peptide)"
+                    )
+                motif = pep.get("cleavage_motif")
+                if motif is not None and (
+                    not isinstance(motif, str) or not motif.strip()
+                ):
+                    errs.append(
+                        f"{ppath}.cleavage_motif must be a non-empty "
+                        f"string (residues N-terminal of the cut), or omitted"
+                    )
+
+        strat = entry.get("cut_strategy")
+        if strat is not None and strat not in _POLYPROTEIN_CUT_STRATEGIES:
+            errs.append(
+                f"{ipath}.cut_strategy '{strat}' is not supported "
+                f"(use one of {list(_POLYPROTEIN_CUT_STRATEGIES)})"
+            )
+
+        mwin = entry.get("motif_window_aa", 10)
+        if (
+            not isinstance(mwin, int)
+            or isinstance(mwin, bool)
+            or mwin < 1
+        ):
+            errs.append(
+                f"{ipath}.motif_window_aa must be a positive integer "
+                f"(amino acids; default 10)"
+            )
+
+        mph = entry.get("min_peptides_hit", 2)
+        if (
+            not isinstance(mph, int)
+            or isinstance(mph, bool)
+            or mph < 1
+        ):
+            errs.append(
+                f"{ipath}.min_peptides_hit must be a positive integer "
+                f"(parent-CDS identification threshold; default 2)"
+            )
+
+    return errs
+
+
 def validate_config(cfg: dict[str, Any]) -> list[str]:
     """Return a list of validation error messages (empty = valid)."""
     errors: list[str] = []
@@ -1134,6 +1276,73 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                             f"(they key the output filenames)"
                         )
                     seen_extra_names.add(key)
+
+    # Polyprotein cutting specs (non-segmented at clustering.polyprotein;
+    # segmented at virus.polyprotein, validated alongside the virus block
+    # above).
+    poly_global = cfg.get("clustering", {}).get("polyprotein", [])
+    if not isinstance(poly_global, list):
+        errors.append(
+            "clustering.polyprotein must be a list of "
+            "{name, peptides, cut_strategy?, motif_window_aa?, "
+            "min_peptides_hit?} dicts"
+        )
+    else:
+        errors.extend(_validate_polyprotein_list(
+            poly_global, "clustering.polyprotein",
+        ))
+
+    # Segmented per-segment polyprotein blocks (parity with extra_protein).
+    if seg.get("enabled"):
+        virus_name = seg.get("virus")
+        viruses = seg.get("viruses", {}) or {}
+        if virus_name and virus_name in viruses:
+            vdef = viruses[virus_name]
+            pp = vdef.get("polyprotein")
+            if pp is not None:
+                if not isinstance(pp, dict):
+                    errors.append(
+                        f"segmented.viruses.{virus_name}.polyprotein "
+                        f"must be a mapping of segment-name → list of "
+                        f"{{name, peptides, ...}} dicts"
+                    )
+                else:
+                    seg_names = set(vdef.get("segments", []))
+                    flat: list[Any] = []
+                    for seg_name, entries in pp.items():
+                        if seg_name not in seg_names:
+                            errors.append(
+                                f"segmented.viruses.{virus_name}."
+                                f"polyprotein: unknown segment '{seg_name}'"
+                            )
+                        if not isinstance(entries, list):
+                            errors.append(
+                                f"segmented.viruses.{virus_name}."
+                                f"polyprotein.{seg_name} must be a list of "
+                                f"{{name, peptides, ...}} dicts"
+                            )
+                            continue
+                        errors.extend(_validate_polyprotein_list(
+                            entries,
+                            f"segmented.viruses.{virus_name}."
+                            f"polyprotein.{seg_name}",
+                        ))
+                        flat.extend(entries)
+                    # Spec names must be unique across all segments — they
+                    # drive the output filenames.
+                    seen: set[str] = set()
+                    for entry in flat:
+                        if isinstance(entry, dict):
+                            nm = (entry.get("name") or "").strip().lower()
+                            if nm and nm in seen:
+                                errors.append(
+                                    f"segmented.viruses.{virus_name}."
+                                    f"polyprotein: duplicate spec name "
+                                    f"'{nm}' across segments — names must be "
+                                    f"unique (they key the output filenames)"
+                                )
+                            if nm:
+                                seen.add(nm)
 
     diversity_cutoffs = cfg.get("clustering", {}).get("diversity_curve_cutoffs", [])
     if not isinstance(diversity_cutoffs, list):
