@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from ..hmm.runner import parse_hmm_token
 from .specs import PeptideSpec, PolyproteinSpec
 
 
@@ -66,71 +67,237 @@ class SlicedPeptide:
     cut_method_actual: str
     status: str  # "ok" | "missing" | "out_of_order" | "overlap" | "no_parent_cds"
     note: str = ""  # free-text detail for the audit TSV
+    # The peptide-token alternative that was satisfied for this slice
+    # (one entry from ``PeptideSpec.hmms``). When a peptide has multiple
+    # OR alternatives, this records which one actually fired — essential
+    # for the alpha/beta-CoV NSP1 case where the architecture varies by
+    # genus. Empty string when the peptide wasn't located (status
+    # `missing` / `out_of_order` / `no_parent_cds`).
+    matched_token: str = ""
 
 
-def _best_hit_for_hmm(
-    proteins: list[dict], hmm_name: str
-) -> tuple[Optional[dict], Optional[dict]]:
-    """Return ``(parent_cds, hit)`` for the best hit to ``hmm_name``.
+def _satisfying_span_for_token(
+    hits: list[dict],
+    token: str,
+    *,
+    overlap_tolerance: int = 0,
+) -> Optional[tuple[int, int]]:
+    """Locate a peptide token's footprint on one CDS.
 
-    Best = lowest ``dom_evalue`` (tie-broken by longer ``ali_span``).
-    Ignores the ``passing`` flag — at the slicing stage we WANT the
-    locations of every hit, even ones that wouldn't have cleared
-    QC. The QC-passing check has already happened upstream; here we
-    are mapping out the polyprotein's domain layout.
+    Returns ``(span_from, span_to)`` (1-based, inclusive AA coords) when
+    every HMM named in the token has a hit AND — for multidomain tokens
+    — the hits appear in N-to-C order along the CDS with at most
+    ``overlap_tolerance`` aa of overlap at each seam. Returns ``None``
+    when the token can't be satisfied on this CDS.
 
-    Returns ``(None, None)`` when no protein has any hit to this HMM.
+    The span is the synthetic union: ``min(ali_from of chosen hits)``,
+    ``max(ali_to of chosen hits)``. For single-HMM tokens this is just
+    the hit's own ``ali_from..ali_to``; for multidomain tokens it covers
+    the whole architecture from the N-terminal domain's start to the
+    C-terminal domain's end.
+
+    Deliberately ignores the ``passing`` flag from ``_run_hmm_qc``: by
+    the time the slicer asks for a token's footprint, the parent CDS has
+    already been chosen, and we want every domain placement the hmmscan
+    found, not just the QC-clearing subset. The walk logic mirrors
+    :func:`repseq.hmm.runner.cds_satisfies_token` so the slicer enforces
+    the same architecture rules as the cluster_protein HMM gate.
     """
-    best: tuple[Optional[dict], Optional[dict], float, int] = (None, None, float("inf"), 0)
-    for prot in proteins or []:
-        for hit in prot.get("hmm_hits") or []:
-            name = hit.get("target") or hit.get("hmm_name") or hit.get("name")
-            if not name or name != hmm_name:
-                continue
-            ev = float(hit.get("dom_evalue", hit.get("evalue", 1.0)))
-            span = int(hit.get("ali_span") or (
-                int(hit.get("ali_to", 0)) - int(hit.get("ali_from", 0)) + 1
-            ))
-            if (ev, -span) < (best[2], -best[3]):
-                best = (prot, hit, ev, span)
-    return best[0], best[1]
+    try:
+        token_hmms = parse_hmm_token(token)
+    except ValueError:
+        return None
+    if not token_hmms:
+        return None
+
+    by_target: dict[str, list[dict]] = {}
+    for h in hits or []:
+        target = h.get("target") or h.get("hmm_name") or h.get("name")
+        if not target:
+            continue
+        by_target.setdefault(target, []).append(h)
+
+    for name in token_hmms:
+        if name not in by_target:
+            return None
+
+    if len(token_hmms) == 1:
+        # Single-HMM token: best hit = lowest dom_evalue (tie-broken by
+        # longer ali_span, since a longer hit gives a more informative
+        # cut location).
+        best = min(
+            by_target[token_hmms[0]],
+            key=lambda h: (
+                float(h.get("dom_evalue", float("inf"))),
+                -int(h.get("ali_span") or (
+                    int(h.get("ali_to", 0)) - int(h.get("ali_from", 0)) + 1
+                )),
+            ),
+        )
+        return int(best["ali_from"]), int(best["ali_to"])
+
+    # Multidomain token — greedy left-to-right walk, same shape as
+    # cds_satisfies_token but without the passing-flag gate.
+    chosen: list[dict] = []
+    prev_from = -1
+    prev_to = -1
+    for name in token_hmms:
+        candidates = [
+            h for h in by_target[name]
+            if int(h["ali_from"]) > prev_from
+            and int(h["ali_to"]) > prev_to
+            and (
+                prev_to < 0
+                or int(h["ali_from"]) >= prev_to - overlap_tolerance + 1
+            )
+        ]
+        if not candidates:
+            return None
+        pick = min(candidates, key=lambda h: int(h["ali_to"]))
+        chosen.append(pick)
+        prev_from = int(pick["ali_from"])
+        prev_to = int(pick["ali_to"])
+    span_from = min(int(h["ali_from"]) for h in chosen)
+    span_to = max(int(h["ali_to"]) for h in chosen)
+    return span_from, span_to
+
+
+def _best_satisfying_alternative(
+    hits: list[dict],
+    tokens: list[str],
+    *,
+    overlap_tolerance: int = 0,
+) -> Optional[tuple[int, int, str]]:
+    """OR across alternative peptide-token architectures.
+
+    Tries each token in ``tokens`` against ``hits``. Among the
+    alternatives that are satisfied, returns the one with the best
+    (lowest) worst-domain E-value across its chosen hits — mirroring
+    how :func:`repseq.phylo.per_protein._best_satisfying_cds_any` ranks
+    OR-alternatives for ``cluster_protein``. Ties are broken by the
+    declared order in ``tokens`` (first-declared wins).
+
+    Returns ``(span_from, span_to, matched_token)`` or ``None`` when no
+    alternative is satisfied. ``matched_token`` is the verbatim entry
+    from ``tokens`` so the audit row can record which architecture
+    fired (e.g. ``"aCoV_NSP1"`` vs. ``"bCoV_NSP1"``).
+    """
+    best: Optional[tuple[float, int, tuple[int, int], str]] = None
+    for i, token in enumerate(tokens):
+        span = _satisfying_span_for_token(
+            hits, token, overlap_tolerance=overlap_tolerance,
+        )
+        if span is None:
+            continue
+        # Worst-domain E-value across the chosen hits for this token —
+        # the same scalar the cluster_protein selector ranks by.
+        worst_e = _token_worst_evalue(hits, token, overlap_tolerance)
+        if worst_e is None:
+            # Token satisfied but we can't score it (shouldn't happen);
+            # treat as least-preferred so a scorable alternative wins.
+            worst_e = float("inf")
+        key = (worst_e, i)
+        if best is None or key < (best[0], best[1]):
+            best = (worst_e, i, span, token)
+    if best is None:
+        return None
+    _, _, span, token = best
+    return span[0], span[1], token
+
+
+def _token_worst_evalue(
+    hits: list[dict], token: str, overlap_tolerance: int,
+) -> Optional[float]:
+    """Return the worst (largest) dom_evalue across the hits that
+    satisfy ``token`` on this CDS, or ``None`` if the token isn't
+    satisfied. Replays the same walk as
+    :func:`_satisfying_span_for_token` but reports the E-value scalar
+    instead of the span.
+    """
+    try:
+        token_hmms = parse_hmm_token(token)
+    except ValueError:
+        return None
+    by_target: dict[str, list[dict]] = {}
+    for h in hits or []:
+        target = h.get("target") or h.get("hmm_name") or h.get("name")
+        if not target:
+            continue
+        by_target.setdefault(target, []).append(h)
+    for name in token_hmms:
+        if name not in by_target:
+            return None
+    if len(token_hmms) == 1:
+        best = min(
+            by_target[token_hmms[0]],
+            key=lambda h: float(h.get("dom_evalue", float("inf"))),
+        )
+        return float(best.get("dom_evalue", float("inf")))
+    chosen: list[dict] = []
+    prev_from = -1
+    prev_to = -1
+    for name in token_hmms:
+        candidates = [
+            h for h in by_target[name]
+            if int(h["ali_from"]) > prev_from
+            and int(h["ali_to"]) > prev_to
+            and (
+                prev_to < 0
+                or int(h["ali_from"]) >= prev_to - overlap_tolerance + 1
+            )
+        ]
+        if not candidates:
+            return None
+        pick = min(candidates, key=lambda h: int(h["ali_to"]))
+        chosen.append(pick)
+        prev_from = int(pick["ali_from"])
+        prev_to = int(pick["ali_to"])
+    return float(max(h.get("dom_evalue", float("inf")) for h in chosen))
 
 
 def identify_parent_cds(
-    proteins: list[dict], spec: PolyproteinSpec,
+    proteins: list[dict],
+    spec: PolyproteinSpec,
+    *,
+    overlap_tolerance: int = 0,
 ) -> Optional[dict]:
     """The CDS that best fits the polyprotein declaration.
 
-    Counts the number of *distinct* peptide HMMs each CDS carries hits
-    for; the CDS with the most distinct hits (≥ ``spec.min_peptides_hit``)
-    wins. Ties are broken by translation length (a polyprotein is usually
-    the longest CDS on the segment, but we don't assume — the HMM-hit
-    count is the decisive signal).
+    Counts the number of *satisfied peptide tokens* each CDS carries —
+    a single-HMM peptide counts when its one HMM hits; a multidomain
+    peptide counts only when the whole architecture is present in N→C
+    order. The CDS satisfying the most tokens
+    (≥ ``spec.min_peptides_hit``) wins; ties are broken by translation
+    length (a polyprotein is usually the longest CDS on the segment,
+    but we don't assume — the satisfied-token count is the decisive
+    signal).
 
-    Returns ``None`` when no CDS clears the threshold, which becomes a
-    soft-fail at the caller (no peptides emitted for this rep × spec
-    combination; a single ``no_parent_cds`` audit row records it).
+    Returns ``None`` when no CDS clears the threshold; the caller emits
+    one ``no_parent_cds`` audit row per declared peptide.
     """
-    target_hmms = {p.hmm for p in spec.peptides}
     best: tuple[Optional[dict], int, int] = (None, 0, 0)
     for prot in proteins or []:
         hits = prot.get("hmm_hits") or []
-        present = {
-            (h.get("target") or h.get("hmm_name") or h.get("name"))
-            for h in hits
-        }
-        n_distinct = len(present & target_hmms)
-        if n_distinct < spec.min_peptides_hit:
+        satisfied = 0
+        for pep in spec.peptides:
+            # A peptide counts as satisfied when ANY of its alternative
+            # architectures (`pep.hmms`) hits — OR semantics. Each token
+            # internally is AND across its named domains.
+            if _best_satisfying_alternative(
+                hits, pep.hmms, overlap_tolerance=overlap_tolerance,
+            ) is not None:
+                satisfied += 1
+        if satisfied < spec.min_peptides_hit:
             continue
         length = int(prot.get("length") or len(prot.get("sequence") or ""))
-        if (n_distinct, length) > (best[1], best[2]):
-            best = (prot, n_distinct, length)
+        if (satisfied, length) > (best[1], best[2]):
+            best = (prot, satisfied, length)
     return best[0]
 
 
-def _peptide_hit_midpoint(hit: dict) -> float:
-    """Centre of the hit (1-based AA coords, fractional)."""
-    return (int(hit["ali_from"]) + int(hit["ali_to"])) / 2.0
+def _peptide_span_midpoint(span: tuple[int, int]) -> float:
+    """Centre of the span (1-based AA coords, fractional)."""
+    return (span[0] + span[1]) / 2.0
 
 
 def _find_motif_snap(
@@ -176,87 +343,88 @@ def _find_motif_snap(
 def compute_cuts(
     protein_seq: str,
     spec: PolyproteinSpec,
-    peptide_hits: list[tuple[PeptideSpec, Optional[dict]]],
+    peptide_spans: list[tuple[PeptideSpec, Optional[tuple[int, int]]]],
 ) -> tuple[list[Optional[tuple[int, int, str]]], list[str]]:
     """Place inter-peptide cuts according to the spec's cut strategy.
+
+    Each element of ``peptide_spans`` is ``(peptide, span)`` where
+    ``span`` is ``(from_aa, to_aa)`` 1-based inclusive — covering the
+    full footprint of the peptide token on the parent CDS (a single
+    HMM's hit, or the union of all named domains for a multidomain
+    token). ``None`` means the token couldn't be satisfied on this CDS.
 
     Returns ``(ranges, notes)``:
 
     * ``ranges[i]`` is ``(from_aa, to_aa, cut_method_actual)`` for the
-      ``i``-th peptide (1-based inclusive AA coords), or ``None`` if the
-      peptide's HMM didn't hit on the parent CDS (peptide skipped; the
-      hole is closed by the neighbouring peptides extending across it).
-    * ``notes`` is a list of free-text warnings for the audit TSV
-      (e.g. ``"NSP3 hit overlaps NSP5 hit; bisecting from averaged starts"``).
+      ``i``-th peptide, or ``None`` if the peptide was missing /
+      otherwise unusable.
+    * ``notes`` is a list of free-text warnings for the audit TSV.
 
     The strategy:
 
-    1. Drop peptides whose HMM didn't hit. Note them as ``missing``.
-    2. Verify the surviving peptides' hits are in N→C order. Return
+    1. Drop peptides without a span. Note them as ``missing``.
+    2. Verify the surviving peptides' spans are in N→C order. Return
        early (empty ranges, ``out_of_order`` note) if not — the spec
        fails for this rep.
-    3. ``boundary``: each surviving peptide spans its hit's
-       ``ali_from..ali_to`` verbatim.
+    3. ``boundary``: each surviving peptide spans its token's footprint
+       verbatim.
     4. ``bisect`` / ``motif``: each surviving peptide spans from the
-       previous boundary to the bisect (or motif-snapped) point with the
-       next surviving peptide. The first peptide starts at AA 1; the
-       last ends at the protein C-term.
+       previous boundary to the bisect (or motif-snapped) point with
+       the next surviving peptide. The first peptide starts at AA 1;
+       the last ends at the protein C-term.
     """
     n_aa = len(protein_seq)
     notes: list[str] = []
-    ranges: list[Optional[tuple[int, int, str]]] = [None] * len(peptide_hits)
+    ranges: list[Optional[tuple[int, int, str]]] = [None] * len(peptide_spans)
 
     if n_aa == 0:
         notes.append("parent CDS has no translation; cannot slice")
         return ranges, notes
 
-    # Index of each surviving (peptide_hits[i] has a real hit).
-    surviving_idx = [i for i, (_, h) in enumerate(peptide_hits) if h is not None]
+    surviving_idx = [i for i, (_, s) in enumerate(peptide_spans) if s is not None]
     if not surviving_idx:
-        notes.append("no peptide HMM hit the parent CDS")
+        notes.append("no peptide token was satisfied on the parent CDS")
         return ranges, notes
 
-    # Order check: hits must be N→C on the parent.
-    starts = [int(peptide_hits[i][1]["ali_from"]) for i in surviving_idx]
+    starts = [peptide_spans[i][1][0] for i in surviving_idx]
     if any(starts[k] > starts[k + 1] for k in range(len(starts) - 1)):
         notes.append(
-            "peptide HMMs hit out of N-to-C order on the parent CDS — "
-            "spec fails for this representative"
+            "peptide tokens were satisfied out of N-to-C order on the "
+            "parent CDS — spec fails for this representative"
         )
         return ranges, notes
 
     if spec.cut_strategy == "boundary":
         for i in surviving_idx:
-            hit = peptide_hits[i][1]
-            f, t = int(hit["ali_from"]), int(hit["ali_to"])
-            f = max(1, min(f, n_aa))
-            t = max(1, min(t, n_aa))
+            span = peptide_spans[i][1]
+            f = max(1, min(span[0], n_aa))
+            t = max(1, min(span[1], n_aa))
             if t < f:
                 continue
             ranges[i] = (f, t, "boundary")
         return ranges, notes
 
     # bisect / motif — chained cut placement across surviving peptides.
-    # Compute the bisect point between each adjacent surviving pair.
     use_motif = spec.cut_strategy == "motif"
-    cuts: list[int] = []  # 1-based start position of each surviving peptide after the first
+    cuts: list[int] = []
     overlap_flagged = False
     for k in range(len(surviving_idx) - 1):
-        a_hit = peptide_hits[surviving_idx[k]][1]
-        b_hit = peptide_hits[surviving_idx[k + 1]][1]
-        a_to = int(a_hit["ali_to"])
-        b_from = int(b_hit["ali_from"])
+        a_span = peptide_spans[surviving_idx[k]][1]
+        b_span = peptide_spans[surviving_idx[k + 1]][1]
+        a_to = a_span[1]
+        b_from = b_span[0]
         if b_from <= a_to and not overlap_flagged:
-            # Hits overlap; bisect on the midpoints of their *centres*
-            # so we don't pin a sharp boundary at a contested residue.
+            # Adjacent token footprints overlap on the parent — bisect
+            # on the midpoint of their centres so we don't pin a sharp
+            # boundary at a contested residue.
             notes.append(
-                f"hits for adjacent peptides overlap on the parent "
+                f"footprints for adjacent peptides overlap on the parent "
                 f"(a_to={a_to}, b_from={b_from}); cut placed at the "
-                f"midpoint of the hit centres"
+                f"midpoint of the footprint centres"
             )
             overlap_flagged = True
             mid_centre = (
-                _peptide_hit_midpoint(a_hit) + _peptide_hit_midpoint(b_hit)
+                _peptide_span_midpoint(a_span) + _peptide_span_midpoint(b_span)
             ) / 2.0
             bisect_point = int(round(mid_centre))
         else:
@@ -265,31 +433,22 @@ def compute_cuts(
 
         snapped: Optional[int] = None
         if use_motif:
-            motif = peptide_hits[surviving_idx[k + 1]][0].cleavage_motif
+            motif = peptide_spans[surviving_idx[k + 1]][0].cleavage_motif
             if motif:
                 snapped = _find_motif_snap(
                     protein_seq, bisect_point, motif, spec.motif_window_aa,
                 )
-        if snapped is not None:
-            cuts.append(snapped)
-        else:
-            cuts.append(bisect_point)
+        cuts.append(snapped if snapped is not None else bisect_point)
 
-    # Assemble ranges: each surviving peptide owns AA positions
-    # [start, end] where start = previous-cut (or 1 for the first) and
-    # end = this-cut - 1 (or n_aa for the last). The method tag records
-    # what produced the START boundary of the peptide (the more
-    # informative one — the C-term cut becomes the next peptide's N-term).
     starts_iter = [1] + cuts
     ends_iter = [c - 1 for c in cuts] + [n_aa]
 
-    methods = ["n-term"]  # first surviving peptide's start is the protein N-term
+    methods = ["n-term"]
     for k in range(len(surviving_idx) - 1):
-        pep = peptide_hits[surviving_idx[k + 1]][0]
-        bisect_point = int(round(
-            (int(peptide_hits[surviving_idx[k]][1]["ali_to"])
-             + int(peptide_hits[surviving_idx[k + 1]][1]["ali_from"])) / 2.0
-        ))
+        pep = peptide_spans[surviving_idx[k + 1]][0]
+        a_to = peptide_spans[surviving_idx[k]][1][1]
+        b_from = peptide_spans[surviving_idx[k + 1]][1][0]
+        bisect_point = int(round((a_to + b_from) / 2.0))
         snapped: Optional[int] = None
         if use_motif and pep.cleavage_motif:
             snapped = _find_motif_snap(
@@ -313,23 +472,32 @@ def compute_cuts(
 def slice_polyprotein(
     proteins: list[dict],
     spec: PolyproteinSpec,
+    *,
+    overlap_tolerance: int = 0,
 ) -> tuple[Optional[dict], list[SlicedPeptide]]:
     """Top-level entry: identify parent CDS, compute cuts, build records.
 
     Returns ``(parent_cds, sliced_peptides)``:
 
     * ``parent_cds`` is the CDS dict (from :attr:`Sequence.proteins`)
-      identified as the polyprotein, or ``None`` if no CDS cleared
-      ``min_peptides_hit`` distinct peptide-HMM hits. In the ``None``
+      identified as the polyprotein, or ``None`` if no CDS satisfies
+      ≥ ``spec.min_peptides_hit`` peptide tokens. In the ``None``
       case ``sliced_peptides`` is a single ``no_parent_cds`` audit row
-      so the user can see *why* the spec produced nothing on this
-      representative.
+      per peptide so the user can see *why* the spec produced nothing
+      on this representative.
     * ``sliced_peptides`` is one :class:`SlicedPeptide` per declared
-      peptide of the spec (in N→C order). Peptides whose HMM didn't
-      hit produce a ``missing`` row with no FASTA-eligible sequence;
-      ``ok`` rows carry the spliced AA string.
+      peptide of the spec (in N→C order). Peptides whose token isn't
+      satisfied produce a ``missing`` row with no FASTA-eligible
+      sequence; ``ok`` rows carry the spliced AA string.
+
+    ``overlap_tolerance`` is forwarded to the multidomain-token walk so
+    Pfam-boundary fuzz at adjacent named domains (e.g. ``A--B`` where
+    A's HMM model overruns into B by a few residues) doesn't reject a
+    biologically valid CDS.
     """
-    parent = identify_parent_cds(proteins, spec)
+    parent = identify_parent_cds(
+        proteins, spec, overlap_tolerance=overlap_tolerance,
+    )
     if parent is None:
         return None, [
             SlicedPeptide(
@@ -343,8 +511,9 @@ def slice_polyprotein(
                 cut_method_actual="",
                 status=_NO_PARENT,
                 note=(
-                    f"no CDS on this representative carries hits from "
-                    f"≥ {spec.min_peptides_hit} of the declared peptide HMMs"
+                    f"no CDS on this representative satisfies "
+                    f"≥ {spec.min_peptides_hit} of the declared peptide "
+                    f"tokens"
                 ),
             )
             for pep in spec.peptides
@@ -353,52 +522,69 @@ def slice_polyprotein(
     protein_seq = parent.get("sequence") or ""
     parent_pid = parent.get("protein_id")
     parent_acc = parent.get("parent_accession") or parent.get("accession")
+    parent_hits = parent.get("hmm_hits") or []
 
-    # Resolve each declared peptide's best hit on the parent CDS.
-    peptide_hits: list[tuple[PeptideSpec, Optional[dict]]] = []
+    # Resolve each declared peptide's footprint on the parent CDS.
+    # Restrict the search to the chosen parent — a peptide token hit
+    # elsewhere on the rep is irrelevant to this polyprotein's layout.
+    # For OR-peptides (multiple alternative architectures), pick the
+    # best-E alternative and remember which one fired.
+    peptide_spans: list[
+        tuple[PeptideSpec, Optional[tuple[int, int]], str]
+    ] = []
     for pep in spec.peptides:
-        # Restrict the hit search to the chosen parent CDS — a peptide
-        # HMM that hits another CDS on the rep is not relevant to this
-        # polyprotein's layout.
-        _, hit = _best_hit_for_hmm([parent], pep.hmm)
-        peptide_hits.append((pep, hit))
+        chosen = _best_satisfying_alternative(
+            parent_hits, pep.hmms, overlap_tolerance=overlap_tolerance,
+        )
+        if chosen is None:
+            peptide_spans.append((pep, None, ""))
+        else:
+            f, t, matched = chosen
+            peptide_spans.append((pep, (f, t), matched))
 
-    ranges, notes = compute_cuts(protein_seq, spec, peptide_hits)
+    # compute_cuts only cares about (peptide, span) pairs; the matched
+    # token rides alongside and gets written into SlicedPeptide below.
+    ranges, notes = compute_cuts(
+        protein_seq, spec,
+        [(pep, span) for pep, span, _ in peptide_spans],
+    )
 
-    # Was the global "out of order" or "no hits" fatal? If so emit one
-    # status row per declared peptide carrying the failure reason.
+    # Was the global "out of order" or "no satisfied tokens" fatal?
+    # Emit one row per declared peptide carrying the failure reason.
     if all(r is None for r in ranges) and notes:
-        # Distinguish out-of-order from "no hits at all": a single
-        # combined audit reason per peptide.
         reason = notes[0]
         global_status = _OUT_OF_ORDER if "out of N-to-C order" in reason else _MISSING
         result: list[SlicedPeptide] = []
-        for slot, (pep, hit) in enumerate(peptide_hits):
-            if hit is None:
+        for pep, span, matched in peptide_spans:
+            if span is None:
                 status = _MISSING
                 rng = (0, 0)
             else:
                 status = global_status
-                rng = (int(hit["ali_from"]), int(hit["ali_to"]))
+                rng = span
             result.append(SlicedPeptide(
                 peptide_name=pep.name,
                 parent_protein_id=parent_pid,
                 parent_accession=parent_acc,
                 range_aa_from=rng[0],
                 range_aa_to=rng[1],
-                length_aa=max(0, rng[1] - rng[0] + 1) if hit else 0,
+                length_aa=max(0, rng[1] - rng[0] + 1) if span else 0,
                 sequence="",
                 cut_method_actual="",
                 status=status,
-                note=reason if status != _MISSING else "peptide HMM did not hit on the parent CDS",
+                note=(
+                    reason if status != _MISSING
+                    else "peptide token was not satisfied on the parent CDS"
+                ),
+                matched_token=matched,
             ))
         return parent, result
 
     overlap_seen = any("overlap" in n.lower() for n in notes)
 
     out: list[SlicedPeptide] = []
-    for (pep, hit), rng in zip(peptide_hits, ranges):
-        if hit is None:
+    for (pep, span, matched), rng in zip(peptide_spans, ranges):
+        if span is None:
             out.append(SlicedPeptide(
                 peptide_name=pep.name,
                 parent_protein_id=parent_pid,
@@ -409,25 +595,25 @@ def slice_polyprotein(
                 sequence="",
                 cut_method_actual="",
                 status=_MISSING,
-                note="peptide HMM did not hit on the parent CDS",
+                note="peptide token was not satisfied on the parent CDS",
+                matched_token="",
             ))
             continue
         if rng is None:
-            # Should be unreachable now that we drop None-hit slots
-            # above, but defensive: a non-None hit that still resolved
-            # to no range means we ran out of room (e.g. parent has
-            # zero residues somehow).
+            # Defensive: a satisfied token whose range resolved to None
+            # means the parent has zero residues somehow.
             out.append(SlicedPeptide(
                 peptide_name=pep.name,
                 parent_protein_id=parent_pid,
                 parent_accession=parent_acc,
-                range_aa_from=int(hit["ali_from"]),
-                range_aa_to=int(hit["ali_to"]),
+                range_aa_from=span[0],
+                range_aa_to=span[1],
                 length_aa=0,
                 sequence="",
                 cut_method_actual="",
                 status=_MISSING,
                 note="cut math produced no slice for this peptide",
+                matched_token=matched,
             ))
             continue
         f, t, method = rng
@@ -435,11 +621,8 @@ def slice_polyprotein(
         status = _OK
         note = ""
         if overlap_seen and "overlap" in (notes[0] if notes else "").lower():
-            # Tag every peptide of this slicing as overlap-affected, but
-            # still keep the sequences (the cut math fell back to
-            # midpoint-of-centres for the overlap — usable, just flagged).
             status = _OVERLAP
-            note = "adjacent peptide HMM hits overlap on the parent CDS"
+            note = "adjacent peptide token footprints overlap on the parent CDS"
         out.append(SlicedPeptide(
             peptide_name=pep.name,
             parent_protein_id=parent_pid,
@@ -451,6 +634,7 @@ def slice_polyprotein(
             cut_method_actual=method,
             status=status,
             note=note,
+            matched_token=matched,
         ))
 
     return parent, out

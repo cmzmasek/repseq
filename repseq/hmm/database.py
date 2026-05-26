@@ -58,9 +58,27 @@ def has_press_index(db_path: Path) -> bool:
     )
 
 
+def is_press_index_stale(db_path: Path) -> bool:
+    """True iff any .h3* index is older than the .hmm source file.
+
+    Catches the upgrade scenario: a user pulls down a newer bundled
+    ``.hmm`` (e.g. v0.34.0 added the Coronaviridae replicase profiles)
+    while their existing ``.h3*`` files were pressed against the old
+    content. The stale binary indexes would silently mis-index — hmmscan
+    either fails to find the new HMMs by name or reads corrupted offsets.
+    """
+    if not has_press_index(db_path):
+        return False
+    hmm_mtime = db_path.stat().st_mtime
+    for suffix in HMMPRESS_INDEX_SUFFIXES:
+        if Path(str(db_path) + suffix).stat().st_mtime < hmm_mtime:
+            return True
+    return False
+
+
 def ensure_pressed(db_path: Path) -> None:
-    """Auto-run ``hmmpress`` if the .h3* indexes are missing."""
-    if has_press_index(db_path):
+    """Auto-run ``hmmpress`` if the .h3* indexes are missing OR stale."""
+    if has_press_index(db_path) and not is_press_index_stale(db_path):
         return
     if shutil.which("hmmpress") is None:
         raise HMMDatabaseError(

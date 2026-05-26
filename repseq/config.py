@@ -822,7 +822,6 @@ def _validate_polyprotein_list(entries: Any, path: str) -> list[str]:
                     )
                     continue
                 pname = pep.get("name")
-                phmm = pep.get("hmm")
                 if not isinstance(pname, str) or not pname.strip():
                     errs.append(f"{ppath}.name must be a non-empty string")
                 else:
@@ -833,11 +832,67 @@ def _validate_polyprotein_list(entries: Any, path: str) -> list[str]:
                             f"within this polyprotein"
                         )
                     seen_pep.add(pkey)
-                if not isinstance(phmm, str) or not phmm.strip():
+
+                # Accept either ``hmm: <token>`` (singular, legacy) or
+                # ``hmms: [<token>, ...]`` (the v0.34.0 OR form).
+                # Exactly one must be set; both is an error
+                # (ambiguous), neither is an error (peptide has no
+                # locator).
+                phmm = pep.get("hmm")
+                phmms = pep.get("hmms")
+                has_singular = phmm is not None
+                has_plural = phmms is not None
+                if has_singular and has_plural:
                     errs.append(
-                        f"{ppath}.hmm must be a non-empty HMM profile "
-                        f"name (one HMM per mature peptide)"
+                        f"{ppath}: set exactly one of 'hmm' (single "
+                        f"token) or 'hmms' (list of alternative "
+                        f"tokens), not both"
                     )
+                elif not has_singular and not has_plural:
+                    errs.append(
+                        f"{ppath}: must set either 'hmm' (single HMM "
+                        f"token like \"CoV_NSP8\") or 'hmms' (a list of "
+                        f"alternative tokens, OR-joined — e.g. "
+                        f"[aCoV_NSP1, bCoV_NSP1] for a peptide whose "
+                        f"architecture differs across genera)"
+                    )
+                else:
+                    from .hmm.runner import parse_hmm_token
+                    if has_singular:
+                        if not isinstance(phmm, str) or not phmm.strip():
+                            errs.append(
+                                f"{ppath}.hmm must be a non-empty HMM "
+                                f"token (single profile name or "
+                                f"multidomain \"A--B--C\")"
+                            )
+                        else:
+                            try:
+                                parse_hmm_token(phmm)
+                            except ValueError as exc:
+                                errs.append(f"{ppath}.hmm: {exc}")
+                    else:
+                        if (
+                            not isinstance(phmms, list)
+                            or not phmms
+                            or not all(
+                                isinstance(t, str) and t.strip()
+                                for t in phmms
+                            )
+                        ):
+                            errs.append(
+                                f"{ppath}.hmms must be a non-empty list "
+                                f"of HMM token strings (each either a "
+                                f"single profile name or a multidomain "
+                                f"\"A--B--C\" token)"
+                            )
+                        else:
+                            for ti, tok in enumerate(phmms):
+                                try:
+                                    parse_hmm_token(tok)
+                                except ValueError as exc:
+                                    errs.append(
+                                        f"{ppath}.hmms[{ti}]: {exc}"
+                                    )
                 motif = pep.get("cleavage_motif")
                 if motif is not None and (
                     not isinstance(motif, str) or not motif.strip()

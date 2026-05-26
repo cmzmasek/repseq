@@ -143,6 +143,9 @@ def test_audit_tsv_records_status_per_rep_per_peptide(tmp_path):
         "isolate_id", "peptide_name", "parent_accession",
         "parent_protein_id", "range_aa_from",
     ]
+    # v0.34.0+ adds the matched_architecture column for OR-peptides
+    # (empty when the peptide has only one architecture).
+    assert "matched_architecture" in header
     # 2 reps × 3 peptides = 6 audit rows.
     rows = [line.split("\t") for line in lines[1:]]
     assert len(rows) == 6

@@ -986,13 +986,17 @@ def _collect_polyprotein_specs_for_summary(cfg: dict) -> list[dict]:
     return out
 
 
-def _render_polyprotein(cfg: dict) -> str:
+def _render_polyprotein(cfg: dict, per_protein_ran: bool = False) -> str:
     """Polyprotein cutting section.
 
     Fires when at least one ``clustering.polyprotein`` /
     ``virus.polyprotein`` spec is declared AND the HMM tier was active
     this session (otherwise :func:`write_polyprotein_outputs` soft-fails
     with a stderr line and emits no FASTAs, so the summary should match).
+
+    When ``per_protein_ran`` is True the section also describes the
+    per-peptide phylogenetic trees (one per spec × peptide) that
+    ``--per-protein-phylo`` produced alongside the peptide FASTAs.
     """
     specs = _collect_polyprotein_specs_for_summary(cfg)
     if not specs:
@@ -1033,6 +1037,25 @@ def _render_polyprotein(cfg: dict) -> str:
         )
     bullets = "\n".join(bullet_lines)
 
+    peptide_trees_clause = ""
+    if per_protein_ran:
+        peptide_trees_clause = (
+            "\n\nWith `--per-protein-phylo` active, **one phylogenetic "
+            "tree was also built per peptide** (one tree per declared "
+            "spec × peptide combination) using the same MAFFT / "
+            "IQ-TREE-or-FastTree / rooting / LCA / colour palette as "
+            "the per-marker trees (`phylo.per_protein` settings apply "
+            "verbatim). Peptide trees land alongside the FASTAs under "
+            "`{prefix}_polyprotein/` with `{prefix}_<spec>_<peptide>_msa.fasta`, "
+            "`_tree.nwk`, `_tree.xml`, `_tree_id_map.tsv` basenames. "
+            "Sparse peptides (fewer than "
+            f"`phylo.per_protein.min_taxa` `ok`-status slices) are "
+            "skipped. Peptide trees are intentionally **kept out** of "
+            "`{prefix}_per_protein/{prefix}_incongruence.tsv` (which "
+            "compares whole-genome markers) — peptide-vs-peptide "
+            "comparison within a polyprotein answers a different "
+            "scientific question."
+        )
     return (
         "## Polyprotein cutting\n\n"
         f"For each declared polyprotein spec, the elected representatives' "
@@ -1050,7 +1073,7 @@ def _render_polyprotein(cfg: dict) -> str:
         f"`no_parent_cds`) so the bench scientist can see which cuts are "
         f"clean and which carry caveats. Polyprotein cutting is purely "
         f"additive — the polyprotein itself still drives clustering and "
-        f"the whole-genome tree.\n"
+        f"the whole-genome tree.{peptide_trees_clause}\n"
     )
 
 
@@ -1146,7 +1169,7 @@ def render_summary(
             conservation_ran=conservation_ran,
             pre_cluster_ran=pre_cluster_ran,
         ),
-        _render_polyprotein(cfg),
+        _render_polyprotein(cfg, per_protein_ran=per_protein_ran),
         _render_software(cfg, versions, any_phylo),
         _render_footer(),
     ]

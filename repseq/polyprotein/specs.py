@@ -30,16 +30,46 @@ def _sanitize(name: str) -> str:
 class PeptideSpec:
     """One mature peptide within a polyprotein.
 
-    ``hmm`` is the single HMM profile name that defines this peptide's
-    location on the polyprotein. ``cleavage_motif`` (optional) is the
-    residue motif found just N-terminal of the cut that liberates this
-    peptide (3CL: ``"LQ"``, picornavirus 3C: ``"Q"``, etc.). The motif
-    refines the cut between the *previous* peptide and this one when the
-    spec's cut strategy is ``"motif"``.
+    ``hmms`` is a list of **alternative HMM tokens** (v0.34.0+) —
+    each token is either a single HMM profile name
+    (``"CoV_NSP8"``) or a multidomain architecture in N-to-C order
+    (``"CoV_RPol_N--RdRP_1"``). The peptide is located when *any one* of
+    the listed tokens is satisfied on the parent CDS (OR across the
+    list); for a multidomain token, the peptide is satisfied only when
+    *all* of the named HMMs hit in the declared order (AND within the
+    token). This matches the existing ``cluster_protein.hmms[]``
+    semantics: same ``parse_hmm_token`` validator, same N-to-C
+    enforcement, AND-within-token, OR-across-list.
+
+    The biological reason for OR support: a mature peptide's
+    architecture can differ across virus genera. Coronavirus NSP1 has
+    distinct alpha- vs. beta-CoV folds (the alpha form has no homologue
+    in beta and vice-versa), so writing one `hmms:` list with both
+    architectures lets each rep's CDS match whichever variant it
+    carries.
+
+    Config users may supply either the singular ``hmm: <token>``
+    (legacy v0.33.0/early-v0.34.0 form, kept for backwards
+    compatibility — wrapped into a 1-element list internally) or the
+    plural ``hmms: [<token>, ...]`` (the new OR form). Exactly one of
+    the two must be set.
+
+    When multiple alternatives are satisfied on one CDS, the slicer
+    picks the alternative with the best (lowest) worst-domain E-value,
+    mirroring how :func:`repseq.phylo.per_protein._best_satisfying_cds_any`
+    chooses across alternative architectures for the
+    ``cluster_protein`` HMM gate. The selected token is recorded on
+    each :class:`SlicedPeptide` for audit.
+
+    ``cleavage_motif`` (optional) is the residue motif found just
+    N-terminal of the cut that liberates this peptide (3CL: ``"LQ"``,
+    picornavirus 3C: ``"Q"``, etc.). The motif refines the cut between
+    the *previous* peptide and this one when the spec's cut strategy is
+    ``"motif"``.
     """
 
     name: str
-    hmm: str
+    hmms: list[str]  # OR-list of tokens, each "Name" or "A--B--C"
     cleavage_motif: Optional[str] = None
 
 
@@ -85,16 +115,35 @@ class PolyproteinSpec:
 
 
 def _parse_peptide(entry: dict) -> Optional[PeptideSpec]:
+    """Build one :class:`PeptideSpec` from a validated peptide config dict.
+
+    Accepts either ``hmm: <token>`` (legacy singular form, wrapped to a
+    1-element list internally) or ``hmms: [<token>, ...]`` (the new OR
+    form). Validation upstream guarantees exactly one of the two is set.
+    """
     name = (entry.get("name") or "").strip()
-    hmm = (entry.get("hmm") or "").strip()
-    if not name or not hmm:
+    if not name:
         return None
+
+    tokens: list[str] = []
+    if isinstance(entry.get("hmms"), list):
+        tokens = [
+            t.strip() for t in entry["hmms"]
+            if isinstance(t, str) and t.strip()
+        ]
+    elif isinstance(entry.get("hmm"), str):
+        single = entry["hmm"].strip()
+        if single:
+            tokens = [single]
+    if not tokens:
+        return None
+
     motif = entry.get("cleavage_motif")
     if isinstance(motif, str):
         motif = motif.strip() or None
     else:
         motif = None
-    return PeptideSpec(name=name, hmm=hmm, cleavage_motif=motif)
+    return PeptideSpec(name=name, hmms=tokens, cleavage_motif=motif)
 
 
 def _parse_polyprotein_entry(

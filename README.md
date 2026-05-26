@@ -1875,12 +1875,15 @@ whole loses signal — diversity comparisons, alignments, and trees are
 far more biologically informative on the **mature peptides**.
 
 `polyprotein:` declares one or more polyproteins, each with the list of
-mature peptides it cleaves into and one HMM per peptide. After
-representatives are elected, repseq finds each rep's polyprotein CDS
-(by counting peptide-HMM hits), slices it into mature peptides, and
-emits them as accessory artifacts. **Clustering and the whole-genome
-tree are untouched** — the polyprotein still drives those; mature
-peptides are additive output.
+mature peptides it cleaves into. Each peptide carries an **HMM token**
+(single profile name like `CoV_NSP8`, or a multidomain N-to-C
+architecture like `CoV_RPol_N--RdRP_1` — same token syntax as
+`cluster_protein.hmms[]`). After representatives are elected, repseq
+finds each rep's polyprotein CDS (the CDS that satisfies the most
+peptide tokens), slices it into mature peptides, and emits them as
+accessory artifacts. **Clustering and the whole-genome tree are
+untouched** — the polyprotein still drives those; mature peptides are
+additive output.
 
 ### Config shape
 
@@ -1892,13 +1895,53 @@ clustering:
   polyprotein:
     - name: ORF1ab                       # required, unique; keys the output filenames
       peptides:                          # required, ordered N→C, ≥2 entries
-        - {name: NSP3, hmm: CoV_NSP3}
-        - {name: NSP5, hmm: CoV_3CLpro, cleavage_motif: "LQ"}
-        - {name: NSP12, hmm: CoV_RdRp}
+        - {name: NSP8,  hmm: CoV_NSP8,                            cleavage_motif: "LQ"}
+        - {name: NSP9,  hmm: CoV_NSP9,                            cleavage_motif: "LQ"}
+        - {name: NSP10, hmm: CoV_NSP10,                           cleavage_motif: "LQ"}
+        - {name: NSP12, hmm: "CoV_RPol_N--RdRP_1",                cleavage_motif: "LQ"}
+        - {name: NSP13, hmm: "CoV_NSP13_ZBD--CoV_NSP13_stalk--CoV_NSP13_1B", cleavage_motif: "LQ"}
       cut_strategy: motif                # boundary | bisect | motif (see below)
       motif_window_aa: 10                # ±aa around bisect to search for the motif
       min_peptides_hit: 2                # parent-CDS identification threshold
 ```
+
+`hmm:` accepts either a single profile name or a multidomain N→C
+token (HMMs joined with `--`, most N-terminal first). For a
+multidomain peptide, the token is satisfied only when every named HMM
+hits the parent CDS in N→C order; the peptide's footprint is the
+synthetic span from the first domain's start to the last domain's
+end. Pfam-boundary fuzz at the seam is tolerated up to
+`hmm.multidomain_overlap_tolerance` aa (default 30), the same setting
+the `cluster_protein` HMM gate uses.
+
+**Alternative architectures (OR) — `hmms:`** (v0.34.0+). When a mature
+peptide's architecture differs across virus genera, declare a list of
+alternative tokens with `hmms:` instead of the singular `hmm:`. The
+peptide is located when **any one** of the listed tokens is satisfied;
+if multiple alternatives are satisfied on a CDS, the slicer picks the
+one with the best (lowest) worst-domain E-value (mirrors
+`cluster_protein.hmms[]` ranking). The chosen architecture is recorded
+in a `matched_architecture` column of the audit TSV and a
+`[matched_arch=...]` tag in the peptide FASTA header so the bench
+scientist can see which fold fired on each rep.
+
+```yaml
+clustering:
+  polyprotein:
+    - name: ORF1ab
+      peptides:
+        # Coronavirus NSP1 is non-homologous between alpha- and
+        # beta-CoV — list both architectures and either one will fire.
+        - {name: NSP1, hmms: [aCoV_NSP1, bCoV_NSP1], cleavage_motif: "LQ"}
+        # NSP2 has one architecture; legacy singular `hmm:` form is fine.
+        - {name: NSP2, hmm: CoV_NSP2, cleavage_motif: "LQ"}
+        # NSP12 is multidomain; each entry of an `hmms:` list can be
+        # multidomain too — alternative whole architectures.
+        - {name: NSP12, hmm: "CoV_RPol_N--RdRP_1", cleavage_motif: "LQ"}
+```
+
+Each peptide must set **exactly one** of `hmm` or `hmms` — both is
+an error (ambiguous), neither is an error (peptide has no locator).
 
 Segmented mode uses a per-segment dict (parity with `extra_protein`):
 
@@ -1964,13 +2007,41 @@ representatives. Headers carry the standard protein-FASTA bracket-tag
 set (organism, taxonomy ladder, isolate, segment, host, country, date,
 length, parent) plus polyprotein-specific tags:
 `[polyprotein=<spec>]`, `[peptide=<peptide>]`,
-`[peptide_range_aa=<from>-<to>]`, `[cut_method=<actual>]`.
+`[peptide_range_aa=<from>-<to>]`, `[cut_method=<actual>]`,
+`[matched_arch=<token>]`.
 
 `{prefix}_polyprotein/{prefix}_<spec>_peptides.tsv` — audit TSV, one row
 per (representative × peptide) attempt: `isolate_id`, `peptide_name`,
 `parent_accession`, `parent_protein_id`, `range_aa_from`, `range_aa_to`,
-`length_aa`, `cut_method_actual`, `status`, `note`. Use this to spot
-peptides whose cuts are purely heuristic vs. motif-supported.
+`length_aa`, `cut_method_actual`, `matched_architecture`, `status`,
+`note`. Use this to spot peptides whose cuts are purely heuristic vs.
+motif-supported, and which OR-alternative architecture fired on each rep.
+
+**Per-peptide phylogenetic trees** (v0.34.0+, opt-in via
+`--per-protein-phylo`). Each peptide of each spec gets its own ML tree
+built the same way 2F builds the marker trees — MAFFT alignment,
+IQ-TREE or FastTree per `phylo.tool`, rooting + LCA + colour palette
+shared with every other tree of the run, optional trimAl trimming.
+Settings come from `phylo.per_protein` verbatim — `min_taxa`,
+`mafft.extra_args`, `trimal.*`, `domain_architecture`. Outputs sit
+alongside the peptide FASTAs in `{prefix}_polyprotein/` with the
+matching basename schema:
+
+* `{prefix}_<spec>_<peptide>_msa.fasta`
+* `{prefix}_<spec>_<peptide>_tree.nwk`
+* `{prefix}_<spec>_<peptide>_tree.xml`
+* `{prefix}_<spec>_<peptide>_tree_id_map.tsv`
+
+Sparse peptides (fewer than `phylo.per_protein.min_taxa` reps with an
+`ok`-status slice) are skipped with a log note. Peptide trees are
+intentionally **not** included in the
+`{prefix}_per_protein/{prefix}_incongruence.tsv` table — that one
+compares whole-genome markers, and peptide-vs-peptide RF within a
+polyprotein is a different scientific question. The phyloXML
+`<domain_architecture>` on each leaf is **peptide-local** (boxes drawn
+on the peptide's 1..length coordinate space, not on the parent
+polyprotein), so multidomain peptides like NSP12 (`CoV_RPol_N--RdRP_1`)
+show both subdomain boxes properly scoped to the cut peptide.
 
 ### Soft-fail posture
 

@@ -96,12 +96,19 @@ def _shared_options(fn):
     fn = click.option(
         "--per-protein-phylo", is_flag=True, default=False,
         help=(
-            "Build one tree per declared HMM domain-architecture (the "
-            "hmms: tokens used for QC) over the representatives, into the "
-            "{prefix}_per_protein/ subdirectory. Requires the HMM tier "
+            "Build one tree per declared protein family AND polyprotein "
+            "peptide over the representatives. Three groups, three "
+            "distinct subdirectories: cluster_protein / segment_markers "
+            "trees → {prefix}_per_protein/; extra_protein trees → "
+            "{prefix}_extra_protein/; polyprotein peptide trees → "
+            "{prefix}_polyprotein/ (alongside the peptide FASTAs the "
+            "polyprotein cutter wrote). Requires the HMM tier "
             "(hmm.enabled + configured hmms:) and 'mafft' plus a tree "
-            "builder; each family needs >= phylo.per_protein.min_taxa "
-            "representatives. Runs alone or alongside --phylo."
+            "builder; each family/peptide needs >= "
+            "phylo.per_protein.min_taxa representatives. All three groups "
+            "share the same MAFFT / IQ-TREE-or-FastTree / rooting / LCA "
+            "/ colour-palette settings under phylo.per_protein. Runs "
+            "alone or alongside --phylo."
         ),
     )(fn)
     fn = click.option(
@@ -422,13 +429,21 @@ def _any_marker_has_hmms(cfg: dict) -> bool:
     for entry in (cfg.get("clustering", {}).get("extra_protein", []) or []):
         if isinstance(entry, dict) and (entry.get("hmms") or []):
             return True
-    # Polyprotein specs (v0.33.0): every peptide carries a single `hmm:`
-    # string. The hmmscan step needs to fire if any are declared so the
-    # slicer has hits to work with.
+    # Polyprotein specs (v0.33.0+): each peptide carries either `hmm:`
+    # (single token, legacy form) or `hmms:` (list of alternative
+    # architectures, v0.34.0 OR form). Either one means the HMM tier
+    # needs to fire so the slicer has hits to work with.
     for entry in (cfg.get("clustering", {}).get("polyprotein", []) or []):
         if isinstance(entry, dict):
             for pep in (entry.get("peptides") or []):
-                if isinstance(pep, dict) and (pep.get("hmm") or "").strip():
+                if not isinstance(pep, dict):
+                    continue
+                if (pep.get("hmm") or "").strip():
+                    return True
+                hmms = pep.get("hmms") or []
+                if isinstance(hmms, list) and any(
+                    isinstance(t, str) and t.strip() for t in hmms
+                ):
                     return True
     virus_cfg = get_virus_config(cfg)
     if virus_cfg:
@@ -447,7 +462,14 @@ def _any_marker_has_hmms(cfg: dict) -> bool:
             for entry in (entries or []):
                 if isinstance(entry, dict):
                     for pep in (entry.get("peptides") or []):
-                        if isinstance(pep, dict) and (pep.get("hmm") or "").strip():
+                        if not isinstance(pep, dict):
+                            continue
+                        if (pep.get("hmm") or "").strip():
+                            return True
+                        hmms = pep.get("hmms") or []
+                        if isinstance(hmms, list) and any(
+                            isinstance(t, str) and t.strip() for t in hmms
+                        ):
                             return True
     return False
 
@@ -478,15 +500,29 @@ def _collect_config_hmm_names(cfg: dict) -> set[str]:
     for entry in (cfg.get("clustering", {}).get("extra_protein", []) or []):
         if isinstance(entry, dict):
             _add_tokens(entry.get("hmms", []))
-    # Polyprotein peptide HMMs — single-name strings rather than tokens,
-    # but they still need to be present in the database.
+    # Polyprotein peptide HMMs (v0.34.0+: each peptide's locator is
+    # either `hmm:` (single token) or `hmms:` (list of alternative
+    # tokens). Parse each token via parse_hmm_token so we collect every
+    # component HMM name across all alternatives.
+    def _collect_peptide_tokens(pep: dict) -> list[str]:
+        tokens: list[str] = []
+        single = (pep.get("hmm") or "").strip()
+        if single:
+            tokens.append(single)
+        for t in (pep.get("hmms") or []):
+            if isinstance(t, str) and t.strip():
+                tokens.append(t.strip())
+        return tokens
+
     for entry in (cfg.get("clustering", {}).get("polyprotein", []) or []):
         if isinstance(entry, dict):
             for pep in (entry.get("peptides") or []):
                 if isinstance(pep, dict):
-                    hmm = (pep.get("hmm") or "").strip()
-                    if hmm:
-                        names.add(hmm)
+                    for token in _collect_peptide_tokens(pep):
+                        try:
+                            names.update(parse_hmm_token(token))
+                        except ValueError:
+                            pass
     virus_cfg = get_virus_config(cfg)
     if virus_cfg:
         for entries in (virus_cfg.get("cluster_protein") or {}).values():
@@ -505,9 +541,11 @@ def _collect_config_hmm_names(cfg: dict) -> set[str]:
                 if isinstance(entry, dict):
                     for pep in (entry.get("peptides") or []):
                         if isinstance(pep, dict):
-                            hmm = (pep.get("hmm") or "").strip()
-                            if hmm:
-                                names.add(hmm)
+                            for token in _collect_peptide_tokens(pep):
+                                try:
+                                    names.update(parse_hmm_token(token))
+                                except ValueError:
+                                    pass
     return names
 
 

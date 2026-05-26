@@ -613,19 +613,25 @@ def run_per_protein_phylogeny(
     out_dir: Path,
     prefix: str,
 ) -> list[Path]:
-    """Build one tree per declared marker spec AND one per extra_protein spec.
+    """Build one tree per declared marker spec AND extra_protein spec AND
+    polyprotein peptide.
 
-    Two output groups, distinct subdirectories:
+    Three output groups, distinct subdirectories:
 
     * marker (cluster_protein / segment_markers) trees → ``{prefix}_per_protein/``
     * extra_protein trees → ``{prefix}_extra_protein/``
+    * polyprotein peptide trees → ``{prefix}_polyprotein/`` (alongside the
+      unaligned peptide FASTAs from :func:`write_polyprotein_outputs`)
 
     The whole step soft-fails (``PhyloError``) only when there is genuinely
-    nothing to do: no specs configured anywhere, the HMM tier didn't run
-    and every spec is HMM-only, or no spec across either group cleared
-    ``min_taxa``. The two groups are independent — a sparse extra_protein
-    family does not stop the marker trees from being emitted.
+    nothing to do across all three groups (no specs configured anywhere,
+    or no group has any family/peptide clearing ``min_taxa``). The groups
+    are independent — a sparse extra_protein family does not stop the
+    marker trees from being emitted, and a sparse peptide does not stop
+    the marker or extra trees.
     """
+    from ..polyprotein import collect_polyprotein_specs as _collect_poly_specs
+
     marker_specs = collect_family_specs(cfg)
     # Convert marker specs to the 4-tuple form pick_marker_cds expects.
     # Marker specs are HMM-only in collect_family_specs by design (the gate
@@ -634,11 +640,13 @@ def run_per_protein_phylogeny(
         (lab, tokens, [], seg) for lab, tokens, seg in marker_specs
     ]
     extra_specs = collect_extra_specs(cfg)
+    poly_specs = _collect_poly_specs(cfg)
 
-    if not marker_specs_full and not extra_specs:
+    if not marker_specs_full and not extra_specs and not poly_specs:
         raise PhyloError(
             "nothing to build: no cluster_protein / segment_markers / "
-            "extra_protein specs declare aliases or HMM tokens"
+            "extra_protein / polyprotein specs declare aliases, HMM tokens, "
+            "or peptides"
         )
 
     hmm_active = _hmm_tier_ran(cfg, representatives)
@@ -718,18 +726,272 @@ def run_per_protein_phylogeny(
         # sparse / accessory by design. If the user wants RF distances
         # against them, we can add a separate table in a later iteration.
 
-    if not marker_built and not extra_built:
+    # Polyprotein peptide trees — third independent group.
+    poly_files: list[Path] = []
+    poly_built = False
+    poly_skip_reason: Optional[str] = None
+    if poly_specs:
+        try:
+            poly_files = run_polyprotein_phylogeny(
+                representatives, cfg, out_dir, prefix,
+            )
+            poly_built = bool(poly_files)
+            written.extend(poly_files)
+        except PhyloError as exc:
+            poly_skip_reason = str(exc)
+            logger.warning("[polyprotein] %s", exc)
+
+    if not marker_built and not extra_built and not poly_built:
         detail_parts: list[str] = []
         if marker_sparse:
             detail_parts.append("marker families: " + ", ".join(marker_sparse))
         if extra_sparse:
             detail_parts.append("extra_protein families: " + ", ".join(extra_sparse))
+        if poly_skip_reason:
+            detail_parts.append(f"polyprotein peptides: {poly_skip_reason}")
         detail = f" ({'; '.join(detail_parts)})" if detail_parts else ""
         raise PhyloError(
-            f"no protein family had >= {min_taxa} representatives carrying "
-            f"the declared architecture/aliases — nothing built{detail}"
+            f"no protein family or peptide had >= {min_taxa} representatives "
+            f"carrying the declared architecture/aliases — nothing built{detail}"
         )
 
+    return written
+
+
+def _build_peptide_synthetic_cds(
+    parent_cds: dict, sliced, peptide_name: str,
+) -> dict:
+    """Build a synthetic CDS dict representing one mature peptide.
+
+    Hits that lie **mostly within** the peptide range are kept and
+    **shifted to peptide-local coordinates** (1-based, range
+    1..length_aa) so the phyloXML ``<domain_architecture>`` draws
+    domain boxes on the peptide's own span rather than on the
+    polyprotein's. Multidomain peptide tokens (e.g. NSP12 =
+    ``CoV_RPol_N--RdRP_1``) get both subdomain boxes visible;
+    single-HMM peptides get one.
+
+    "Mostly within" = more than 50% of the original ``ali_span`` falls
+    inside the peptide range. Hits where ≤50% lies in the peptide are
+    dropped — those are Pfam-boundary fuzz from the *neighbouring*
+    peptide's domain that the slicer would otherwise emit as
+    1-or-2-aa artifact boxes at the peptide's start or end. A hit truly
+    belonging to this peptide always passes (100% inside ≫ 50%), and a
+    genuinely 50/50-straddling hit gets dropped from both adjacent
+    peptides — honest, since such a hit can't be biologically assigned
+    to either mature peptide.
+    """
+    pep_from = sliced.range_aa_from
+    pep_to = sliced.range_aa_to
+    shifted_hits: list[dict] = []
+    for h in (parent_cds.get("hmm_hits") or []):
+        try:
+            h_from = int(h.get("ali_from", 0))
+            h_to = int(h.get("ali_to", 0))
+        except (TypeError, ValueError):
+            continue
+        if h_to < pep_from or h_from > pep_to:
+            continue
+        original_span = h_to - h_from + 1
+        if original_span <= 0:
+            continue
+        clipped_from = max(h_from, pep_from)
+        clipped_to = min(h_to, pep_to)
+        clipped_span = clipped_to - clipped_from + 1
+        # Drop boundary-spillover artifacts: a hit must have a majority
+        # of its residues inside this peptide to be considered a real
+        # domain of the peptide. Strict ">"; equal/below the half-mark
+        # is ambiguous and dropped from both sides.
+        if clipped_span * 2 <= original_span:
+            continue
+        new_from = clipped_from - (pep_from - 1)
+        new_to = clipped_to - (pep_from - 1)
+        shifted = dict(h)
+        shifted["ali_from"] = new_from
+        shifted["ali_to"] = new_to
+        shifted["ali_span"] = clipped_span
+        shifted_hits.append(shifted)
+    parent_pid = parent_cds.get("protein_id") or "polyprotein"
+    return {
+        "protein_id": f"{parent_pid}:{peptide_name}",
+        "product": peptide_name,
+        "length": sliced.length_aa,
+        "sequence": sliced.sequence,
+        "hmm_hits": shifted_hits,
+    }
+
+
+def run_polyprotein_phylogeny(
+    representatives: list[Sequence],
+    cfg: dict[str, Any],
+    out_dir: Path,
+    prefix: str,
+) -> list[Path]:
+    """2F-equivalent for mature peptides: one tree per polyprotein peptide.
+
+    For each declared ``clustering.polyprotein:`` / ``virus.polyprotein:``
+    spec, and each peptide within it, slice every representative's
+    polyprotein CDS and build a phylogenetic tree from the spliced
+    peptide AA sequences (``ok``-status slices only — peptides whose
+    token wasn't satisfied are simply absent from their tree's input).
+    All knobs come from ``phylo.per_protein`` so the peptide trees
+    inherit the same MAFFT / trimAl / IQ-TREE-or-FastTree / rooting /
+    LCA / colouring / domain-architecture settings as 2F.
+
+    Outputs land alongside the unaligned peptide FASTAs in
+    ``{prefix}_polyprotein/`` with a matching basename schema:
+
+    * ``{prefix}_<spec>_<peptide>_msa.fasta`` (MAFFT alignment)
+    * ``{prefix}_<spec>_<peptide>_tree.nwk`` (Newick)
+    * ``{prefix}_<spec>_<peptide>_tree.xml`` (phyloXML)
+    * ``{prefix}_<spec>_<peptide>_tree_id_map.tsv`` (id map)
+
+    Sparse peptides (fewer than ``phylo.per_protein.min_taxa`` ``ok``
+    slices) are skipped with a log note; per-peptide build failures log
+    and continue (the whole step never aborts a run).
+
+    Peptide trees are **not** added to the per-protein incongruence
+    table (that compares whole-genome markers); peptides within a
+    polyprotein answer a different scientific question and live in
+    their own subdirectory.
+
+    Raises :class:`PhyloError` only when there's nothing to build (no
+    specs configured, HMM tier didn't run, or every peptide is sparse).
+    """
+    from ..polyprotein import collect_polyprotein_specs, slice_polyprotein
+
+    specs = collect_polyprotein_specs(cfg)
+    if not specs:
+        raise PhyloError(
+            "no polyprotein specs configured "
+            "(clustering.polyprotein / virus.polyprotein)"
+        )
+
+    hmm_active = _hmm_tier_ran(cfg, representatives)
+    if not hmm_active:
+        raise PhyloError(
+            "the HMM tier did not run this session "
+            "(need hmm.enabled plus configured hmms:), "
+            "so polyprotein peptides can't be located"
+        )
+
+    min_taxa = _min_taxa(cfg)
+    color_scheme = build_color_scheme(representatives, cfg)
+    pp_mafft_args, pp_mafft_auto = _per_protein_mafft(cfg)
+    pp_cfg = ((cfg or {}).get("phylo", {}) or {}).get("per_protein", {}) or {}
+    emit_domains = bool(pp_cfg.get("domain_architecture", True))
+    tol = overlap_tolerance_from_cfg(cfg)
+
+    sub_dir = out_dir / f"{prefix}_polyprotein"
+    written: list[Path] = []
+    built: list[str] = []
+    sparse: list[str] = []
+
+    from dataclasses import replace as _dc_replace
+
+    def _proteins_for_segment(rep: Sequence, segment: Optional[str]) -> list[dict]:
+        """Local copy of ``output.report._polyprotein_proteins`` to avoid
+        reaching from phylo/ back into output/. Kept identical so the
+        slicer sees the same CDS list the writer does.
+        """
+        if segment is None:
+            return rep.proteins or []
+        for seg in rep.concat_segments or []:
+            if seg.segment == segment:
+                return seg.proteins or []
+        if rep.segment == segment:
+            return rep.proteins or []
+        return []
+
+    for spec in specs:
+        # Slice once per rep, then walk peptides — the slicer's parent
+        # identification depends on the whole peptide set.
+        per_rep_slices: dict[str, list] = {}
+        per_rep_parent: dict[str, dict] = {}
+        for rep in representatives:
+            proteins = _proteins_for_segment(rep, spec.segment)
+            parent_cds, sliced_list = slice_polyprotein(
+                proteins, spec, overlap_tolerance=tol,
+            )
+            per_rep_slices[rep.id] = sliced_list
+            if parent_cds is not None:
+                per_rep_parent[rep.id] = parent_cds
+
+        for pep_idx, pep in enumerate(spec.peptides):
+            family_label = f"{_sanitize(spec.name)}_{_sanitize(pep.name)}"
+
+            leaf_reps: list[Sequence] = []
+            bodies: dict[str, str] = {}
+            leaf_protein_ids: dict[str, set[str]] = {}
+            for rep in representatives:
+                sliced_list = per_rep_slices.get(rep.id) or []
+                if pep_idx >= len(sliced_list):
+                    continue
+                sliced = sliced_list[pep_idx]
+                if sliced.status not in ("ok", "overlap") or not sliced.sequence:
+                    continue
+                parent_cds = per_rep_parent.get(rep.id)
+                if parent_cds is None:
+                    continue
+                synthetic = _build_peptide_synthetic_cds(
+                    parent_cds, sliced, pep.name,
+                )
+                # Shallow-copy the rep with the synthetic peptide as its
+                # only protein, so the phyloXML leaf shows the peptide
+                # name + peptide-local domain architecture. Original
+                # rep objects are NOT mutated.
+                synth_rep = _dc_replace(
+                    rep,
+                    proteins=[synthetic],
+                    concat_segments=None,
+                    marker_protein_ids=[synthetic["protein_id"]],
+                )
+                leaf_reps.append(synth_rep)
+                bodies[rep.id] = sliced.sequence
+                leaf_protein_ids[rep.id] = {synthetic["protein_id"]}
+
+            if len(leaf_reps) < min_taxa:
+                sparse.append(f"{family_label} ({len(leaf_reps)})")
+                logger.info(
+                    "[polyprotein] peptide %s: %d rep(s) with ok slices "
+                    "(< %d) — skipped", family_label, len(leaf_reps), min_taxa,
+                )
+                continue
+
+            logger.info(
+                "[polyprotein] building %s tree from %d rep(s)…",
+                family_label, len(leaf_reps),
+            )
+            try:
+                files = _build_tree(
+                    leaf_reps,
+                    bodies,
+                    is_protein=True,
+                    cfg=cfg,
+                    out_dir=sub_dir,
+                    file_prefix=family_label,
+                    xml_name_prefix=f"{prefix}_{family_label}",
+                    color_scheme=color_scheme,
+                    leaf_protein_ids=leaf_protein_ids,
+                    mafft_extra_args=pp_mafft_args,
+                    mafft_use_auto=pp_mafft_auto,
+                    domain_architecture=emit_domains,
+                    trimal_settings=pp_cfg.get("trimal"),
+                )
+            except PhyloError as exc:
+                logger.warning(
+                    "[polyprotein] peptide %s failed: %s", family_label, exc,
+                )
+                continue
+            written.extend(files)
+            built.append(family_label)
+
+    if not built:
+        detail = f" ({'; '.join(sparse)})" if sparse else ""
+        raise PhyloError(
+            f"no polyprotein peptide had >= {min_taxa} ok-sliced "
+            f"representatives — nothing built{detail}"
+        )
     return written
 
 

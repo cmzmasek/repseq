@@ -13,6 +13,7 @@ from repseq.hmm.database import (
     db_signature,
     ensure_pressed,
     has_press_index,
+    is_press_index_stale,
     parse_ga_cutoffs,
     profile_count,
     resolve_database_path,
@@ -119,6 +120,65 @@ def test_ensure_pressed_no_op_when_indexed(tmp_path):
         Path(str(p) + sfx).touch()
     # No exception, no work; the function returns None.
     assert ensure_pressed(p) is None
+
+
+def test_is_press_index_stale_returns_false_when_indexes_are_fresh(tmp_path):
+    p = _write_mini_hmm(tmp_path / "mini.hmm")
+    # No indexes at all → not stale (there's nothing to be stale).
+    assert is_press_index_stale(p) is False
+    for sfx in HMMPRESS_INDEX_SUFFIXES:
+        Path(str(p) + sfx).touch()
+    # Indexes created after the .hmm (or simultaneously) → not stale.
+    assert is_press_index_stale(p) is False
+
+
+def test_is_press_index_stale_detects_outdated_indexes(tmp_path):
+    """Upgrade scenario: existing .h3* indexes from the old bundled DB,
+    then the user pulls down a newer .hmm. Until repressed the indexes
+    point at stale offsets — the staleness check has to catch this so
+    ``ensure_pressed`` reruns hmmpress automatically.
+    """
+    p = _write_mini_hmm(tmp_path / "mini.hmm")
+    for sfx in HMMPRESS_INDEX_SUFFIXES:
+        Path(str(p) + sfx).touch()
+    # Simulate the user pulling a newer .hmm onto a checkout: bump its
+    # mtime past the existing indexes.
+    idx_mtime = Path(str(p) + HMMPRESS_INDEX_SUFFIXES[0]).stat().st_mtime
+    import os
+    os.utime(p, (idx_mtime + 10, idx_mtime + 10))
+    assert is_press_index_stale(p) is True
+
+
+def test_ensure_pressed_represses_when_index_is_stale(tmp_path, monkeypatch):
+    """``ensure_pressed`` must invoke hmmpress when indexes are stale,
+    not just when they're missing — otherwise a v0.34.0 user with the
+    pre-v0.34.0 indexes would silently mis-index the new bundled DB.
+    Subprocess is mocked so the test stays portable.
+    """
+    p = _write_mini_hmm(tmp_path / "mini.hmm")
+    for sfx in HMMPRESS_INDEX_SUFFIXES:
+        Path(str(p) + sfx).touch()
+    # Make the .hmm newer than the indexes (the upgrade scenario).
+    idx_mtime = Path(str(p) + HMMPRESS_INDEX_SUFFIXES[0]).stat().st_mtime
+    import os
+    os.utime(p, (idx_mtime + 10, idx_mtime + 10))
+
+    invocations: list[list[str]] = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv, capture_output=False, text=False):
+        invocations.append(list(argv))
+        return FakeProc()
+
+    monkeypatch.setattr("repseq.hmm.database.shutil.which", lambda _: "/usr/bin/hmmpress")
+    monkeypatch.setattr("repseq.hmm.database.subprocess.run", fake_run)
+    ensure_pressed(p)
+    assert invocations, "ensure_pressed should have invoked hmmpress on stale indexes"
+    assert invocations[0][0] == "hmmpress"
 
 
 @pytest.mark.skipif(shutil.which("hmmpress") is None, reason="hmmpress not on PATH")

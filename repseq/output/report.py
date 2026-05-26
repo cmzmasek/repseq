@@ -616,6 +616,10 @@ def _write_sliced_peptide_record(
             if sliced.range_aa_from and sliced.range_aa_to else None,
         ),
         ("cut_method", sliced.cut_method_actual or None),
+        # When the peptide had multiple alternative architectures, this
+        # surfaces which one matched (e.g. `aCoV_NSP1` vs `bCoV_NSP1`).
+        # Empty/omitted when the peptide has only one architecture.
+        ("matched_arch", sliced.matched_token or None),
         ("parent", parent_acc),
     ])
     tags = [
@@ -691,7 +695,7 @@ def write_polyprotein_outputs(
     audit TSV (so the user sees *why* no FASTAs appeared) but no FASTA.
     """
     from ..polyprotein import collect_polyprotein_specs, slice_polyprotein
-    from ..phylo.per_protein import _hmm_tier_ran
+    from ..phylo.per_protein import _hmm_tier_ran, overlap_tolerance_from_cfg
 
     specs = collect_polyprotein_specs(cfg)
     if not specs:
@@ -704,6 +708,12 @@ def write_polyprotein_outputs(
             "session — peptide HMMs can't be located on any CDS\n"
         )
         return []
+
+    # Same multidomain overlap tolerance used by the cluster_protein
+    # HMM gate (`hmm.multidomain_overlap_tolerance`, default 30 aa) so a
+    # multidomain peptide like `CoV_RPol_N--RdRP_1` tolerates Pfam-
+    # boundary fuzz at the seam just like the marker gate does.
+    overlap_tol = overlap_tolerance_from_cfg(cfg)
 
     sub_dir = out_dir / f"{prefix}_polyprotein"
     written: list[Path] = []
@@ -718,7 +728,9 @@ def write_polyprotein_outputs(
                 parts = rep.id.split("|")
                 if len(parts) > 1:
                     isolate_id = parts[1]
-            _parent_cds, sliced = slice_polyprotein(proteins, spec)
+            _parent_cds, sliced = slice_polyprotein(
+                proteins, spec, overlap_tolerance=overlap_tol,
+            )
             records.append((parent_seq, isolate_id, sliced))
 
         # The audit TSV is always written (even when zero sequences came
@@ -729,7 +741,8 @@ def write_polyprotein_outputs(
             fh.write(
                 "isolate_id\tpeptide_name\tparent_accession\t"
                 "parent_protein_id\trange_aa_from\trange_aa_to\t"
-                "length_aa\tcut_method_actual\tstatus\tnote\n"
+                "length_aa\tcut_method_actual\tmatched_architecture\t"
+                "status\tnote\n"
             )
             for parent_seq, iso_id, sliced_list in records:
                 effective_iso = iso_id or parent_seq.accession or parent_seq.id
@@ -744,6 +757,7 @@ def write_polyprotein_outputs(
                             _tsv_safe(s.range_aa_to or ""),
                             _tsv_safe(s.length_aa or ""),
                             _tsv_safe(s.cut_method_actual),
+                            _tsv_safe(s.matched_token),
                             _tsv_safe(s.status),
                             _tsv_safe(s.note),
                         ]) + "\n"
