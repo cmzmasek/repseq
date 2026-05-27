@@ -96,12 +96,16 @@ def _satisfying_span_for_token(
     the whole architecture from the N-terminal domain's start to the
     C-terminal domain's end.
 
-    Deliberately ignores the ``passing`` flag from ``_run_hmm_qc``: by
-    the time the slicer asks for a token's footprint, the parent CDS has
-    already been chosen, and we want every domain placement the hmmscan
-    found, not just the QC-clearing subset. The walk logic mirrors
-    :func:`repseq.hmm.runner.cds_satisfies_token` so the slicer enforces
-    the same architecture rules as the cluster_protein HMM gate.
+    Filters by the per-hit ``passing`` flag set by ``_run_hmm_qc`` (only
+    hits clearing the configured ``default_evalue`` / GA cutoff and
+    ``relative_length_cutoff`` are considered). Hits without a
+    ``passing`` key are treated as passing — a backward-compat shim for
+    callers / tests that don't go through ``_run_hmm_qc``; the
+    production pipeline always sets the flag (cli.py ``_run_hmm_qc``).
+
+    The walk logic mirrors :func:`repseq.hmm.runner.cds_satisfies_token`
+    so the slicer enforces the same architecture rules as the
+    cluster_protein HMM gate.
     """
     try:
         token_hmms = parse_hmm_token(token)
@@ -114,6 +118,8 @@ def _satisfying_span_for_token(
     for h in hits or []:
         target = h.get("target") or h.get("hmm_name") or h.get("name")
         if not target:
+            continue
+        if not h.get("passing", True):
             continue
         by_target.setdefault(target, []).append(h)
 
@@ -137,7 +143,12 @@ def _satisfying_span_for_token(
         return int(best["ali_from"]), int(best["ali_to"])
 
     # Multidomain token — greedy left-to-right walk, same shape as
-    # cds_satisfies_token but without the passing-flag gate.
+    # cds_satisfies_token. Tiebreak: among forward-progressing
+    # candidates for each named HMM, pick the leftmost by ``ali_to``,
+    # then break ties by best (lowest) ``dom_evalue`` — so the walk
+    # prefers higher-confidence hits when two candidates end at the
+    # same position (v0.36.1+; pre-v0.36.1 the tiebreak ignored hit
+    # quality entirely).
     chosen: list[dict] = []
     prev_from = -1
     prev_to = -1
@@ -153,7 +164,13 @@ def _satisfying_span_for_token(
         ]
         if not candidates:
             return None
-        pick = min(candidates, key=lambda h: int(h["ali_to"]))
+        pick = min(
+            candidates,
+            key=lambda h: (
+                int(h["ali_to"]),
+                float(h.get("dom_evalue", float("inf"))),
+            ),
+        )
         chosen.append(pick)
         prev_from = int(pick["ali_from"])
         prev_to = int(pick["ali_to"])
@@ -212,7 +229,8 @@ def _token_worst_evalue(
     satisfy ``token`` on this CDS, or ``None`` if the token isn't
     satisfied. Replays the same walk as
     :func:`_satisfying_span_for_token` but reports the E-value scalar
-    instead of the span.
+    instead of the span. Same ``passing``-flag filter as the span
+    helper, so the two stay in lockstep.
     """
     try:
         token_hmms = parse_hmm_token(token)
@@ -223,14 +241,24 @@ def _token_worst_evalue(
         target = h.get("target") or h.get("hmm_name") or h.get("name")
         if not target:
             continue
+        if not h.get("passing", True):
+            continue
         by_target.setdefault(target, []).append(h)
     for name in token_hmms:
         if name not in by_target:
             return None
     if len(token_hmms) == 1:
+        # Single-HMM pick: same key as _satisfying_span_for_token so the
+        # worst-E and span helpers stay in lockstep on tied dom_evalue
+        # (best-E first, longer ali_span as tiebreak).
         best = min(
             by_target[token_hmms[0]],
-            key=lambda h: float(h.get("dom_evalue", float("inf"))),
+            key=lambda h: (
+                float(h.get("dom_evalue", float("inf"))),
+                -int(h.get("ali_span") or (
+                    int(h.get("ali_to", 0)) - int(h.get("ali_from", 0)) + 1
+                )),
+            ),
         )
         return float(best.get("dom_evalue", float("inf")))
     chosen: list[dict] = []
@@ -248,7 +276,13 @@ def _token_worst_evalue(
         ]
         if not candidates:
             return None
-        pick = min(candidates, key=lambda h: int(h["ali_to"]))
+        pick = min(
+            candidates,
+            key=lambda h: (
+                int(h["ali_to"]),
+                float(h.get("dom_evalue", float("inf"))),
+            ),
+        )
         chosen.append(pick)
         prev_from = int(pick["ali_from"])
         prev_to = int(pick["ali_to"])
@@ -266,28 +300,46 @@ def identify_parent_cds(
     Counts the number of *satisfied peptide tokens* each CDS carries —
     a single-HMM peptide counts when its one HMM hits; a multidomain
     peptide counts only when the whole architecture is present in N→C
-    order. The CDS satisfying the most tokens
+    order — AND requires those satisfied tokens to themselves appear in
+    the declared N→C order along the CDS. The order check prevents a
+    chimeric / contaminated CDS (peptides hit but scrambled) from being
+    elected as parent and then producing a confusing
+    ``parent_protein_id=...`` audit row for a spec that was always
+    going to fail. The CDS satisfying the most tokens
     (≥ ``spec.min_peptides_hit``) wins; ties are broken by translation
     length (a polyprotein is usually the longest CDS on the segment,
     but we don't assume — the satisfied-token count is the decisive
     signal).
 
-    Returns ``None`` when no CDS clears the threshold; the caller emits
-    one ``no_parent_cds`` audit row per declared peptide.
+    Returns ``None`` when no CDS clears the threshold or the satisfied
+    tokens are out of declared order; the caller emits one
+    ``no_parent_cds`` audit row per declared peptide.
     """
     best: tuple[Optional[dict], int, int] = (None, 0, 0)
     for prot in proteins or []:
         hits = prot.get("hmm_hits") or []
-        satisfied = 0
-        for pep in spec.peptides:
+        # Collect (declared_index, span_from) for satisfied peptides.
+        satisfied_positions: list[tuple[int, int]] = []
+        for pep_idx, pep in enumerate(spec.peptides):
             # A peptide counts as satisfied when ANY of its alternative
             # architectures (`pep.hmms`) hits — OR semantics. Each token
             # internally is AND across its named domains.
-            if _best_satisfying_alternative(
+            chosen = _best_satisfying_alternative(
                 hits, pep.hmms, overlap_tolerance=overlap_tolerance,
-            ) is not None:
-                satisfied += 1
+            )
+            if chosen is not None:
+                satisfied_positions.append((pep_idx, chosen[0]))
+        satisfied = len(satisfied_positions)
         if satisfied < spec.min_peptides_hit:
+            continue
+        # Order check: satisfied peptides (which are already in
+        # declared-N→C order — `satisfied_positions` is appended in
+        # `pep_idx` order) must also appear in increasing span_from on
+        # the CDS. Strict `>=` so equal span starts (two peptides
+        # collocated) also disqualify — they can't both be the parent
+        # CDS's mature peptides.
+        starts = [sf for _, sf in satisfied_positions]
+        if any(starts[i] >= starts[i + 1] for i in range(len(starts) - 1)):
             continue
         length = int(prot.get("length") or len(prot.get("sequence") or ""))
         if (satisfied, length) > (best[1], best[2]):
@@ -387,7 +439,12 @@ def compute_cuts(
         return ranges, notes
 
     starts = [peptide_spans[i][1][0] for i in surviving_idx]
-    if any(starts[k] > starts[k + 1] for k in range(len(starts) - 1)):
+    # Strict `>=` so two peptides with identical span starts (collocated
+    # tokens — biologically nonsensical but possible if a config declares
+    # the same HMM for two peptides) also fail. Pre-v0.36.1 the check
+    # was `>`, which let collocated tokens through and then produced
+    # garbage bisect math downstream.
+    if any(starts[k] >= starts[k + 1] for k in range(len(starts) - 1)):
         notes.append(
             "peptide tokens were satisfied out of N-to-C order on the "
             "parent CDS — spec fails for this representative"
@@ -405,24 +462,35 @@ def compute_cuts(
         return ranges, notes
 
     # bisect / motif — chained cut placement across surviving peptides.
+    # cuts[] and methods[] are computed IN LOCKSTEP inside one loop so the
+    # audit-TSV / FASTA-header `cut_method` label always describes the
+    # cut that was actually used (pre-v0.36.1 the label was recomputed in
+    # a second loop with a different bisect_point in the overlap case,
+    # so the label could disagree with the actual placement).
     use_motif = spec.cut_strategy == "motif"
     cuts: list[int] = []
-    overlap_flagged = False
+    methods = ["n-term"]
+    overlap_note_emitted = False
     for k in range(len(surviving_idx) - 1):
         a_span = peptide_spans[surviving_idx[k]][1]
         b_span = peptide_spans[surviving_idx[k + 1]][1]
+        pep = peptide_spans[surviving_idx[k + 1]][0]
         a_to = a_span[1]
         b_from = b_span[0]
-        if b_from <= a_to and not overlap_flagged:
+        overlap_here = b_from <= a_to
+        if overlap_here:
             # Adjacent token footprints overlap on the parent — bisect
             # on the midpoint of their centres so we don't pin a sharp
-            # boundary at a contested residue.
-            notes.append(
-                f"footprints for adjacent peptides overlap on the parent "
-                f"(a_to={a_to}, b_from={b_from}); cut placed at the "
-                f"midpoint of the footprint centres"
-            )
-            overlap_flagged = True
+            # boundary at a contested residue. Every overlap pair gets
+            # this treatment (pre-v0.36.1 only the first did); the audit
+            # note is gated separately so the user isn't spammed.
+            if not overlap_note_emitted:
+                notes.append(
+                    "footprints for adjacent peptides overlap on the "
+                    "parent; cut(s) placed at the midpoint of the "
+                    "footprint centres"
+                )
+                overlap_note_emitted = True
             mid_centre = (
                 _peptide_span_midpoint(a_span) + _peptide_span_midpoint(b_span)
             ) / 2.0
@@ -432,33 +500,19 @@ def compute_cuts(
         bisect_point = max(2, min(n_aa, bisect_point))
 
         snapped: Optional[int] = None
-        if use_motif:
-            motif = peptide_spans[surviving_idx[k + 1]][0].cleavage_motif
-            if motif:
-                snapped = _find_motif_snap(
-                    protein_seq, bisect_point, motif, spec.motif_window_aa,
-                )
-        cuts.append(snapped if snapped is not None else bisect_point)
-
-    starts_iter = [1] + cuts
-    ends_iter = [c - 1 for c in cuts] + [n_aa]
-
-    methods = ["n-term"]
-    for k in range(len(surviving_idx) - 1):
-        pep = peptide_spans[surviving_idx[k + 1]][0]
-        a_to = peptide_spans[surviving_idx[k]][1][1]
-        b_from = peptide_spans[surviving_idx[k + 1]][1][0]
-        bisect_point = int(round((a_to + b_from) / 2.0))
-        snapped: Optional[int] = None
         if use_motif and pep.cleavage_motif:
             snapped = _find_motif_snap(
                 protein_seq, bisect_point, pep.cleavage_motif,
                 spec.motif_window_aa,
             )
+        cuts.append(snapped if snapped is not None else bisect_point)
         if snapped is not None and pep.cleavage_motif:
             methods.append(f"motif:{pep.cleavage_motif}")
         else:
             methods.append("bisect")
+
+    starts_iter = [1] + cuts
+    ends_iter = [c - 1 for c in cuts] + [n_aa]
 
     for slot, idx in enumerate(surviving_idx):
         f, t = starts_iter[slot], ends_iter[slot]

@@ -32,8 +32,20 @@ from repseq.polyprotein.slicer import (
 # Fixtures: producer-schema-shaped HMM hits + a synthetic polyprotein CDS.
 # ---------------------------------------------------------------------------
 
-def _hit(target: str, ali_from: int, ali_to: int, evalue: float = 1e-30) -> dict:
-    """Build a synthetic HMM hit matching the real ``_parse_domtblout`` schema."""
+def _hit(
+    target: str,
+    ali_from: int,
+    ali_to: int,
+    evalue: float = 1e-30,
+    passing: bool = True,
+) -> dict:
+    """Build a synthetic HMM hit matching the real ``_parse_domtblout`` schema.
+
+    ``passing`` mirrors the per-hit flag set by ``cli.py:_run_hmm_qc`` in
+    production. Defaults to True so existing fixtures keep their meaning;
+    set False in regression tests that exercise the spurious-low-confidence-
+    hit case the slicer now filters out.
+    """
     return {
         "target": target,
         "ali_from": ali_from,
@@ -41,6 +53,7 @@ def _hit(target: str, ali_from: int, ali_to: int, evalue: float = 1e-30) -> dict
         "dom_evalue": evalue,
         "evalue": evalue,
         "ali_span": ali_to - ali_from + 1,
+        "passing": passing,
     }
 
 
@@ -218,8 +231,12 @@ class TestSliceEdgeCases:
         # VP2 and VP1 are now adjacent (VP3 hole closed).
         assert sliced[1].range_aa_to + 1 == sliced[3].range_aa_from
 
-    def test_out_of_order_hits_fail_spec(self):
-        # P_VP2 hits AFTER P_VP3 — order violated.
+    def test_out_of_order_hits_rejected_at_parent_identification(self):
+        # P_VP2 hits AFTER P_VP3 — declared order is violated on the CDS.
+        # v0.36.1+: identify_parent_cds catches the order violation
+        # before this CDS is elected as parent, so the spec fails with
+        # no_parent_cds (more honest than the old out_of_order, which
+        # implied "we elected a parent but then something went wrong").
         seq = "Z" * 200
         parent = _polyprotein_cds(seq, [
             _hit("P_VP4", 1, 50),
@@ -230,9 +247,43 @@ class TestSliceEdgeCases:
         spec = _picornavirus_spec("bisect")
         _, sliced = slice_polyprotein([parent], spec)
 
-        # Every peptide should land in the out_of_order failure state.
-        assert all(s.status == "out_of_order" for s in sliced)
+        assert all(s.status == "no_parent_cds" for s in sliced)
         assert all(s.sequence == "" for s in sliced)
+        assert all(s.parent_protein_id is None for s in sliced)
+
+    def test_compute_cuts_out_of_order_defensive_guard(self):
+        # Defense-in-depth: even if a parent CDS slipped through with
+        # out-of-order spans (shouldn't happen post-v0.36.1, but the
+        # check stays in place), compute_cuts itself flags it.
+        from repseq.polyprotein.slicer import compute_cuts
+
+        spec = _picornavirus_spec("bisect")
+        peptide_spans = [
+            (spec.peptides[0], (1, 50)),
+            (spec.peptides[1], (110, 150)),  # VP2 at 110
+            (spec.peptides[2], (60, 100)),   # VP3 at 60 — earlier than VP2
+            (spec.peptides[3], (160, 200)),
+        ]
+        ranges, notes = compute_cuts("Z" * 200, spec, peptide_spans)
+        assert all(r is None for r in ranges)
+        assert any("out of N-to-C order" in n for n in notes)
+
+    def test_compute_cuts_equal_starts_also_rejected(self):
+        # Two peptides with identical span starts are biologically
+        # nonsensical (two different peptides cannot start at the same
+        # residue). v0.36.1+ uses `>=` instead of `>` so this fails too.
+        from repseq.polyprotein.slicer import compute_cuts
+
+        spec = _picornavirus_spec("bisect")
+        peptide_spans = [
+            (spec.peptides[0], (1, 50)),
+            (spec.peptides[1], (60, 100)),
+            (spec.peptides[2], (60, 120)),   # same start as VP2
+            (spec.peptides[3], (160, 200)),
+        ]
+        ranges, notes = compute_cuts("Z" * 200, spec, peptide_spans)
+        assert all(r is None for r in ranges)
+        assert any("out of N-to-C order" in n for n in notes)
 
     def test_overlap_flagged_but_sequences_still_emitted(self):
         # P_VP2 hit overlaps P_VP3 hit by 5 residues — should set overlap status,
@@ -249,6 +300,187 @@ class TestSliceEdgeCases:
         # At least one peptide flagged overlap; sequences still produced.
         assert any(s.status == "overlap" for s in sliced)
         assert all(s.sequence for s in sliced if s.status in ("ok", "overlap"))
+
+    def test_method_label_matches_cut_in_overlap_case(self):
+        # Regression for the lockstep bug (pre-v0.36.1): when adjacent
+        # peptide spans overlap, the first loop placed the cut at
+        # midpoint-of-centres but the second loop recomputed the method
+        # label using `(a_to + b_from)/2`, so a motif snap that fired in
+        # one search window but not the other produced a method label
+        # that disagreed with the actual cut location.
+        from repseq.polyprotein.slicer import compute_cuts
+
+        # Place an "LQ" motif at position 245 (inside the first-loop's
+        # midpoint-of-centres window at 245) and NONE near the second
+        # loop's old (200+180)/2=190 bisect point. Pre-fix: actual cut
+        # snaps to 247, label says "bisect" (motif not found at 190).
+        # Post-fix: label says "motif:LQ" matching the actual cut.
+        seq = list("Z" * 500)
+        seq[244:246] = list("LQ")  # 0-based 244-245 = 1-based 245-246
+        seq_str = "".join(seq)
+        spec = PolyproteinSpec(
+            name="test",
+            peptides=[
+                PeptideSpec(name="P1", hmms=["A"]),
+                PeptideSpec(name="P2", hmms=["B"], cleavage_motif="LQ"),
+            ],
+            cut_strategy="motif",
+            motif_window_aa=15,
+        )
+        peptide_spans = [
+            (spec.peptides[0], (100, 200)),
+            (spec.peptides[1], (180, 500)),  # overlaps by 21 aa
+        ]
+        ranges, notes = compute_cuts(seq_str, spec, peptide_spans)
+        assert ranges[0] is not None and ranges[1] is not None
+        # The motif snap fired in the (midpoint-of-centres) window, so
+        # the cut and the label must both reflect it.
+        assert ranges[1][2] == "motif:LQ"
+        # And the actual peptide 2 must start at the motif-snapped
+        # position (just after "LQ" at 245-246, so position 247).
+        assert ranges[1][0] == 247
+
+    def test_every_overlap_gets_midpoint_of_centres(self):
+        # Regression for the "only first overlap handled" bug: pre-v0.36.1
+        # only the FIRST overlap in a spec used midpoint-of-centres;
+        # subsequent overlaps fell through to (a_to + b_from)/2, which
+        # for overlapping spans can produce a bisect point INSIDE
+        # peptide A, chopping it short.
+        from repseq.polyprotein.slicer import compute_cuts
+
+        spec = PolyproteinSpec(
+            name="test",
+            peptides=[
+                PeptideSpec(name="P1", hmms=["A"]),
+                PeptideSpec(name="P2", hmms=["B"]),
+                PeptideSpec(name="P3", hmms=["C"]),
+            ],
+            cut_strategy="bisect",
+        )
+        # Three peptides with TWO overlap pairs:
+        # P1 = (100, 300), P2 = (250, 500), P3 = (450, 700)
+        # Pair 1 overlaps by 51 aa; pair 2 overlaps by 51 aa.
+        peptide_spans = [
+            (spec.peptides[0], (100, 300)),
+            (spec.peptides[1], (250, 500)),
+            (spec.peptides[2], (450, 700)),
+        ]
+        ranges, _ = compute_cuts("Z" * 800, spec, peptide_spans)
+        # First cut: midpoint(centres of P1, P2) = midpoint(200, 375) = 288
+        # Second cut: midpoint(centres of P2, P3) = midpoint(375, 575) = 475
+        # Pre-fix the second cut was (500+450)/2 = 475 — happens to match
+        # here, so make the asymmetry more pronounced:
+        peptide_spans = [
+            (spec.peptides[0], (50, 400)),    # centre 225
+            (spec.peptides[1], (350, 600)),   # centre 475 — overlaps P1
+            (spec.peptides[2], (550, 700)),   # centre 625 — overlaps P2
+        ]
+        ranges, _ = compute_cuts("Z" * 800, spec, peptide_spans)
+        # Cut 1: midpoint(225, 475) = 350
+        # Cut 2: midpoint(475, 625) = 550  (vs pre-fix (600+550)/2 = 575)
+        # Verify cut 2 used midpoint-of-centres, not (a_to+b_from)/2.
+        # P2's end (cut2 - 1) and P3's start (cut2) should reflect 550,
+        # not 575.
+        assert ranges[1] is not None and ranges[2] is not None
+        cut2 = ranges[2][0]
+        assert cut2 == 550, (
+            f"Cut 2 should be midpoint-of-centres 550 (every overlap "
+            f"gets midpoint-of-centres post-v0.36.1), got {cut2}"
+        )
+
+    def test_walk_tiebreaker_prefers_best_evalue_when_ali_to_ties(self):
+        # When two passing hits for the same HMM share the same ali_to
+        # (the leftmost-by-position criterion), the walk should pick
+        # the one with the better (lower) dom_evalue. Pre-v0.36.1 this
+        # was untiebroken and depended on dict-iteration order.
+        from repseq.polyprotein.slicer import _satisfying_span_for_token
+
+        seq = "Z" * 500
+        hits = [
+            # Two A hits with the same ali_to=100 but different E-values.
+            # Both are passing. The lower-E one should anchor the walk.
+            _hit("A", 50, 100, evalue=1e-3),
+            _hit("A", 60, 100, evalue=1e-30),  # much better E
+            _hit("B", 200, 300),
+        ]
+        # Pick should give us span using the better-E A hit (ali_from=60).
+        span = _satisfying_span_for_token(hits, "A--B")
+        assert span is not None
+        # span_from = min(ali_from of chosen hits) = min(60, 200) = 60.
+        # Pre-fix: ali_to-only sort with no E-value tiebreak could pick
+        # either A hit; post-fix, dom_evalue tiebreak prefers the 1e-30
+        # one (ali_from=60).
+        assert span[0] == 60, (
+            f"Walk tiebreaker should prefer the better-E A hit "
+            f"(ali_from=60), got span_from={span[0]}"
+        )
+
+    def test_identify_parent_cds_rejects_chimeric_out_of_order(self):
+        # A CDS where every peptide HMM hits but they're scrambled
+        # (e.g. a chimeric / contaminated assembly) used to be elected
+        # as parent and then fail at compute_cuts with out_of_order.
+        # Post-v0.36.1 identify_parent_cds catches the order violation
+        # itself and returns None, so the slicer produces a clean
+        # no_parent_cds audit row.
+        seq = "Z" * 500
+        # Spec declared order: VP4, VP2, VP3, VP1
+        # CDS reality: VP4, VP3, VP2, VP1 (VP3 and VP2 swapped)
+        parent = _polyprotein_cds(seq, [
+            _hit("P_VP4", 1, 50),
+            _hit("P_VP3", 60, 100),
+            _hit("P_VP2", 110, 150),
+            _hit("P_VP1", 160, 200),
+        ])
+        spec = _picornavirus_spec("bisect")
+        result = identify_parent_cds([parent], spec)
+        assert result is None
+
+    def test_spurious_non_passing_hits_do_not_anchor_multidomain_walk(self):
+        # Regression for the coronavirus-NSP15 case: a multidomain peptide
+        # token like CoV_NSP15_N--CoV_NSP15_M--CoV_NSP15_C used to be
+        # anchored by the LEFTMOST hit of the first HMM, even when that
+        # hit was a spurious low-confidence match miles away from the real
+        # peptide location. The walk would then pick real downstream
+        # hits, and the union span (min ali_from .. max ali_to) would
+        # engulf most of the polyprotein, fail the N->C order check
+        # against earlier peptides, and mark the whole rep out_of_order.
+        # Fix: the slicer filters by the per-hit `passing` flag (set by
+        # cli.py:_run_hmm_qc) so non-passing spurious hits are ignored.
+        seq = "Z" * 7000
+        parent = _polyprotein_cds(seq, [
+            # NSP14: real, passing
+            _hit("CoV_ExoN", 5500, 6000),
+            # NSP15: SPURIOUS early hit on the first HMM of the
+            # multidomain token (non-passing — should be filtered out).
+            _hit("CoV_NSP15_N", 130, 200, evalue=1.0, passing=False),
+            # NSP15: REAL passing hits, all C-terminal.
+            _hit("CoV_NSP15_N", 6010, 6100),
+            _hit("CoV_NSP15_M", 6110, 6250),
+            _hit("CoV_NSP15_C", 6260, 6400),
+            # NSP16: real, passing
+            _hit("CoV_Methyltr_2", 6450, 6700),
+        ])
+        spec = PolyproteinSpec(
+            name="ORF1ab",
+            peptides=[
+                PeptideSpec(name="NSP14", hmms=["CoV_ExoN"]),
+                PeptideSpec(
+                    name="NSP15",
+                    hmms=["CoV_NSP15_N--CoV_NSP15_M--CoV_NSP15_C"],
+                ),
+                PeptideSpec(name="NSP16", hmms=["CoV_Methyltr_2"]),
+            ],
+            cut_strategy="bisect",
+            min_peptides_hit=2,
+        )
+        _, sliced = slice_polyprotein([parent], spec)
+        # With the fix, NSP15's anchor is the real passing hit at 6010,
+        # not the spurious one at 130 — order check passes, every
+        # peptide slices ok.
+        assert [s.status for s in sliced] == ["ok", "ok", "ok"]
+        nsp15 = sliced[1]
+        # Span starts inside the real NSP15 region, not at the spurious 130.
+        assert nsp15.range_aa_from > 6000
 
 
 # ---------------------------------------------------------------------------
