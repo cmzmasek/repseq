@@ -18,8 +18,13 @@ from .models import RunResult
 from .output.report import (
     write_all_reports,
     write_nucleotide_taxonomic_report,
+    write_nucleotide_taxonomic_report_tsv,
+    write_polyprotein_taxonomic_report,
+    write_polyprotein_taxonomic_report_tsv,
     write_protein_taxonomic_report,
+    write_protein_taxonomic_report_tsv,
     write_taxonomic_report,
+    write_taxonomic_report_tsv,
 )
 from .output.writer import write_results
 from .clustering.marker import populate_protein_sequences
@@ -1623,6 +1628,18 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
             out_files.append(tax_path)
         except Exception as exc:
             click.echo(f"[taxonomic report skipped] {exc}", err=True)
+        try:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            tax_tsv = out_dir / f"{prefix}_taxonomic_report.tsv"
+            if write_taxonomic_report_tsv(
+                pre_clustering_sequences,
+                result.representatives,
+                path=tax_tsv,
+            ):
+                out_files.append(tax_tsv)
+        except Exception as exc:
+            click.echo(f"[taxonomic report TSV skipped] {exc}", err=True)
     # Per-protein coverage report — for each declared marker /
     # extra_protein, the fraction of isolates / sequences carrying it
     # per taxonomic rank, plus length statistics. Only emitted when at
@@ -1643,6 +1660,19 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
                 out_files.append(pr_path)
         except Exception as exc:
             click.echo(f"[protein taxonomic report skipped] {exc}", err=True)
+        try:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            pr_tsv = out_dir / f"{prefix}_protein_taxonomic_report.tsv"
+            if write_protein_taxonomic_report_tsv(
+                pre_clustering_sequences,
+                result.representatives,
+                cfg,
+                path=pr_tsv,
+            ):
+                out_files.append(pr_tsv)
+        except Exception as exc:
+            click.echo(f"[protein taxonomic report TSV skipped] {exc}", err=True)
     # Per-rank NT length statistics: per-segment lengths + a `total`
     # column (segmented) or a single `genome` column (non-segmented).
     # Always-on; soft-fails so a render bug never voids the selection.
@@ -1661,6 +1691,53 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
                 out_files.append(nt_path)
         except Exception as exc:
             click.echo(f"[nucleotide taxonomic report skipped] {exc}", err=True)
+        try:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            nt_tsv = out_dir / f"{prefix}_nucleotide_taxonomic_report.tsv"
+            if write_nucleotide_taxonomic_report_tsv(
+                pre_clustering_sequences,
+                result.representatives,
+                cfg,
+                segmented=bool(complete_isolates),
+                path=nt_tsv,
+            ):
+                out_files.append(nt_tsv)
+        except Exception as exc:
+            click.echo(f"[nucleotide taxonomic report TSV skipped] {exc}", err=True)
+    # Per-peptide coverage + length report for declared polyprotein
+    # specs — the sliced-peptide analogue of the protein taxonomic
+    # report. Only emitted when at least one `polyprotein:` spec is
+    # declared AND the HMM tier ran; soft-fail so a render bug never
+    # voids a real selection.
+    if pre_clustering_sequences is not None:
+        try:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            pp_path = out_dir / f"{prefix}_polyprotein_taxonomic_report.txt"
+            if write_polyprotein_taxonomic_report(
+                pre_clustering_sequences,
+                result.representatives,
+                cfg,
+                segmented=bool(complete_isolates),
+                path=pp_path,
+            ):
+                out_files.append(pp_path)
+        except Exception as exc:
+            click.echo(f"[polyprotein taxonomic report skipped] {exc}", err=True)
+        try:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            pp_tsv = out_dir / f"{prefix}_polyprotein_taxonomic_report.tsv"
+            if write_polyprotein_taxonomic_report_tsv(
+                pre_clustering_sequences,
+                result.representatives,
+                cfg,
+                path=pp_tsv,
+            ):
+                out_files.append(pp_tsv)
+        except Exception as exc:
+            click.echo(f"[polyprotein taxonomic report TSV skipped] {exc}", err=True)
     # Methods-section starter — written after every successful run so
     # a bench scientist can copy it into a paper. Soft-fail (one stderr
     # line) so a render bug never voids a real selection.

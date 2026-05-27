@@ -39,6 +39,8 @@ the existing ``--plot`` behaviour.
 from __future__ import annotations
 
 import logging
+import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -510,6 +512,11 @@ def _finalize_tree(
 
     rooting_cfg = (cfg or {}).get("phylo", {}).get("rooting", {}) or {}
     rooting_method_req = rooting_cfg.get("method", "auto")
+    print(
+        f"[phylo] starting rooting (method={rooting_method_req})",
+        file=sys.stderr,
+    )
+    t_root = time.time()
     try:
         parsed_tree, rooting_method_used = root_tree(
             parsed_tree, reps_by_short_id, method=rooting_method_req,
@@ -520,9 +527,16 @@ def _finalize_tree(
         # Rooting is a soft step — fall back to whatever the parser gave us.
         logger.warning("[phylo] rooting failed: %s; leaving tree as parsed", exc)
         rooting_method_used = "none"
+    print(
+        f"[phylo] rooting finished ({time.time() - t_root:.1f}s, "
+        f"used={rooting_method_used})",
+        file=sys.stderr,
+    )
 
     lca_cfg = (cfg or {}).get("phylo", {}).get("lca", {}) or {}
     if lca_cfg.get("enabled", True):
+        print("[phylo] starting LCA annotation", file=sys.stderr)
+        t_lca = time.time()
         try:
             annotate_internal_nodes(
                 parsed_tree, reps_by_short_id,
@@ -533,6 +547,10 @@ def _finalize_tree(
             suppress_same_species_pairs(parsed_tree, reps_by_short_id)
         except Exception as exc:
             logger.warning("[phylo] LCA annotation failed: %s", exc)
+        print(
+            f"[phylo] LCA annotation finished ({time.time() - t_lca:.1f}s)",
+            file=sys.stderr,
+        )
 
     try:
         write_phyloxml(

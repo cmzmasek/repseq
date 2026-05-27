@@ -1710,6 +1710,522 @@ def write_protein_taxonomic_report(
     return True
 
 
+def _polyprotein_coverage_data_per_taxon(
+    seqs: list[Sequence],
+    spec,
+    rank: str,
+    overlap_tolerance: int,
+) -> tuple[dict[str, int], dict[str, list[list[int]]]]:
+    """Per-taxon coverage + length data for one polyprotein spec.
+
+    Slices every sequence under the spec and aggregates by taxon at
+    ``rank``. ``taxon_lengths[taxon][peptide_idx]`` is the list of
+    peptide AA lengths for the items that yielded a usable slice
+    (``status in {"ok", "overlap"}`` — the same statuses
+    ``write_polyprotein_outputs`` actually writes to the per-peptide
+    FASTAs, so coverage here corresponds to records on disk). Items
+    whose taxonomy lacks a value at ``rank`` are excluded, mirroring
+    ``_taxonomic_report.txt`` and the protein report.
+    """
+    from ..polyprotein import slice_polyprotein
+
+    taxon_totals: dict[str, int] = {}
+    taxon_lengths: dict[str, list[list[int]]] = {}
+    n_peptides = len(spec.peptides)
+    pep_index = {pep.name: i for i, pep in enumerate(spec.peptides)}
+
+    for seq in seqs:
+        taxon = _seq_rank_value(seq, rank)
+        if not taxon:
+            continue
+        taxon_totals[taxon] = taxon_totals.get(taxon, 0) + 1
+        if taxon not in taxon_lengths:
+            taxon_lengths[taxon] = [[] for _ in range(n_peptides)]
+        proteins = _polyprotein_proteins(seq, spec.segment)
+        if not proteins:
+            continue
+        _parent, sliced = slice_polyprotein(
+            proteins, spec, overlap_tolerance=overlap_tolerance,
+        )
+        for s in sliced:
+            if s.status not in ("ok", "overlap"):
+                continue
+            length = s.length_aa or 0
+            if not length:
+                continue
+            idx = pep_index.get(s.peptide_name)
+            if idx is None:
+                continue
+            taxon_lengths[taxon][idx].append(int(length))
+
+    return taxon_totals, taxon_lengths
+
+
+def write_polyprotein_taxonomic_report(
+    before_seqs: list[Sequence],
+    after_seqs: list[Sequence],
+    cfg: dict[str, Any],
+    segmented: bool,
+    path: Path,
+) -> bool:
+    """Write ``{prefix}_polyprotein_taxonomic_report.txt``.
+
+    Per-rank coverage + length sub-tables for the mature peptides of
+    every declared ``polyprotein:`` spec — the sliced-peptide analogue
+    of :func:`write_protein_taxonomic_report`. Each spec gets its own
+    section; columns are the declared peptides in N→C order, kept as
+    columns even when zero items carry the peptide (a declared-but-
+    never-located peptide is itself a useful audit signal).
+
+    Returns False (writes nothing) when:
+
+    * no ``polyprotein:`` spec is declared, OR
+    * the HMM tier didn't run this session (peptide HMMs can't be
+      located on any CDS — same soft-fail posture as
+      :func:`write_polyprotein_outputs`).
+
+    The picker chain (and the "what counts as covered" rule —
+    ``status in {"ok", "overlap"}``) matches the per-peptide FASTAs,
+    so a coverage hit here corresponds exactly to a record in the
+    matching artifact under ``{prefix}_polyprotein/``.
+    """
+    from ..polyprotein import collect_polyprotein_specs
+    from ..phylo.per_protein import _hmm_tier_ran, overlap_tolerance_from_cfg
+
+    specs = collect_polyprotein_specs(cfg)
+    if not specs:
+        return False
+    if not _hmm_tier_ran(cfg, after_seqs):
+        return False
+
+    pr_cfg = cfg.get("output", {}).get("protein_report", {}) or {}
+    max_breakdown = int(pr_cfg.get("max_breakdown", 20))
+    tol = overlap_tolerance_from_cfg(cfg)
+    unit = "isolates" if segmented else "sequences"
+
+    lines: list[str] = []
+    lines.append("Polyprotein taxonomic report")
+    lines.append(f"Generated: {datetime.date.today().isoformat()}")
+    lines.append(
+        f"Counting unit: {unit} "
+        f"(post-QC pool fed to clustering = {len(before_seqs)} {unit}; "
+        f"representatives = {len(after_seqs)} {unit})"
+    )
+    lines.append(
+        "Coverage cell format: <count> <%>; length cell format: "
+        "min, max, median, Q3-Q1, n (amino acids; n = number of "
+        "items contributing the length)."
+    )
+    lines.append(
+        "Coverage counts peptides with status `ok` or `overlap` — the "
+        "same statuses written to the per-peptide FASTAs under "
+        "`{prefix}_polyprotein/`. Peptides with status `missing`, "
+        "`out_of_order`, or `no_parent_cds` are not counted as covered."
+    )
+    lines.append("")
+
+    for spec in specs:
+        scope = f" (segment {spec.segment})" if spec.segment else ""
+        lines.append(f"========== {spec.name}{scope} ==========")
+        lines.append("")
+        peptide_headers = [pep.name for pep in spec.peptides]
+
+        rank_printed_any = False
+        for rank in _PROTEIN_REPORT_RANKS:
+            b_totals, b_lengths = _polyprotein_coverage_data_per_taxon(
+                before_seqs, spec, rank, overlap_tolerance=tol,
+            )
+            a_totals, a_lengths = _polyprotein_coverage_data_per_taxon(
+                after_seqs, spec, rank, overlap_tolerance=tol,
+            )
+            n_distinct = len(b_totals)
+            if n_distinct == 0:
+                continue
+            rank_printed_any = True
+            if n_distinct > max_breakdown:
+                header = (
+                    f"{rank} ({n_distinct} distinct, top {max_breakdown} by "
+                    f"member count shown):"
+                )
+            else:
+                header = f"{rank} ({n_distinct} distinct):"
+            lines.append(header)
+            lines.extend(_format_coverage_table(
+                indent="  ",
+                title=f"coverage (post-QC pool, N={sum(b_totals.values())})",
+                totals=b_totals, lengths=b_lengths,
+                spec_headers=peptide_headers,
+                max_breakdown=max_breakdown,
+            ))
+            lines.append("")
+            if a_totals:
+                lines.extend(_format_coverage_table(
+                    indent="  ",
+                    title=f"coverage (representatives, N={sum(a_totals.values())})",
+                    totals=a_totals, lengths=a_lengths,
+                    spec_headers=peptide_headers,
+                    max_breakdown=max_breakdown,
+                ))
+                lines.append("")
+            lines.extend(_format_length_table(
+                indent="  ",
+                title="peptide length statistics [min, max, median, Q3-Q1, n] (post-QC pool)",
+                totals=b_totals, lengths=b_lengths,
+                spec_headers=peptide_headers,
+                max_breakdown=max_breakdown,
+            ))
+            lines.append("")
+            if a_totals:
+                lines.extend(_format_length_table(
+                    indent="  ",
+                    title="peptide length statistics [min, max, median, Q3-Q1, n] (representatives)",
+                    totals=a_totals, lengths=a_lengths,
+                    spec_headers=peptide_headers,
+                    max_breakdown=max_breakdown,
+                ))
+                lines.append("")
+
+        if not rank_printed_any:
+            lines.append("(no taxonomy available at any rank from "
+                         "subgenus to class)")
+            lines.append("")
+
+        # Architecture readout per spec: each peptide's OR-alternatives
+        # joined with " OR " (so a bench scientist reading the report
+        # can tell at a glance what was declared as the locator for
+        # each row), plus the cleavage motif when set.
+        lines.append("== Peptide architectures ==")
+        lines.append("")
+        for pep in spec.peptides:
+            tokens = pep.hmms or []
+            joined = " OR ".join(tokens) if len(tokens) > 1 else (
+                tokens[0] if tokens else "(no HMM token declared)"
+            )
+            motif = f"  [cleavage_motif={pep.cleavage_motif}]" if pep.cleavage_motif else ""
+            lines.append(f"{pep.name}: {joined}{motif}")
+        lines.append("")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines).rstrip() + "\n")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Tidy long-format TSV companions to the four `_*_report.txt` files.
+# Shared 8-column schema across all four so a user can concat them in
+# pandas / R / Excel pivot tables and key on the `report` column to
+# distinguish sources. Rows are pure observations — one numeric per
+# row, named by `metric`. No multi-table layout, no headers, no banner
+# rows. The `.txt` files remain the primary humans-first format; these
+# `.tsv` files are the machine-readable companion.
+
+# The full canonical column set, in fixed order. Every writer below
+# emits exactly this header; downstream consumers can rely on it.
+_TIDY_TSV_COLUMNS = (
+    "report", "rank", "pool", "taxon", "taxon_count", "spec", "metric", "value",
+)
+
+
+def _emit_tidy_rows(
+    fh,
+    report: str,
+    rank: str,
+    pool: str,
+    taxon: str,
+    taxon_count: int,
+    spec: str,
+    metric_value_pairs: list[tuple[str, Any]],
+) -> None:
+    """Write one TSV row per (metric, value) pair sharing the same key.
+
+    All ints are written as decimal integers; floats are formatted to
+    four decimal places trimmed of trailing zeros so a typical
+    coverage_pct like ``91.6667`` stays exact-ish without `.0` noise
+    on round percentages. Strings (taxon names, spec names) are passed
+    through ``_tsv_safe`` to scrub embedded tabs/newlines.
+    """
+    for metric, value in metric_value_pairs:
+        if isinstance(value, float):
+            v = f"{value:.4f}".rstrip("0").rstrip(".") if value else "0"
+        elif isinstance(value, int):
+            v = str(value)
+        else:
+            v = _tsv_safe(value)
+        fh.write(
+            "\t".join([
+                _tsv_safe(report),
+                _tsv_safe(rank),
+                _tsv_safe(pool),
+                _tsv_safe(taxon),
+                str(int(taxon_count)),
+                _tsv_safe(spec),
+                _tsv_safe(metric),
+                v,
+            ]) + "\n"
+        )
+
+
+def _emit_length_rows(
+    fh,
+    report: str,
+    rank: str,
+    pool: str,
+    taxon: str,
+    taxon_count: int,
+    spec: str,
+    lengths: list[int],
+) -> None:
+    """Emit length_n and (when n>0) length_min/max/median/iqr rows.
+
+    Zero-length lists emit ``length_n=0`` and nothing else — we won't
+    fake min/max/median values for a taxon that didn't contribute any
+    length to this spec, since downstream aggregators would treat them
+    as real zeros.
+    """
+    stats = _quartile_summary(lengths)
+    if stats is None:
+        _emit_tidy_rows(
+            fh, report, rank, pool, taxon, taxon_count, spec,
+            [("length_n", 0)],
+        )
+        return
+    vmin, vmax, median, iqr, n = stats
+    _emit_tidy_rows(
+        fh, report, rank, pool, taxon, taxon_count, spec, [
+            ("length_min", vmin),
+            ("length_max", vmax),
+            ("length_median", median),
+            ("length_iqr", iqr),
+            ("length_n", n),
+        ],
+    )
+
+
+def write_taxonomic_report_tsv(
+    before_seqs: list[Sequence],
+    after_seqs: list[Sequence],
+    path: Path,
+) -> bool:
+    """Tidy long-format TSV companion to ``_taxonomic_report.txt``.
+
+    One row per (rank, pool, taxon, metric). Two metrics only:
+
+    * ``distinct_taxa`` — number of distinct populated values at that
+      rank in that pool. Emitted with ``taxon='*ALL*'`` and
+      ``taxon_count`` equal to the value.
+    * ``member_count`` — per-taxon item count (the same numbers shown
+      in the per-rank breakdown of the `.txt`). One row per
+      (rank, pool, taxon) actually populated; emits both pools for
+      every taxon seen in *either* pool (so reps-only rare survivors
+      and pool-only drops both show up).
+
+    All nine ``_TAX_RANKS`` are covered. Empty / missing rank values
+    are excluded from every count (same rule as the `.txt`).
+    """
+    before_by_rank: dict[str, Counter] = {}
+    after_by_rank: dict[str, Counter] = {}
+    for rank in _TAX_RANKS:
+        before_by_rank[rank] = Counter(
+            v for s in before_seqs if (v := _seq_rank_value(s, rank))
+        )
+        after_by_rank[rank] = Counter(
+            v for s in after_seqs if (v := _seq_rank_value(s, rank))
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("\t".join(_TIDY_TSV_COLUMNS) + "\n")
+        for rank in _TAX_RANKS:
+            nb = len(before_by_rank[rank])
+            na = len(after_by_rank[rank])
+            _emit_tidy_rows(
+                fh, "diversity", rank, "post_qc", "*ALL*", nb,
+                "_diversity", [("distinct_taxa", nb)],
+            )
+            _emit_tidy_rows(
+                fh, "diversity", rank, "reps", "*ALL*", na,
+                "_diversity", [("distinct_taxa", na)],
+            )
+            # Per-taxon member counts — union of pool keys so neither
+            # pool's exclusive members are lost.
+            names: set[str] = set(before_by_rank[rank]) | set(after_by_rank[rank])
+            for name in sorted(names):
+                nb_c = before_by_rank[rank].get(name, 0)
+                na_c = after_by_rank[rank].get(name, 0)
+                _emit_tidy_rows(
+                    fh, "diversity", rank, "post_qc", name, nb_c,
+                    "_diversity", [("member_count", nb_c)],
+                )
+                _emit_tidy_rows(
+                    fh, "diversity", rank, "reps", name, na_c,
+                    "_diversity", [("member_count", na_c)],
+                )
+    return True
+
+
+def write_protein_taxonomic_report_tsv(
+    before_seqs: list[Sequence],
+    after_seqs: list[Sequence],
+    cfg: dict[str, Any],
+    path: Path,
+) -> bool:
+    """Tidy long-format TSV companion to ``_protein_taxonomic_report.txt``.
+
+    One row per (rank, pool, taxon, spec, metric). Metrics:
+    ``coverage_count``, ``coverage_pct``, ``length_min``,
+    ``length_max``, ``length_median``, ``length_iqr``, ``length_n``.
+    Length metrics other than ``length_n`` are emitted only when at
+    least one item contributed a length (so a 0% coverage row carries
+    ``coverage_count=0, coverage_pct=0, length_n=0`` and nothing else
+    — no fake zeros that would skew downstream aggregations).
+    Returns False (writes nothing) when no protein specs are configured.
+    """
+    from ..phylo.per_protein import _hmm_tier_ran, overlap_tolerance_from_cfg
+
+    specs = _protein_report_specs(cfg)
+    if not specs:
+        return False
+
+    hmm_active = _hmm_tier_ran(cfg, after_seqs)
+    tol = overlap_tolerance_from_cfg(cfg)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("\t".join(_TIDY_TSV_COLUMNS) + "\n")
+        for rank in _PROTEIN_REPORT_RANKS:
+            b_totals, b_lengths = _coverage_data_per_taxon(
+                before_seqs, specs, hmm_active, rank, overlap_tolerance=tol,
+            )
+            a_totals, a_lengths = _coverage_data_per_taxon(
+                after_seqs, specs, hmm_active, rank, overlap_tolerance=tol,
+            )
+            for pool_label, totals, lengths in (
+                ("post_qc", b_totals, b_lengths),
+                ("reps", a_totals, a_lengths),
+            ):
+                for taxon in sorted(totals):
+                    total = totals[taxon]
+                    for i, (label, _t, _a, _s, is_cluster) in enumerate(specs):
+                        spec_name = f"{label}*" if is_cluster else label
+                        ls = lengths[taxon][i]
+                        cov_count = len(ls)
+                        cov_pct = (100.0 * cov_count / total) if total else 0.0
+                        _emit_tidy_rows(
+                            fh, "protein", rank, pool_label, taxon, total,
+                            spec_name, [
+                                ("coverage_count", cov_count),
+                                ("coverage_pct", cov_pct),
+                            ],
+                        )
+                        _emit_length_rows(
+                            fh, "protein", rank, pool_label, taxon, total,
+                            spec_name, ls,
+                        )
+    return True
+
+
+def write_polyprotein_taxonomic_report_tsv(
+    before_seqs: list[Sequence],
+    after_seqs: list[Sequence],
+    cfg: dict[str, Any],
+    path: Path,
+) -> bool:
+    """Tidy long-format TSV companion to ``_polyprotein_taxonomic_report.txt``.
+
+    Same schema as the protein tidy TSV; ``spec`` carries the
+    ``<polyprotein_name>:<peptide_name>`` composite (e.g. ``ORF1ab:NSP1``)
+    so the spec column stays a single string while still distinguishing
+    peptides across multiple specs. Same metric set + same
+    length-skipping rule (``length_n=0`` only on 0-coverage rows).
+    Returns False when no ``polyprotein:`` spec is declared OR the HMM
+    tier didn't run (parity with the `.txt` writer).
+    """
+    from ..polyprotein import collect_polyprotein_specs
+    from ..phylo.per_protein import _hmm_tier_ran, overlap_tolerance_from_cfg
+
+    specs = collect_polyprotein_specs(cfg)
+    if not specs:
+        return False
+    if not _hmm_tier_ran(cfg, after_seqs):
+        return False
+    tol = overlap_tolerance_from_cfg(cfg)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("\t".join(_TIDY_TSV_COLUMNS) + "\n")
+        for spec in specs:
+            for rank in _PROTEIN_REPORT_RANKS:
+                b_totals, b_lengths = _polyprotein_coverage_data_per_taxon(
+                    before_seqs, spec, rank, overlap_tolerance=tol,
+                )
+                a_totals, a_lengths = _polyprotein_coverage_data_per_taxon(
+                    after_seqs, spec, rank, overlap_tolerance=tol,
+                )
+                for pool_label, totals, lengths in (
+                    ("post_qc", b_totals, b_lengths),
+                    ("reps", a_totals, a_lengths),
+                ):
+                    for taxon in sorted(totals):
+                        total = totals[taxon]
+                        for i, pep in enumerate(spec.peptides):
+                            spec_name = f"{spec.name}:{pep.name}"
+                            ls = lengths[taxon][i]
+                            cov_count = len(ls)
+                            cov_pct = (100.0 * cov_count / total) if total else 0.0
+                            _emit_tidy_rows(
+                                fh, "polyprotein", rank, pool_label, taxon, total,
+                                spec_name, [
+                                    ("coverage_count", cov_count),
+                                    ("coverage_pct", cov_pct),
+                                ],
+                            )
+                            _emit_length_rows(
+                                fh, "polyprotein", rank, pool_label, taxon, total,
+                                spec_name, ls,
+                            )
+    return True
+
+
+def write_nucleotide_taxonomic_report_tsv(
+    before_seqs: list[Sequence],
+    after_seqs: list[Sequence],
+    cfg: dict[str, Any],
+    segmented: bool,
+    path: Path,
+) -> bool:
+    """Tidy long-format TSV companion to ``_nucleotide_taxonomic_report.txt``.
+
+    Length metrics only (no coverage — every passing entity carries
+    every required nucleotide unit by construction). ``spec`` is
+    ``genome`` non-segmented; ``<segment>`` / ``total`` segmented. One
+    row per (rank, pool, taxon, spec, metric).
+    """
+    segment_order = _resolve_segment_order(cfg, before_seqs)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("\t".join(_TIDY_TSV_COLUMNS) + "\n")
+        for rank in _PROTEIN_REPORT_RANKS:
+            b_totals, b_lengths, headers = _nucleotide_lengths_per_taxon(
+                before_seqs, rank, segmented, segment_order,
+            )
+            a_totals, a_lengths, _ = _nucleotide_lengths_per_taxon(
+                after_seqs, rank, segmented, segment_order,
+            )
+            for pool_label, totals, lengths in (
+                ("post_qc", b_totals, b_lengths),
+                ("reps", a_totals, a_lengths),
+            ):
+                for taxon in sorted(totals):
+                    total = totals[taxon]
+                    for i, spec_name in enumerate(headers):
+                        ls = lengths[taxon][i]
+                        _emit_length_rows(
+                            fh, "nucleotide", rank, pool_label, taxon, total,
+                            spec_name, ls,
+                        )
+    return True
+
+
 def _nucleotide_lengths_per_taxon(
     seqs: list[Sequence],
     rank: str,

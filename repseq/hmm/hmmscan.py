@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -62,6 +64,12 @@ def scan(
             str(db_path),
             str(qfa),
         ]
+        print(
+            f"[hmm] starting hmmscan ({len(queries)} queries, "
+            f"--cpu {max(0, threads)})",
+            file=sys.stderr,
+        )
+        t0 = time.time()
         proc = subprocess.run(argv, capture_output=True, text=True)
         if proc.returncode != 0:
             raise HMMScanError(
@@ -69,6 +77,10 @@ def scan(
                 f"stderr: {proc.stderr.strip()}\n"
                 f"stdout: {proc.stdout.strip()}"
             )
+        print(
+            f"[hmm] hmmscan finished ({time.time() - t0:.1f}s)",
+            file=sys.stderr,
+        )
         return _parse_domtblout(out)
 
 

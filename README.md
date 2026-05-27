@@ -227,6 +227,10 @@ your FASTA file(s)
     • taxonomic diversity report              →  {prefix}_taxonomic_report.txt
     • per-marker coverage + AA length stats   →  {prefix}_protein_taxonomic_report.txt
     • per-rank NT length stats                →  {prefix}_nucleotide_taxonomic_report.txt
+    • per-peptide coverage + AA length stats  →  {prefix}_polyprotein_taxonomic_report.txt
+                                                  (when polyprotein: declared)
+    • tidy TSV companions to all 4 reports    →  {prefix}_*_taxonomic_report.tsv
+                                                  (8-col tidy schema; Excel-pivot / R-pandas friendly)
     • Methods-section starter                 →  {prefix}_summary.md
     • plain-text run log                      →  {prefix}_run.log
     • (optional) UMAP/MDS clustering plot                        (--plot)
@@ -280,6 +284,8 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_taxonomic_report.txt` | every run | Per-rank diversity table: distinct taxa before vs after clustering. |
 | `{prefix}_protein_taxonomic_report.txt` | any run with `cluster_protein` / `segment_markers` / `extra_protein` declared | Per-rank protein coverage + AA length statistics (v0.22.0). |
 | `{prefix}_nucleotide_taxonomic_report.txt` | every run | Per-rank NT length statistics: per-segment + `total` (segmented) or single `genome` column (non-segmented). v0.23.0. |
+| `{prefix}_polyprotein_taxonomic_report.txt` | any run with `polyprotein:` declared and HMM tier active | Per-rank peptide coverage + AA length statistics (one column per declared peptide of each spec) — sliced-peptide analogue of `_protein_taxonomic_report.txt`. v0.35.0. |
+| `{prefix}_taxonomic_report.tsv`, `_protein_taxonomic_report.tsv`, `_nucleotide_taxonomic_report.tsv`, `_polyprotein_taxonomic_report.tsv` | parallel to the matching `.txt` reports | **Machine-readable tidy long-format TSV** companions (8-column schema: `report, rank, pool, taxon, taxon_count, spec, metric, value`). Excel-pivot / R-pandas friendly. v0.35.0. |
 | `{prefix}_clustering.png` | only with `--plot` | Diagnostic scatter of the clustering. |
 | `{prefix}_msa.fasta`, `_tree.nwk`, `_tree.xml`, `_tree_id_map.tsv` | only with `--phylo` | Alignment + tree + name mapping. |
 | `{prefix}_partition.nex`, `_msa_<family>.fasta` | `--phylo`, protein + IQ-TREE | NEXUS partition file + per-family alignments (partitioned-supermatrix tree). |
@@ -818,6 +824,107 @@ Use it for: catching a representative set that's lost length
 distribution against the pool — a frequent and easy-to-miss artifact
 when clustering at an aggressive identity threshold or when one
 sub-clade is over-represented by short submissions.
+
+#### `{prefix}_polyprotein_taxonomic_report.txt` — per-peptide coverage + length (v0.35.0+)
+
+The **sliced-peptide analogue** of
+`_protein_taxonomic_report.txt` — only emitted when at least one
+`clustering.polyprotein:` / `virus.polyprotein:` spec is declared and
+the HMM tier is active (the same gate as the per-peptide FASTAs under
+`{prefix}_polyprotein/`).
+
+One H2 section per declared polyprotein spec
+(`========== ORF1ab ==========`). Within each section, columns are the
+spec's declared peptides in N→C order — and **every declared peptide
+stays as a column even if no item carries it**: a 0% coverage row for
+a peptide you declared is itself a useful audit signal (it tells you
+that on this dataset the slicer never located that peptide on any
+parent CDS).
+
+For each rank from `subgenus` to `class` (same ladder as the protein
+report, same `output.protein_report.max_breakdown` top-N truncation),
+four sub-tables are written:
+
+1. **Coverage (post-QC pool)** — cells are `<count> <pct>%`: how many
+   isolates/sequences in that taxon had a peptide successfully sliced
+   from the polyprotein parent CDS.
+2. **Coverage (representatives)** — same, restricted to the final
+   selected set.
+3. **Peptide length statistics (post-QC pool)** — cells are
+   `min, max, median, Q3-Q1, n` in amino acids on the sliced peptide
+   sequence.
+4. **Peptide length statistics (representatives)** — same on the reps.
+
+A trailing `== Peptide architectures ==` block per spec lists each
+peptide's HMM token alternatives (joined with `OR` when more than one)
+and its `cleavage_motif:` when set, so the Methods section of a paper
+can quote the locator for each peptide verbatim.
+
+**What counts as "covered":** peptides with `status` of `ok` or
+`overlap` in the per-spec audit TSV — the **same statuses that produce
+records in the per-peptide FASTAs**. Peptides with status `missing`,
+`out_of_order`, or `no_parent_cds` are not counted as covered; check
+`{prefix}_polyprotein/{prefix}_<spec>_peptides.tsv` to see why an
+individual representative fell into each bucket.
+
+Use it for: spotting genus-specific peptide loss in a polyprotein
+(e.g. coronavirus NSP1 silently dropping out of one
+subgenus — non-homologous between alpha- and beta-CoV, easy to miss
+in the per-isolate audit, immediately visible here as 0% in one row
+and 100% in another).
+
+#### `{prefix}_*_taxonomic_report.tsv` — tidy long-format companions (v0.35.0+)
+
+Each of the four `_*_taxonomic_report.txt` files above (diversity,
+protein, nucleotide, polyprotein) is accompanied by a **machine-readable
+tidy long-format TSV** with the same basename and `.tsv` extension.
+These are designed to drop straight into Excel pivot tables, R
+(`readr::read_tsv` + `tidyr`), pandas, or any other analysis tool —
+one row per observation, no multi-table layout, no header banners.
+
+All four TSVs share one canonical 8-column schema, so they can be
+concatenated and keyed on the `report` column:
+
+| column | values |
+| --- | --- |
+| `report` | `diversity`, `protein`, `nucleotide`, `polyprotein` |
+| `rank` | `species`, `subgenus`, `genus`, …, `class` (the 9 `_TAX_RANKS`) |
+| `pool` | `post_qc` (the input pool fed to clustering) or `reps` (the elected representatives) |
+| `taxon` | taxon name at that rank (e.g. `Alphacoronavirus`); `*ALL*` for rank-level diversity rows |
+| `taxon_count` | number of items in that (rank, pool, taxon) cell — the denominator of coverage_pct |
+| `spec` | marker / extra protein name (cluster-driving markers carry a trailing `*`, matching the `.txt`); `<polyprotein_name>:<peptide_name>` for polyprotein rows (e.g. `ORF1ab:NSP1`); `genome` / `<segment_name>` / `total` for nucleotide rows; `_diversity` for diversity rows |
+| `metric` | one of: `distinct_taxa`, `member_count`, `coverage_count`, `coverage_pct`, `length_min`, `length_max`, `length_median`, `length_iqr`, `length_n` |
+| `value` | numeric; integers as integers, percentages with up to 4 decimals (trailing zeros trimmed, so `100.0%` is written `100`) |
+
+**Excel:** Data → From Text/CSV → tab delimiter → Insert →
+PivotTable. Then drag `taxon` to rows, `metric` to columns, `value` to
+the cell aggregator — you get any wide view the `.txt` showed and
+more.
+
+**R / pandas:**
+```r
+library(tidyverse)
+df <- read_tsv("coronavirus_protein_taxonomic_report.tsv")
+df %>% filter(rank == "genus", pool == "reps", metric == "coverage_pct")
+```
+```python
+import pandas as pd
+df = pd.read_csv("coronavirus_polyprotein_taxonomic_report.tsv", sep="\t")
+df.query("metric == 'length_median' and pool == 'reps'")
+```
+
+**Zero-coverage handling.** When a marker / peptide / segment is
+absent from a taxon, the row emits `coverage_count=0,
+coverage_pct=0, length_n=0` and **no other length metrics** — we
+won't fabricate `length_min`/`length_max`/`length_median` for an empty
+distribution, since downstream aggregators would treat them as real
+zeros and skew averages. Filter on `length_n > 0` before computing
+across-taxon length summaries.
+
+The architecture / banner sections of the `.txt` reports (HMM marker
+architectures, peptide architectures, header preamble) are humans-only
+and have no TSV equivalent — consult the matching `.txt` when you need
+to know which HMM tokens defined a `spec`.
 
 ### Diagnostic plot
 
