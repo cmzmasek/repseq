@@ -481,6 +481,14 @@ def test_render_summary_protein_alphabet_described(make_seq, tmp_path):
     assert "marker-protein sequences" in md
 
 
+def test_render_summary_concatenate_markers_described(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["clustering"]["concatenate_markers"] = True
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "concatenated marker-protein sequences" in md
+    assert "concatenate_markers: true" in md
+
+
 def test_render_summary_nucleotide_alphabet_described(make_seq, tmp_path):
     cfg = _base_cfg(tmp_path)
     cfg["clustering"]["alphabet_for_clustering"] = "nucleotide"

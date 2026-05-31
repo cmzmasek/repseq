@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from repseq.clustering.marker import (
     populate_protein_sequences,
+    select_concatenated_markers,
     select_marker_protein,
 )
 from repseq.models import QCReport
@@ -137,3 +138,45 @@ def test_populate_drops_sequences_with_no_marker(make_seq):
     assert kept == [a]
     assert report.removed_proteins == 2
     assert all("no_marker_protein_for_clustering" in d["reason"] for d in report.details)
+
+
+# ---------------------------------------------------------------------------
+# select_concatenated_markers / concatenate=True (multi-marker clustering)
+# ---------------------------------------------------------------------------
+
+def test_select_concatenated_markers_picks_one_per_spec_in_order():
+    proteins = [
+        _cds("spike glycoprotein", "S" * 1200, protein_id="P_S"),
+        _cds("nucleocapsid", "N" * 400, protein_id="P_N"),
+        _cds("membrane", "M" * 220, protein_id="P_M"),
+    ]
+    markers, failure = select_concatenated_markers(
+        proteins, ["spike", "nucleocapsid"]
+    )
+    assert failure is None
+    # One CDS per spec, in declared spec order (spike then nucleocapsid).
+    assert [m["protein_id"] for m in markers] == ["P_S", "P_N"]
+
+
+def test_populate_concatenate_joins_markers_in_spec_order(make_seq):
+    a = make_seq("a", "ACGT")
+    a.proteins = [
+        _cds("spike glycoprotein", "S" * 5, protein_id="P_S"),
+        _cds("nucleocapsid", "N" * 3, protein_id="P_N"),
+    ]
+    kept = populate_protein_sequences(
+        [a], marker_specs=["spike", "nucleocapsid"], concatenate=True
+    )
+    assert kept == [a]
+    # Spike first, Nucleocapsid second — declared spec order.
+    assert a.protein_sequence == "SSSSS" + "NNN"
+    # Both contributing CDS ids are recorded.
+    assert a.marker_protein_ids == ["P_S", "P_N"]
+
+
+def test_populate_concatenate_single_spec_matches_single_marker(make_seq):
+    """One spec ⇒ concat string is identical to single-marker mode."""
+    a = make_seq("a", "ACGT")
+    a.proteins = [_cds("spike", "S" * 5, protein_id="P_S")]
+    populate_protein_sequences([a], marker_specs=["spike"], concatenate=True)
+    assert a.protein_sequence == "SSSSS"

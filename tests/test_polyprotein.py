@@ -208,8 +208,11 @@ class TestSliceEdgeCases:
         assert all(s.status == "no_parent_cds" for s in sliced)
         assert all(s.sequence == "" for s in sliced)
 
-    def test_missing_peptide_skipped_neighbours_extend(self):
-        # Drop the VP3 hit; VP2 and VP1 should still slice cleanly.
+    def test_missing_peptide_leaves_unassigned_gap(self):
+        # Drop the VP3 hit; VP2 and VP1 should still slice cleanly but
+        # NOT extend across VP3's territory (v0.37.0+ behaviour). VP2's
+        # C-side stays at its HMM hit's ali_to and VP1's N-side stays at
+        # its HMM hit's ali_from — the gap between them is unassigned.
         seq = "A" * 50 + "LQ" + "B" * 50 + "LQ" + "C" * 50 + "LQ" + "D" * 41
         parent = _polyprotein_cds(seq, [
             _hit("P_VP4", 1, 50),
@@ -228,8 +231,90 @@ class TestSliceEdgeCases:
         for i in (0, 1, 3):
             assert sliced[i].status == "ok"
             assert sliced[i].sequence
-        # VP2 and VP1 are now adjacent (VP3 hole closed).
-        assert sliced[1].range_aa_to + 1 == sliced[3].range_aa_from
+        # VP2's C-side stays at its HMM hit (103). VP1's N-side stays at
+        # its HMM hit (159). The 104..158 gap is unassigned to either.
+        assert sliced[1].range_aa_to == 103
+        assert sliced[3].range_aa_from == 159
+        # VP1's N-side method is hit-boundary because its predecessor in
+        # spec (VP3) is missing.
+        assert sliced[3].cut_method_actual == "hit-boundary"
+
+    def test_missing_leading_peptide_does_not_let_successor_extend_to_n_term(self):
+        # VP4 missing; VP2 (now the first surviving) must NOT extend to
+        # AA 1 — it keeps its HMM-hit start (53). Pre-v0.37.0 the first
+        # surviving peptide always started at AA 1, which on a real
+        # polyprotein would absorb the missing peptide's territory.
+        seq = "A" * 50 + "LQ" + "B" * 50 + "LQ" + "C" * 50 + "LQ" + "D" * 41
+        parent = _polyprotein_cds(seq, [
+            # P_VP4 missing
+            _hit("P_VP2", 53, 103),
+            _hit("P_VP3", 106, 156),
+            _hit("P_VP1", 159, 197),
+        ])
+        spec = _picornavirus_spec("bisect")
+        _, sliced = slice_polyprotein([parent], spec)
+
+        assert sliced[0].status == "missing"  # VP4
+        assert sliced[1].status == "ok"       # VP2
+        assert sliced[1].range_aa_from == 53  # stays at HMM hit, NOT 1
+        assert sliced[1].cut_method_actual == "hit-boundary"
+
+    def test_missing_trailing_peptide_does_not_let_predecessor_extend_to_c_term(self):
+        # VP1 missing; VP3 (now the last surviving) must NOT extend to
+        # the C-terminus — it keeps its HMM-hit end (156).
+        seq = "A" * 50 + "LQ" + "B" * 50 + "LQ" + "C" * 50 + "LQ" + "D" * 41
+        parent = _polyprotein_cds(seq, [
+            _hit("P_VP4", 1, 50),
+            _hit("P_VP2", 53, 103),
+            _hit("P_VP3", 106, 156),
+            # P_VP1 missing
+        ])
+        spec = _picornavirus_spec("bisect")
+        _, sliced = slice_polyprotein([parent], spec)
+
+        assert sliced[3].status == "missing"  # VP1
+        assert sliced[2].status == "ok"       # VP3
+        assert sliced[2].range_aa_to == 156   # stays at HMM hit, NOT 197
+
+    def test_missing_neighbour_cascade_sars_cov_2_shape(self):
+        # Models the SARS-CoV-2 NSP1/NSP2-missing/NSP3 cascade that
+        # motivated v0.37.0. With NSP2 (the middle peptide) missing,
+        # the previous behaviour split the NSP1->NSP3 gap evenly,
+        # inflating both flanking peptides by hundreds of residues.
+        # New behaviour: NSP1 stops at its own HMM hit and NSP3 starts
+        # at its own HMM hit — the missing peptide's territory is
+        # unassigned to either flanker.
+        seq = "Z" * 3000
+        parent = _polyprotein_cds(seq, [
+            _hit("P_NSP1", 1, 165),
+            # P_NSP2 missing
+            _hit("P_NSP3", 850, 2700),
+        ])
+        spec = PolyproteinSpec(
+            name="ORF1a",
+            peptides=[
+                PeptideSpec(name="NSP1", hmms=["P_NSP1"]),
+                PeptideSpec(name="NSP2", hmms=["P_NSP2"]),
+                PeptideSpec(name="NSP3", hmms=["P_NSP3"]),
+            ],
+            cut_strategy="bisect",
+            min_peptides_hit=2,
+        )
+        _, sliced = slice_polyprotein([parent], spec)
+
+        assert sliced[0].status == "ok"
+        assert sliced[1].status == "missing"
+        assert sliced[2].status == "ok"
+        # NSP1 stays at 1..165 — it does NOT inflate to 1..507 (the
+        # midpoint between 165 and 850 that the old logic would have
+        # picked).
+        assert sliced[0].range_aa_from == 1
+        assert sliced[0].range_aa_to == 165
+        # NSP3 stays at 850..3000 — its N-side does NOT shift to 508.
+        # C-side still extends to n_aa because NSP3 is the last declared.
+        assert sliced[2].range_aa_from == 850
+        assert sliced[2].range_aa_to == 3000
+        assert sliced[2].cut_method_actual == "hit-boundary"
 
     def test_out_of_order_hits_rejected_at_parent_identification(self):
         # P_VP2 hits AFTER P_VP3 — declared order is violated on the CDS.

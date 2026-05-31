@@ -316,6 +316,39 @@ def test_setup_protein_alphabet_aborts_when_no_resolve_and_protein(make_seq):
     assert exc.value.code == 1
 
 
+def test_setup_protein_alphabet_concatenates_markers_when_enabled(make_seq):
+    """concatenate_markers: true joins one marker CDS per cluster_protein
+    spec, in declared order, into seq.protein_sequence."""
+    a = make_seq("a", "ACGT", source=SequenceSource.NCBI, accession="NC_001.1")
+    a.proteins = [_cds("spike glycoprotein", "S" * 5), _cds("nucleoprotein", "N" * 3)]
+    cfg = {
+        "clustering": {
+            "alphabet_for_clustering": "protein",
+            "concatenate_markers": True,
+            "cluster_protein": ["spike", "nucleoprotein"],
+        },
+        "segmented": {"enabled": False},
+    }
+    out = _setup_protein_alphabet([a], cfg, QCReport(), MagicMock())
+    assert out == [a]
+    assert a.protein_sequence == "SSSSS" + "NNN"
+
+
+def test_setup_protein_alphabet_single_marker_when_concat_off(make_seq):
+    """Default (flag off): only the first matching spec's marker is used."""
+    a = make_seq("a", "ACGT", source=SequenceSource.NCBI, accession="NC_001.1")
+    a.proteins = [_cds("spike glycoprotein", "S" * 5), _cds("nucleoprotein", "N" * 3)]
+    cfg = {
+        "clustering": {
+            "alphabet_for_clustering": "protein",
+            "cluster_protein": ["spike", "nucleoprotein"],
+        },
+        "segmented": {"enabled": False},
+    }
+    out = _setup_protein_alphabet([a], cfg, QCReport(), MagicMock())
+    assert a.protein_sequence == "SSSSS"
+
+
 def test_setup_protein_alphabet_segmented_does_not_set_protein_sequence(make_seq):
     """In segmented mode, _handle_segmented builds the per-isolate concat —
     the per-sequence helper must not touch seq.protein_sequence on segments."""
@@ -358,6 +391,28 @@ def test_load_and_validate_alphabet_default_unchanged_when_no_override(tmp_path)
         alphabet_for_clustering=None,
     )
     assert cfg["clustering"]["alphabet_for_clustering"] == "protein"
+
+
+def test_load_and_validate_concatenate_markers_override(tmp_path):
+    """--concatenate-markers / --no-concatenate-markers overrides the YAML;
+    None leaves the default (off) untouched."""
+    cfg = _load_and_validate(
+        config_path=None, output_dir=str(tmp_path / "o1"), prefix=None,
+        threads=None, seed=None, concatenate_markers=True,
+    )
+    assert cfg["clustering"]["concatenate_markers"] is True
+
+    cfg = _load_and_validate(
+        config_path=None, output_dir=str(tmp_path / "o2"), prefix=None,
+        threads=None, seed=None, concatenate_markers=False,
+    )
+    assert cfg["clustering"]["concatenate_markers"] is False
+
+    cfg = _load_and_validate(
+        config_path=None, output_dir=str(tmp_path / "o3"), prefix=None,
+        threads=None, seed=None, concatenate_markers=None,
+    )
+    assert cfg["clustering"]["concatenate_markers"] is False  # YAML default
 
 
 # ---------------------------------------------------------------------------

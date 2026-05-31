@@ -138,27 +138,53 @@ def test_build_supermatrix_gap_fills_missing_family():
 
 
 def test_write_partition_nexus_modelfinder_by_default(tmp_path):
+    """No pinned models → charsets-only file, NO charpartition (per-partition
+    ModelFinder runs via -m MFP on the CLI). MFP must NEVER appear in a
+    charpartition — IQ-TREE reads it as a model-file path and aborts
+    "File not found MFP"."""
     p = tmp_path / "part.nex"
-    write_partition_nexus(
+    has_models = write_partition_nexus(
         [("L_RdRP_4", "L_RdRP_4", 1, 741), ("S_Nuc", "S_Nuc", 742, 941)],
         {}, p,
     )
     text = p.read_text()
     assert "charset L_RdRP_4 = 1-741;" in text
     assert "charset S_Nuc = 742-941;" in text
-    # Unpinned → MFP per partition.
-    assert "charpartition repseq = MFP:L_RdRP_4, MFP:S_Nuc;" in text
+    assert "charpartition" not in text
+    assert "MFP" not in text
+    assert has_models is False
 
 
-def test_write_partition_nexus_pins_model_by_family_label(tmp_path):
+def test_write_partition_nexus_pins_models_when_all_pinned(tmp_path):
+    """Every family pinned → a charpartition with concrete models; returns
+    True so the caller runs IQ-TREE without -m (the file's models win)."""
     p = tmp_path / "part.nex"
-    write_partition_nexus(
+    has_models = write_partition_nexus(
         [("L_RdRP_4", "L_RdRP_4", 1, 741), ("S_Nuc", "S_Nuc", 742, 941)],
-        {"L_RdRP_4": "LG+G4"}, p,
+        {"L_RdRP_4": "LG+G4", "S_Nuc": "WAG"}, p,
     )
     text = p.read_text()
-    # Pinned family uses its model; the other still falls to MFP.
-    assert "charpartition repseq = LG+G4:L_RdRP_4, MFP:S_Nuc;" in text
+    assert "charpartition repseq = LG+G4:L_RdRP_4, WAG:S_Nuc;" in text
+    assert "MFP" not in text
+    assert has_models is True
+
+
+def test_write_partition_nexus_partial_pins_fall_back_to_modelfinder(tmp_path, caplog):
+    """Some-but-not-all pinned → can't mix concrete models with per-partition
+    ModelFinder in a charpartition, so the partial pins are dropped (charsets
+    only, -m MFP) with a warning; returns False."""
+    import logging
+    p = tmp_path / "part.nex"
+    with caplog.at_level(logging.WARNING):
+        has_models = write_partition_nexus(
+            [("L_RdRP_4", "L_RdRP_4", 1, 741), ("S_Nuc", "S_Nuc", 742, 941)],
+            {"L_RdRP_4": "LG+G4"}, p,
+        )
+    text = p.read_text()
+    assert "charpartition" not in text
+    assert "LG+G4" not in text
+    assert has_models is False
+    assert any("ModelFinder" in r.message for r in caplog.records)
 
 
 def test_read_msa_keys_on_short_id_first_token(tmp_path):
@@ -194,7 +220,7 @@ def _stub_mafft(input_fasta: Path, output_fasta: Path, cfg, **kwargs):
 
 def _stub_iqtree(msa_fasta, output_newick, cfg, is_protein,
                  summary_path=None, partition_file=None,
-                 partition_linkage="proportional"):
+                 partition_linkage="proportional", partition_has_models=False):
     short_ids = [
         line[1:].split()[0]
         for line in msa_fasta.read_text().splitlines()
@@ -237,11 +263,17 @@ def test_build_partitioned_happy_path_writes_supermatrix_and_nexus(tmp_path):
     # IQ-TREE was invoked in partition mode with the requested linkage.
     assert captured["partition_file"].name == "test_partition.nex"
     assert captured["partition_linkage"] == "proportional"
+    # No models pinned → charsets-only file, so run_iqtree is told there are
+    # no in-file models (it then passes -m MFP for per-partition ModelFinder).
+    assert captured["partition_has_models"] is False
 
-    # NEXUS declares two charsets and per-partition ModelFinder.
+    # NEXUS declares two charsets and NO charpartition (per-partition
+    # ModelFinder happens via -m MFP on the CLI). MFP must never appear in
+    # the file — IQ-TREE would read it as a model-file path and abort.
     nex = (tmp_path / "test_partition.nex").read_text()
     assert nex.count("charset ") == 2
-    assert "MFP:" in nex
+    assert "charpartition" not in nex
+    assert "MFP" not in nex
 
     # Supermatrix width = sum of the two family widths; every rep is a row.
     sup = read_msa(tmp_path / "test_msa.fasta")

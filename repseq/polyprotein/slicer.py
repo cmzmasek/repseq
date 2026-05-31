@@ -420,20 +420,30 @@ def compute_cuts(
        fails for this rep.
     3. ``boundary``: each surviving peptide spans its token's footprint
        verbatim.
-    4. ``bisect`` / ``motif``: each surviving peptide spans from the
-       previous boundary to the bisect (or motif-snapped) point with
-       the next surviving peptide. The first peptide starts at AA 1;
-       the last ends at the protein C-term.
+    4. ``bisect`` / ``motif``: each surviving peptide is extended into
+       its **immediate** spec-neighbours only. The bisect (or motif-
+       snapped) cut is placed between consecutive-in-spec surviving
+       peptides; when the immediate neighbour is missing the peptide's
+       boundary on that side stays at the HMM hit's ``ali_from`` /
+       ``ali_to`` (``cut_method_actual`` = ``hit-boundary``). N- and
+       C-termini extensions to AA 1 / ``n_aa`` likewise apply only when
+       the first / last declared peptide is itself surviving — a
+       leading or trailing missing peptide leaves the gap unassigned
+       rather than letting its neighbour absorb the missing peptide's
+       territory. Pre-v0.37.0 the bisect blindly split the gap evenly,
+       which on SARS-CoV-2 (NSP2 missing) inflated NSP1 from 180 aa to
+       505 aa and bled 313 aa of NSP2 into NSP3.
     """
     n_aa = len(protein_seq)
     notes: list[str] = []
-    ranges: list[Optional[tuple[int, int, str]]] = [None] * len(peptide_spans)
+    n_decl = len(peptide_spans)
+    ranges: list[Optional[tuple[int, int, str]]] = [None] * n_decl
 
     if n_aa == 0:
         notes.append("parent CDS has no translation; cannot slice")
         return ranges, notes
 
-    surviving_idx = [i for i, (_, s) in enumerate(peptide_spans) if s is not None]
+    surviving_idx = [i for i in range(n_decl) if peptide_spans[i][1] is not None]
     if not surviving_idx:
         notes.append("no peptide token was satisfied on the parent CDS")
         return ranges, notes
@@ -461,20 +471,28 @@ def compute_cuts(
             ranges[i] = (f, t, "boundary")
         return ranges, notes
 
-    # bisect / motif — chained cut placement across surviving peptides.
-    # cuts[] and methods[] are computed IN LOCKSTEP inside one loop so the
-    # audit-TSV / FASTA-header `cut_method` label always describes the
-    # cut that was actually used (pre-v0.36.1 the label was recomputed in
-    # a second loop with a different bisect_point in the overlap case,
-    # so the label could disagree with the actual placement).
+    # bisect / motif — place a cut between each pair of CONSECUTIVE-IN-SPEC
+    # surviving peptides. cuts_between[i] = (cut_aa, method_label) is the
+    # cut sitting between declared peptide i and declared peptide i+1, set
+    # only when both peptides are surviving. When a peptide in between is
+    # missing, no cut is placed across the gap — the flanking peptides
+    # keep their HMM-hit boundary on the missing side rather than splitting
+    # the missing peptide's territory between them (the v0.37.0 fix).
     use_motif = spec.cut_strategy == "motif"
-    cuts: list[int] = []
-    methods = ["n-term"]
     overlap_note_emitted = False
-    for k in range(len(surviving_idx) - 1):
-        a_span = peptide_spans[surviving_idx[k]][1]
-        b_span = peptide_spans[surviving_idx[k + 1]][1]
-        pep = peptide_spans[surviving_idx[k + 1]][0]
+    cuts_between: dict[int, tuple[int, str]] = {}
+
+    for slot in range(len(surviving_idx) - 1):
+        idx_a = surviving_idx[slot]
+        idx_b = surviving_idx[slot + 1]
+        if idx_b != idx_a + 1:
+            # Missing peptide(s) between idx_a and idx_b — gap stays
+            # unassigned; idx_a's C-side and idx_b's N-side both stay
+            # at their HMM-hit edges.
+            continue
+        a_span = peptide_spans[idx_a][1]
+        b_span = peptide_spans[idx_b][1]
+        pep_b = peptide_spans[idx_b][0]
         a_to = a_span[1]
         b_from = b_span[0]
         overlap_here = b_from <= a_to
@@ -500,25 +518,65 @@ def compute_cuts(
         bisect_point = max(2, min(n_aa, bisect_point))
 
         snapped: Optional[int] = None
-        if use_motif and pep.cleavage_motif:
+        if use_motif and pep_b.cleavage_motif:
             snapped = _find_motif_snap(
-                protein_seq, bisect_point, pep.cleavage_motif,
+                protein_seq, bisect_point, pep_b.cleavage_motif,
                 spec.motif_window_aa,
             )
-        cuts.append(snapped if snapped is not None else bisect_point)
-        if snapped is not None and pep.cleavage_motif:
-            methods.append(f"motif:{pep.cleavage_motif}")
+        if snapped is not None and pep_b.cleavage_motif:
+            cuts_between[idx_a] = (snapped, f"motif:{pep_b.cleavage_motif}")
         else:
-            methods.append("bisect")
+            cuts_between[idx_a] = (bisect_point, "bisect")
 
-    starts_iter = [1] + cuts
-    ends_iter = [c - 1 for c in cuts] + [n_aa]
+    # Audit-note when any declared peptide is missing — the surviving
+    # peptides on either side use their HMM-hit boundary rather than
+    # extending into the unassigned territory. Includes the leading-/
+    # trailing-missing case (first/last declared not surviving).
+    has_unassigned_gap = (
+        any(surviving_idx[k + 1] - surviving_idx[k] > 1
+            for k in range(len(surviving_idx) - 1))
+        or surviving_idx[0] != 0
+        or surviving_idx[-1] != n_decl - 1
+    )
+    if has_unassigned_gap:
+        notes.append(
+            "one or more declared peptides were not located on the "
+            "parent CDS; flanking peptides do not extend into the "
+            "unassigned gap (boundary kept at the HMM hit edge)"
+        )
 
-    for slot, idx in enumerate(surviving_idx):
-        f, t = starts_iter[slot], ends_iter[slot]
-        if t < f:
+    for idx in surviving_idx:
+        span = peptide_spans[idx][1]
+
+        # N-side: extend to AA 1 only when this is the first declared
+        # peptide; bisect with idx-1 only when idx-1 is itself surviving
+        # (i.e. cuts_between[idx-1] exists); otherwise stay at the HMM
+        # hit's N-edge.
+        if idx == 0:
+            range_from = 1
+            method = "n-term"
+        elif (idx - 1) in cuts_between:
+            cut, method = cuts_between[idx - 1]
+            range_from = cut
+        else:
+            range_from = span[0]
+            method = "hit-boundary"
+
+        # C-side: extend to n_aa only when this is the last declared
+        # peptide; bisect with idx+1 only when idx+1 is itself surviving;
+        # otherwise stay at the HMM hit's C-edge.
+        if idx == n_decl - 1:
+            range_to = n_aa
+        elif idx in cuts_between:
+            range_to = cuts_between[idx][0] - 1
+        else:
+            range_to = span[1]
+
+        range_from = max(1, min(n_aa, range_from))
+        range_to = max(1, min(n_aa, range_to))
+        if range_to < range_from:
             continue
-        ranges[idx] = (f, t, methods[slot])
+        ranges[idx] = (range_from, range_to, method)
 
     return ranges, notes
 

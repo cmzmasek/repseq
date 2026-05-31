@@ -420,9 +420,11 @@ representative satisfies are silently skipped without comment.
 
 The **AA strings that were fed into the clusterer** — the per-isolate
 marker-protein concat in segmented mode, or the per-rep marker in
-non-segmented mode. Written only if every representative ended up with a
-populated `protein_sequence` (i.e. the protein-alphabet path completed;
-not written for `alphabet_for_clustering: nucleotide`).
+non-segmented mode (the multi-marker concat, e.g. Spike+Nucleocapsid, when
+`clustering.concatenate_markers: true`). Written only if every
+representative ended up with a populated `protein_sequence` (i.e. the
+protein-alphabet path completed; not written for
+`alphabet_for_clustering: nucleotide`).
 
 This is a *diagnostic*, not a primary output: useful if you want to
 reproduce or audit the clustering input. For a clean per-protein set, use
@@ -1043,13 +1045,21 @@ single-alignment, single-model path. Knobs under `phylo.partition`:
   branch lengths per partition — most flexible, useful when segments may
   have different histories).
 - `models` — optional per-family model pin keyed by family label
-  (`{L_RdRP_4: "LG+G4", S_Bunya_nucleocap: "WAG+G4"}`); families left out
-  get `MFP` (ModelFinder picks).
+  (`{L_RdRP_4: "LG+G4", S_Bunya_nucleocap: "WAG+G4"}`). This is **all-or-
+  nothing**: pins are honoured only when *every* family is pinned (the
+  NEXUS then carries a `charpartition` with those concrete models and
+  IQ-TREE runs without `-m`). If any family is left unpinned, all
+  partitions fall back to per-partition ModelFinder (a `charpartition`
+  cannot mix concrete models with ModelFinder), with a warning. With no
+  pins (the default), the NEXUS is charsets-only and IQ-TREE is run with
+  `-m MFP` so ModelFinder picks a model per partition. (We deliberately do
+  *not* write `MFP` into the `charpartition` — IQ-TREE 2.x treats it as a
+  model-file path and aborts with `File not found MFP`.)
 
 Extra outputs in this mode: the per-family alignments
 `{prefix}_msa_<family>.fasta` and the NEXUS partition file
-`{prefix}_partition.nex` (the column ranges + per-partition models IQ-TREE
-was run with). `{prefix}_msa.fasta` is then the **concatenated
+`{prefix}_partition.nex` (the column ranges, plus per-partition models
+when pinned). `{prefix}_msa.fasta` is then the **concatenated
 supermatrix** the tree was actually inferred on.
 
 #### `{prefix}_msa.fasta`
@@ -1690,11 +1700,42 @@ of identity threshold makes sense for your data.
 
 `auto` was removed in v0.10.0 — pick `protein` or `nucleotide` explicitly.
 
+#### Clustering on more than one marker (`clustering.concatenate_markers`)
+
+By default a non-segmented protein-alphabet run clusters on a **single**
+marker — the CDS from the first `cluster_protein` spec a record satisfies
+(e.g. Spike alone for coronaviruses, since Spike is listed first). Set
+
+```yaml
+clustering:
+  concatenate_markers: true
+```
+
+to instead select the marker CDS from **every** `cluster_protein` spec and
+cluster on their amino-acid **concatenation** in declared spec order
+(e.g. `Spike+Nucleocapsid`). This mirrors the segmented per-segment concat.
+A record missing any required marker is dropped (when every spec declares
+`hmms:`, the AND-gate already removes those upstream). `extra_protein`
+specs are never concatenated — they are accessory/sparse by design.
+
+This flag changes **only the clustering input** (and the
+`{prefix}_representatives_protein.fasta` it writes). The whole-genome tree
+is *not* affected. For a multi-gene whole-genome tree, leave the trees to
+the **partitioned supermatrix** path by setting `phylo.tool: auto` (or
+`iqtree`): each marker is aligned separately and concatenated column-wise
+with a per-gene model — the correct way to build a Spike+N tree. Gluing the
+proteins into one string and aligning the chimera (which is what you'd get
+under FastTree) is biologically dubious and not recommended.
+
 Override at run time without editing the YAML:
 
 ```bash
 repseq global -c my.yaml -i x.fasta -T 0.95 --alphabet-for-clustering nucleotide
+repseq global -c my.yaml -i x.fasta -T 0.95 --concatenate-markers      # or --no-concatenate-markers
 ```
+
+`--concatenate-markers` / `--no-concatenate-markers` overrides
+`clustering.concatenate_markers` for a single run (see above).
 
 You can also set your NCBI email/key via the environment variables
 `REPSEQ_NCBI_EMAIL` and `REPSEQ_NCBI_API_KEY` instead of putting them in the file.
@@ -2077,8 +2118,10 @@ virus (they key the output filenames).
    verbatim. Deterministic, but loses the inter-domain residues at the
    seams.
 2. **`bisect`** — cuts placed at the midpoint between adjacent peptide
-   HMM hits; endpoints extend to the protein N-/C-term. No residues
-   dropped; cut sites are geometric rather than biological.
+   HMM hits. Endpoints extend to the protein N-/C-term **only when the
+   first/last declared peptide is itself located** — a missing leading
+   or trailing peptide leaves the gap unassigned (the v0.37.0 missing-
+   neighbour-aware fix). Cut sites are geometric rather than biological.
 3. **`motif`** (default when any peptide declares `cleavage_motif`) —
    start from `bisect`, then snap each inter-peptide cut to the last
    occurrence of the downstream peptide's `cleavage_motif` within
@@ -2093,8 +2136,14 @@ The default cut strategy is `motif` if any peptide declared
 
 ### Edge cases
 
-- **Peptide HMM doesn't hit** the parent CDS → peptide skipped,
-  neighbours bisect/snap across the gap; audit row marks `missing`.
+- **Peptide HMM doesn't hit** the parent CDS → peptide skipped, audit
+  row marks `missing`. Flanking peptides keep their HMM-hit boundary on
+  the missing side (`cut_method_actual=hit-boundary`); the missing
+  peptide's territory is left unassigned rather than absorbed by a
+  neighbour. The v0.37.0 fix; pre-v0.37.0 the bisect blindly split the
+  missing peptide's gap evenly between its neighbours, which on
+  SARS-CoV-2 (NSP2 untraceable by the bundled HMMs) inflated NSP1 from
+  ~180 aa to 505 aa and bled 313 aa of NSP2 territory into NSP3.
 - **Peptide HMMs hit out of N→C order** on the parent → spec fails for
   that rep, all rows for it land as `out_of_order`. (Real polyproteins
   are linear; this is almost always an HMM-database problem.)

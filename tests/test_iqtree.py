@@ -137,6 +137,60 @@ def test_run_iqtree_writes_treefile_and_summary(tmp_path):
     assert "--redo" in cmd
 
 
+def _write_charsets_nexus(path):
+    path.write_text(
+        "#nexus\nbegin sets;\n"
+        "    charset A = 1-3;\n    charset B = 4-6;\nend;\n"
+    )
+
+
+def test_run_iqtree_partition_no_models_passes_m_mfp(tmp_path):
+    """Charsets-only partition file (partition_has_models=False) → IQ-TREE is
+    run with -p <file> AND -m MFP (per-partition ModelFinder)."""
+    msa = tmp_path / "msa.fasta"
+    _write_msa(msa, n=4)
+    out = tmp_path / "out.nwk"
+    nex = tmp_path / "part.nex"
+    _write_charsets_nexus(nex)
+    cfg = {"temp_dir": str(tmp_path), "seed": 7, "threads": 2}
+
+    fake_run, captured = _fake_run_writes_outputs(treefile_body="(A,B,C,D);\n")
+    with patch("repseq.phylo.iqtree.run_streaming", side_effect=fake_run), \
+         patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
+        run_iqtree(msa, out, cfg, is_protein=True,
+                   partition_file=nex, partition_linkage="proportional",
+                   partition_has_models=False)
+    cmd = captured["cmd"]
+    assert "-p" in cmd                       # edge-linked proportional
+    assert "-m" in cmd and "MFP" in cmd      # per-partition ModelFinder
+    assert "-q" not in cmd and "-Q" not in cmd
+
+
+def test_run_iqtree_partition_with_models_omits_m(tmp_path):
+    """When the NEXUS pins models in-file (partition_has_models=True) IQ-TREE
+    must NOT get -m, so the file's per-partition models win."""
+    msa = tmp_path / "msa.fasta"
+    _write_msa(msa, n=4)
+    out = tmp_path / "out.nwk"
+    nex = tmp_path / "part.nex"
+    nex.write_text(
+        "#nexus\nbegin sets;\n    charset A = 1-3;\n    charset B = 4-6;\n"
+        "    charpartition repseq = LG:A, WAG:B;\nend;\n"
+    )
+    cfg = {"temp_dir": str(tmp_path), "seed": 7, "threads": 2}
+
+    fake_run, captured = _fake_run_writes_outputs(treefile_body="(A,B,C,D);\n")
+    with patch("repseq.phylo.iqtree.run_streaming", side_effect=fake_run), \
+         patch("repseq.phylo.iqtree._check_iqtree", return_value="/fake/iqtree2"):
+        run_iqtree(msa, out, cfg, is_protein=True,
+                   partition_file=nex, partition_linkage="equal",
+                   partition_has_models=True)
+    cmd = captured["cmd"]
+    assert "-q" in cmd          # equal linkage
+    assert "-m" not in cmd      # models come from the charpartition
+    assert "MFP" not in cmd
+
+
 def test_run_iqtree_disables_ufboot_when_fewer_than_four_seqs(tmp_path, capsys):
     """3 sequences → UFBoot skipped (IQ-TREE rejects bootstrap < 4)."""
     msa = tmp_path / "msa.fasta"
@@ -232,10 +286,11 @@ def test_run_iqtree_raises_when_subprocess_fails(tmp_path):
             run_iqtree(msa, out, cfg, is_protein=True)
 
 
-def test_run_iqtree_partition_uses_linkage_flag_and_drops_model(tmp_path):
+def test_run_iqtree_partition_uses_linkage_flag(tmp_path):
     """A partition_file switches IQ-TREE into partitioned mode: the linkage
-    flag (-p/-q/-Q) carries the NEXUS, -m is dropped (models live in the
-    charpartition), and the partition-file path is copied into the workdir."""
+    flag (-p/-q/-Q) carries the NEXUS, and the partition-file path is copied
+    into the workdir. With no in-file models, -m MFP is added for
+    per-partition ModelFinder."""
     msa = tmp_path / "msa.fasta"
     _write_msa(msa, n=4)
     part = tmp_path / "partition.nex"
@@ -253,7 +308,7 @@ def test_run_iqtree_partition_uses_linkage_flag_and_drops_model(tmp_path):
 
     cmd = captured["cmd"]
     assert "-Q" in cmd                       # unlinked → -Q
-    assert "-m" not in cmd                   # model dropped under partitions
+    assert "-m" in cmd and "MFP" in cmd      # per-partition ModelFinder via CLI
     # The flag is immediately followed by a NEXUS path inside the workdir.
     nexus_arg = cmd[cmd.index("-Q") + 1]
     assert nexus_arg.endswith("partition.nex")

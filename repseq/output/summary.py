@@ -405,6 +405,12 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
             f"CDS by default, overridable via `cluster_protein` aliases — "
             f"joined in canonical segment order)"
         )
+    elif alphabet == "protein" and cluster_cfg.get("concatenate_markers"):
+        input_desc = (
+            f"**{_fmt_int(n_input_to_clust)} concatenated marker-protein "
+            f"sequences** (the marker CDS from every `cluster_protein` "
+            f"spec joined in declared order — `concatenate_markers: true`)"
+        )
     elif alphabet == "protein":
         input_desc = (
             f"**{_fmt_int(n_input_to_clust)} marker-protein sequences** "
@@ -463,6 +469,14 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
             f"each surviving sequence/segment is then chosen as the "
             f"longest CDS satisfying any of the configured HMM tokens."
         )
+        if cluster_cfg.get("concatenate_markers") and not segmented:
+            hmm_sentence += (
+                " With `concatenate_markers: true`, one such marker CDS is "
+                "selected per `cluster_protein` spec and their amino-acid "
+                "sequences are concatenated in declared spec order to form "
+                "the clustering string; a sequence missing any required "
+                "marker is dropped."
+            )
 
     return (
         f"## Representative selection\n\n"
@@ -1020,8 +1034,11 @@ def _render_polyprotein(cfg: dict, per_protein_ran: bool = False) -> str:
         ),
         "bisect": (
             "**bisect** (cuts placed at the midpoint between adjacent "
-            "peptide hits; no residues dropped, but cut sites are "
-            "geometric rather than biological)"
+            "located peptides; no residues dropped between two adjacent "
+            "hits, but cut sites are geometric rather than biological. "
+            "When a peptide is missing, the flanking peptides keep their "
+            "HMM-hit boundary on the missing side — the gap is left "
+            "unassigned rather than absorbed by either neighbour)"
         ),
         "motif": (
             "**motif** (cuts snap to the user-declared cleavage motif "

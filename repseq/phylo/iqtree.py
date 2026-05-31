@@ -92,6 +92,7 @@ def run_iqtree(
     summary_path: Optional[Path] = None,
     partition_file: Optional[Path] = None,
     partition_linkage: str = "proportional",
+    partition_has_models: bool = False,
 ) -> None:
     """Run IQ-TREE on ``msa_fasta`` and write the ML tree to ``output_newick``.
 
@@ -112,11 +113,15 @@ def run_iqtree(
     NT model on AA data would fail late inside IQ-TREE).
 
     ``partition_file`` (a NEXUS charsets file) switches IQ-TREE into
-    partitioned mode: the ``-m`` model is dropped (models come from the
-    NEXUS ``charpartition`` — ``MFP`` per charset runs ModelFinder per
-    partition) and the alignment is passed under ``partition_linkage``'s
+    partitioned mode: the alignment is passed under ``partition_linkage``'s
     flag — ``proportional`` → ``-p`` (edge-linked, the default), ``equal``
-    → ``-q``, ``unlinked`` → ``-Q``.
+    → ``-q``, ``unlinked`` → ``-Q``. ``partition_has_models`` says whether
+    the NEXUS already pins a concrete model per partition (a
+    ``charpartition``): when ``True`` we pass no ``-m`` so the file's models
+    win; when ``False`` (charsets-only file) we pass ``-m MFP`` so IQ-TREE
+    runs ModelFinder independently per charset. We must NOT write ``MFP``
+    into the charpartition itself — IQ-TREE treats it as a model-file path
+    and aborts with "File not found MFP" (see ``write_partition_nexus``).
     """
     binary_name_override = (
         cfg.get("phylo", {}).get("iqtree", {}).get("binary")
@@ -156,8 +161,13 @@ def run_iqtree(
         local_input.write_bytes(msa_fasta.read_bytes())
 
         if partition_file is not None:
-            # Partitioned: drop -m (per-charset models live in the NEXUS
-            # charpartition) and pass the alignment under the linkage flag.
+            # Partitioned: pass the alignment under the linkage flag. When the
+            # NEXUS pins a concrete model per partition (charpartition), the
+            # file's models win and we pass no -m; otherwise it's a
+            # charsets-only file and we pass -m MFP so IQ-TREE runs
+            # ModelFinder per charset. (MFP must NOT appear inside the
+            # charpartition — IQ-TREE reads it as a model-file path and
+            # aborts "File not found MFP".)
             local_part = td / "partition.nex"
             local_part.write_text(Path(partition_file).read_text())
             flag = _LINKAGE_FLAGS.get(partition_linkage, "-p")
@@ -171,6 +181,8 @@ def run_iqtree(
                 "--quiet",
                 "--redo",
             ]
+            if not partition_has_models:
+                cmd.extend(["-m", "MFP"])
         else:
             cmd = [
                 iqtree,

@@ -256,6 +256,21 @@ clustering:
   # do not gate QC.
   cluster_protein: []
 
+  # Non-segmented multi-marker clustering. When false (default) the
+  # clustering string is the SINGLE marker from the first cluster_protein
+  # spec a CDS satisfies (e.g. Spike alone for coronaviruses). When true,
+  # the marker CDS from EVERY cluster_protein spec is selected and the AA
+  # strings are concatenated in declared spec order (e.g. Spike+
+  # Nucleocapsid), mirroring the segmented per-segment concat. A sequence
+  # missing any required marker is dropped (with HMM-gated specs the AND
+  # gate already enforces this upstream). No effect in segmented mode
+  # (which always concatenates its per-segment markers) or when
+  # alphabet_for_clustering=nucleotide. NOTE: this only changes the
+  # clustering input — the whole-genome tree is unaffected. For a
+  # multi-gene tree set phylo.tool: auto/iqtree so the partitioned
+  # supermatrix path aligns each marker separately.
+  concatenate_markers: false
+
   # Additional proteins to extract (and, with --per-protein-phylo, tree)
   # but NOT use for clustering or the whole-genome tree. Same dict schema
   # as cluster_protein — each entry is `{name, aliases?, hmms?}` — but the

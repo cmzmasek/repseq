@@ -10,6 +10,7 @@ from repseq.clustering.marker import (
     MarkerFailure,
     _format_failure_reason,
     populate_protein_sequences,
+    select_concatenated_markers,
     select_marker_protein,
 )
 from repseq.models import QCReport
@@ -247,3 +248,60 @@ def test_populate_legacy_counter_still_used_for_non_hmm_drops(make_seq):
     assert kept == []
     assert report.removed_proteins == 1
     assert report.removed_hmm_failed == 0
+
+
+# ---------------------------------------------------------------------------
+# concatenate=True with HMM-gated specs (multi-marker clustering)
+# ---------------------------------------------------------------------------
+
+_SPIKE_N_SPECS = [
+    {"name": "Spike", "hmms": ["CoV_S1--CoV_S2"]},
+    {"name": "Nucleocapsid", "hmms": ["CoV_nucleocap"]},
+]
+
+
+def _spike_cds(pid="P_S"):
+    return _cds(
+        "spike glycoprotein", "S" * 1200, protein_id=pid,
+        hmm_hits=[
+            _hit("CoV_S1", ali_from=1, ali_to=600),
+            _hit("CoV_S2", ali_from=620, ali_to=1180),
+        ],
+    )
+
+
+def _ncap_cds(pid="P_N"):
+    return _cds(
+        "nucleocapsid", "N" * 400, protein_id=pid,
+        hmm_hits=[_hit("CoV_nucleocap", ali_from=1, ali_to=380)],
+    )
+
+
+def test_concatenate_joins_hmm_markers_in_spec_order():
+    proteins = [_ncap_cds(), _spike_cds()]  # input order is N, S
+    markers, failure = select_concatenated_markers(
+        proteins, _SPIKE_N_SPECS, hmm_active=True
+    )
+    assert failure is None
+    # Declared spec order (Spike then Nucleocapsid), not input order.
+    assert [m["protein_id"] for m in markers] == ["P_S", "P_N"]
+
+
+def test_concatenate_drops_isolate_missing_one_hmm_marker(make_seq):
+    """An isolate that carries Spike but no Nucleocapsid is dropped under
+    the HMM gate — concat requires EVERY spec, like a missing segment
+    drops a segmented isolate."""
+    good = make_seq("good", "ACGT")
+    good.proteins = [_spike_cds(), _ncap_cds()]
+    bad = make_seq("bad", "ACGT")
+    bad.proteins = [_spike_cds("P_S2")]  # no nucleocapsid CDS
+    report = QCReport()
+    kept = populate_protein_sequences(
+        [good, bad], _SPIKE_N_SPECS, report,
+        hmm_active=True, concatenate=True,
+    )
+    assert kept == [good]
+    assert good.protein_sequence == "S" * 1200 + "N" * 400
+    assert report.removed_hmm_failed == 1
+    assert report.removed_hmm_by_marker.get("Nucleocapsid") == 1
+    assert any("hmm_failed:Nucleocapsid" in d["reason"] for d in report.details)

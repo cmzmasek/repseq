@@ -147,6 +147,22 @@ DEFAULTS: dict[str, Any] = {
         # that matches a CDS wins; if no aliases match (or the list is
         # empty), the longest CDS on the sequence is used.
         "cluster_protein": [],
+        # Non-segmented multi-marker clustering (v0.38.0+). When false
+        # (default) the clustering string is the SINGLE marker from the
+        # first cluster_protein spec that a CDS satisfies (legacy
+        # behaviour — e.g. Spike alone for coronaviruses). When true, the
+        # marker CDS from EVERY cluster_protein spec is selected and the
+        # AA strings are concatenated in declared spec order
+        # (e.g. Spike+Nucleocapsid) into seq.protein_sequence, mirroring
+        # the segmented per-segment concat. A sequence missing any
+        # required marker is dropped (the HMM AND-gate already enforces
+        # this upstream when every spec declares `hmms`). No effect in
+        # segmented mode (segmented always concatenates its per-segment
+        # markers) or when alphabet_for_clustering="nucleotide". The
+        # whole-genome tree (2E) is unaffected by this flag — for a
+        # multi-gene tree use phylo.tool: auto/iqtree so the partitioned
+        # supermatrix path aligns each marker separately.
+        "concatenate_markers": False,
         # Additional proteins to extract and (optionally) phylogenize but
         # NOT use for clustering or the whole-genome tree. Same schema as
         # cluster_protein (list of {name, aliases?, hmms?} dicts). For

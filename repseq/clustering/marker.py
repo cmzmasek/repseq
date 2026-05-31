@@ -281,6 +281,50 @@ def _best_evalue_across_token_hmms(
     return best
 
 
+def select_concatenated_markers(
+    proteins: Optional[list[dict]],
+    marker_specs: Any = None,
+    *,
+    hmm_active: bool = False,
+    ga_cutoffs: Optional[dict[str, Optional[float]]] = None,
+    hmm_cfg: Optional[dict[str, Any]] = None,
+) -> tuple[Optional[list[dict]], Optional[MarkerFailure]]:
+    """Pick the marker CDS from EVERY spec, for non-segmented concat clustering.
+
+    Returns ``(markers, None)`` — one CDS per declared spec, in declared
+    order — or ``(None, MarkerFailure)`` on the first spec that yields no
+    marker. Each spec is selected independently via
+    :func:`select_marker_protein` (so the per-spec HMM/alias gating is
+    identical to single-marker mode); the caller concatenates the AA
+    bodies in the returned order.
+
+    When no specs are configured the single longest CDS is returned as a
+    one-element list (parity with the no-specs branch of
+    ``select_marker_protein``). A spec failure short-circuits with that
+    spec's ``MarkerFailure`` so the drop reason is informative.
+    """
+    if not proteins:
+        return None, MarkerFailure("no_proteins")
+    specs = _normalize_marker_specs(marker_specs)
+    if not specs:
+        marker, failure = select_marker_protein(
+            proteins, marker_specs,
+            hmm_active=hmm_active, ga_cutoffs=ga_cutoffs, hmm_cfg=hmm_cfg,
+        )
+        return ([marker], None) if marker is not None else (None, failure)
+
+    markers: list[dict] = []
+    for spec in specs:
+        marker, failure = select_marker_protein(
+            proteins, [spec],
+            hmm_active=hmm_active, ga_cutoffs=ga_cutoffs, hmm_cfg=hmm_cfg,
+        )
+        if marker is None:
+            return None, failure
+        markers.append(marker)
+    return markers, None
+
+
 def populate_protein_sequences(
     sequences: list[Sequence],
     marker_specs: Any = None,
@@ -289,11 +333,18 @@ def populate_protein_sequences(
     hmm_active: bool = False,
     ga_cutoffs: Optional[dict[str, Optional[float]]] = None,
     hmm_cfg: Optional[dict[str, Any]] = None,
+    concatenate: bool = False,
 ) -> list[Sequence]:
     """Set ``seq.protein_sequence`` on each sequence to its marker protein.
 
     Used by non-segmented inputs only — segmented isolates get their
     concatenated marker via ``build_concatenated_sequences``.
+
+    When ``concatenate`` is true (``clustering.concatenate_markers``), the
+    marker CDS from EVERY spec is selected and the AA bodies are joined in
+    declared spec order (e.g. Spike+Nucleocapsid); a sequence missing any
+    required marker is dropped. When false (default) the single marker
+    from the first satisfying spec is used (legacy behaviour).
 
     Sequences that fail marker selection are dropped. Drops with an
     HMM-tier failure are counted under ``report.removed_hmm_failed``
@@ -308,14 +359,24 @@ def populate_protein_sequences(
     """
     kept: list[Sequence] = []
     for seq in sequences:
-        marker, failure = select_marker_protein(
-            seq.proteins,
-            marker_specs,
-            hmm_active=hmm_active,
-            ga_cutoffs=ga_cutoffs,
-            hmm_cfg=hmm_cfg,
-        )
-        if marker is None:
+        if concatenate:
+            markers, failure = select_concatenated_markers(
+                seq.proteins,
+                marker_specs,
+                hmm_active=hmm_active,
+                ga_cutoffs=ga_cutoffs,
+                hmm_cfg=hmm_cfg,
+            )
+        else:
+            marker, failure = select_marker_protein(
+                seq.proteins,
+                marker_specs,
+                hmm_active=hmm_active,
+                ga_cutoffs=ga_cutoffs,
+                hmm_cfg=hmm_cfg,
+            )
+            markers = [marker] if marker is not None else None
+        if markers is None:
             if report is not None:
                 reason = _format_failure_reason(failure)
                 seq.qc_passed = False
@@ -330,9 +391,10 @@ def populate_protein_sequences(
                     report.removed_proteins += 1
                 report.add_removed(seq.id, reason)
             continue
-        seq.protein_sequence = marker["sequence"]
-        if marker.get("protein_id"):
-            seq.marker_protein_ids = [marker["protein_id"]]
+        seq.protein_sequence = "".join(m["sequence"] for m in markers)
+        ids = [m["protein_id"] for m in markers if m.get("protein_id")]
+        if ids:
+            seq.marker_protein_ids = ids
         kept.append(seq)
     return kept
 

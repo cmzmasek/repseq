@@ -163,24 +163,62 @@ def write_partition_nexus(
     blocks: list[tuple[str, str, int, int]],
     models: dict[str, str],
     path: Path,
-) -> None:
-    """Write an IQ-TREE NEXUS partition file.
+) -> bool:
+    """Write an IQ-TREE NEXUS partition file. Returns whether it pins models.
 
-    One ``charset`` per family plus a ``charpartition`` assigning each its
-    model. A family with no pinned model in ``models`` (keyed by family
-    label) gets ``MFP`` so IQ-TREE runs ModelFinder for that partition.
+    Always emits one ``charset`` per family. The ``charpartition`` is the
+    subtle part: IQ-TREE's charpartition syntax requires a concrete
+    substitution-model name for **every** partition (``MODEL:charset``) —
+    it rejects bare charset names, and ``MFP`` (ModelFinder Plus) is a
+    model-*selection strategy*, not a model name, so ``MFP:charset`` makes
+    IQ-TREE try to open a file literally named ``MFP`` and abort with
+    "File not found MFP". (Empirically confirmed against IQ-TREE 2.3.2.)
+
+    So per-partition ModelFinder cannot be expressed in the charpartition.
+    The supported idiom is instead a charsets-only file run with ``-m MFP``
+    on the command line, which makes IQ-TREE run ModelFinder independently
+    per charset. We therefore:
+
+    * write a ``charpartition`` (with concrete models) **only when every**
+      family has a pinned model in ``models`` (keyed by family label) — the
+      caller then runs IQ-TREE without ``-m`` so the file's models win;
+    * otherwise omit the charpartition entirely (charsets only) — the
+      caller passes ``-m MFP`` for per-partition ModelFinder.
+
+    Returns ``True`` in the first case (models pinned in-file), ``False`` in
+    the second. When *some but not all* families are pinned, the partial
+    pins are dropped with a warning (a charpartition can't mix concrete
+    models with per-partition ModelFinder), and the function returns
+    ``False``.
     """
     lines = ["#nexus", "begin sets;"]
     for _label, nexus_name, start, end in blocks:
         lines.append(f"    charset {nexus_name} = {start}-{end};")
-    assignments = [
-        f"{(models.get(label) or 'MFP')}:{nexus_name}"
-        for label, nexus_name, _start, _end in blocks
-    ]
-    lines.append(f"    charpartition repseq = {', '.join(assignments)};")
+
+    pinned = {label: models.get(label) for label, _n, _s, _e in blocks}
+    n_pinned = sum(1 for v in pinned.values() if v)
+    all_pinned = bool(blocks) and n_pinned == len(blocks)
+
+    if all_pinned:
+        assignments = [
+            f"{models[label]}:{nexus_name}"
+            for label, nexus_name, _start, _end in blocks
+        ]
+        lines.append(f"    charpartition repseq = {', '.join(assignments)};")
+    elif n_pinned:
+        logger.warning(
+            "[phylo] partition: %d/%d families have a pinned phylo.partition."
+            "models entry but the rest do not; IQ-TREE cannot mix pinned "
+            "models with per-partition ModelFinder in one charpartition, so "
+            "ALL partitions will use ModelFinder (-m MFP). Pin every family "
+            "to honour the models map.",
+            n_pinned, len(blocks),
+        )
+
     lines.append("end;")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
+    return all_pinned
 
 
 def _leaf_labels(
@@ -391,7 +429,9 @@ def build_partitioned_phylogeny(
         trim_note = trimal_mod.trim_note(trimal_settings)
 
     nexus_path = out_dir / f"{prefix}_partition.nex"
-    write_partition_nexus(blocks, dict(part_cfg.get("models") or {}), nexus_path)
+    partition_has_models = write_partition_nexus(
+        blocks, dict(part_cfg.get("models") or {}), nexus_path
+    )
 
     linkage = part_cfg.get("linkage", "proportional")
     newick_path = out_dir / f"{prefix}_tree.nwk"
@@ -407,6 +447,7 @@ def build_partitioned_phylogeny(
             summary_path=summary_path,
             partition_file=nexus_path,
             partition_linkage=linkage,
+            partition_has_models=partition_has_models,
         )
     except IQTreeError as exc:
         raise PhyloError(str(exc)) from exc
