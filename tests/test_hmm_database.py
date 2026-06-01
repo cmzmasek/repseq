@@ -62,13 +62,81 @@ def test_resolve_database_path_accepts_user_path(tmp_path):
 
 
 def test_resolve_database_path_raises_for_missing(tmp_path):
-    with pytest.raises(HMMDatabaseError, match="does not exist"):
+    with pytest.raises(HMMDatabaseError, match="does not exist|not a bundled set"):
         resolve_database_path(str(tmp_path / "nope.hmm"))
 
 
-def test_resolve_database_path_raises_for_directory(tmp_path):
-    with pytest.raises(HMMDatabaseError, match="is not a file"):
-        resolve_database_path(str(tmp_path))
+def test_resolve_database_path_combines_directory(tmp_path):
+    """A directory of .hmm files → one combined database with every profile."""
+    src = tmp_path / "Filoviridae"
+    src.mkdir()
+    (src / "a.hmm").write_text(
+        "HMMER3/f\nNAME  ProfA\nLENG  10\n//\n"
+    )
+    (src / "b.hmm").write_text(
+        "HMMER3/f\nNAME  ProfB\nLENG  10\n//\n"
+    )
+    cache = tmp_path / "cache"
+    combined = resolve_database_path(str(src), cache_dir=cache)
+    assert combined.is_file()
+    assert combined.parent == cache / "hmm_combined"
+    # Both profiles made it into the combined database.
+    assert profile_count(combined) == 2
+    text = combined.read_text()
+    assert "ProfA" in text and "ProfB" in text
+
+
+def test_resolve_database_directory_is_cached_and_reused(tmp_path):
+    src = tmp_path / "fam"
+    src.mkdir()
+    (src / "a.hmm").write_text("HMMER3/f\nNAME  A\nLENG  10\n//\n")
+    cache = tmp_path / "cache"
+    first = resolve_database_path(str(src), cache_dir=cache)
+    mtime1 = first.stat().st_mtime_ns
+    # Second call with unchanged members reuses the same combined file.
+    second = resolve_database_path(str(src), cache_dir=cache)
+    assert second == first
+    assert second.stat().st_mtime_ns == mtime1
+
+
+def test_resolve_database_directory_rebuilds_when_member_changes(tmp_path):
+    src = tmp_path / "fam"
+    src.mkdir()
+    (src / "a.hmm").write_text("HMMER3/f\nNAME  A\nLENG  10\n//\n")
+    cache = tmp_path / "cache"
+    first = resolve_database_path(str(src), cache_dir=cache)
+    # Add a second profile → different signature → different combined file.
+    (src / "b.hmm").write_text("HMMER3/f\nNAME  B\nLENG  10\n//\n")
+    second = resolve_database_path(str(src), cache_dir=cache)
+    assert second != first
+    assert profile_count(second) == 2
+
+
+def test_resolve_database_empty_directory_raises(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(HMMDatabaseError, match="no .hmm files"):
+        resolve_database_path(str(empty), cache_dir=tmp_path / "c")
+
+
+def test_resolve_database_bare_name_selects_bundled_set(tmp_path, monkeypatch):
+    """A bare name that isn't a path resolves under the bundled hmms dir."""
+    import repseq.hmm.database as dbmod
+    fake_bundled = tmp_path / "bundled_hmms"
+    fam = fake_bundled / "Testviridae"
+    fam.mkdir(parents=True)
+    (fam / "x.hmm").write_text("HMMER3/f\nNAME  X\nLENG  10\n//\n")
+    monkeypatch.setattr(dbmod, "BUNDLED_HMMS_DIR", fake_bundled)
+    combined = resolve_database_path("Testviridae", cache_dir=tmp_path / "c")
+    assert combined.is_file()
+    assert profile_count(combined) == 1
+
+
+def test_resolve_database_unknown_bare_name_raises(tmp_path, monkeypatch):
+    import repseq.hmm.database as dbmod
+    monkeypatch.setattr(dbmod, "BUNDLED_HMMS_DIR", tmp_path / "nope_dir")
+    with pytest.raises(HMMDatabaseError, match="not a bundled set"):
+        resolve_database_path("DoesNotExist", cache_dir=tmp_path / "c")
 
 
 def test_db_signature_stable_for_same_file(tmp_path):

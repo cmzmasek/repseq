@@ -10,44 +10,114 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
 from .errors import HMMDatabaseError
 
-# Bundled set ships under repseq/data/hmms/. Resolved relative to this
+# Bundled HMM sets ship under repseq/data/hmms/. Resolved relative to this
 # file so editable installs (``pip install -e .``) work without a copy.
-BUNDLED_DB_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "data"
-    / "hmms"
-    / "repseq_viral_core.hmm"
-)
+# Family-specific sets live in subdirectories (e.g.
+# repseq/data/hmms/Filoviridae/), selectable by bare name in
+# ``hmm.database`` (see resolve_database_path).
+BUNDLED_HMMS_DIR = Path(__file__).resolve().parent.parent / "data" / "hmms"
+BUNDLED_DB_PATH = BUNDLED_HMMS_DIR / "repseq_viral_core.hmm"
 
 # Suffixes ``hmmpress`` writes alongside the .hmm file.
 HMMPRESS_INDEX_SUFFIXES = (".h3f", ".h3i", ".h3m", ".h3p")
 
 
-def resolve_database_path(user_path: Optional[str]) -> Path:
-    """Return the resolved .hmm path; ``None`` → bundled.
+def resolve_database_path(
+    user_path: Optional[str], *, cache_dir: Optional[Path] = None
+) -> Path:
+    """Return a single .hmm file path to scan against; ``None`` → bundled.
 
-    Raises HMMDatabaseError if the resolved path does not exist.
+    ``hmm.database`` may be:
+
+    * ``None`` — the bundled ``repseq_viral_core.hmm``.
+    * a **file** path — used as-is (the classic single-database form).
+    * a **directory** path — every ``*.hmm`` in it is concatenated into one
+      combined database (cached under ``cache_dir``), so a user can keep
+      family-specific profiles as separate files. The combined file is what
+      gets pressed / scanned / GA-parsed downstream.
+    * a **bare name** that doesn't resolve as a path — looked up under the
+      bundled ``repseq/data/hmms/`` directory, so ``hmm.database:
+      Filoviridae`` selects the bundled family set
+      ``repseq/data/hmms/Filoviridae/`` (a directory, combined as above).
+
+    Raises HMMDatabaseError if nothing resolves. ``cache_dir`` is where the
+    combined directory database is written (defaults to a temp dir); only
+    consulted for the directory case.
     """
     if user_path is None:
-        path = BUNDLED_DB_PATH
-        if not path.exists():
+        if not BUNDLED_DB_PATH.exists():
             raise HMMDatabaseError(
-                f"Bundled HMM database not found at {path}. Either "
+                f"Bundled HMM database not found at {BUNDLED_DB_PATH}. Either "
                 "reinstall repseq with the bundled data files or set "
                 "hmm.database to a user-supplied .hmm path in your config."
             )
-        return path
-    path = Path(user_path).expanduser().resolve()
+        return BUNDLED_DB_PATH
+
+    path = Path(user_path).expanduser()
     if not path.exists():
-        raise HMMDatabaseError(f"hmm.database path does not exist: {path}")
+        # Fall back to a bundled set selected by bare name
+        # (e.g. "Filoviridae" → repseq/data/hmms/Filoviridae).
+        bundled = BUNDLED_HMMS_DIR / user_path
+        if bundled.exists():
+            path = bundled
+        else:
+            raise HMMDatabaseError(
+                f"hmm.database does not exist as a path ({path}) and is not a "
+                f"bundled set under {BUNDLED_HMMS_DIR} (looked for "
+                f"'{user_path}'). Point it at a .hmm file, a directory of "
+                f".hmm files, or a bundled set name."
+            )
+    path = path.resolve()
+    if path.is_dir():
+        return _combine_hmm_directory(path, cache_dir)
     if not path.is_file():
-        raise HMMDatabaseError(f"hmm.database is not a file: {path}")
+        raise HMMDatabaseError(f"hmm.database is not a file or directory: {path}")
     return path
+
+
+def _combine_hmm_directory(
+    dir_path: Path, cache_dir: Optional[Path]
+) -> Path:
+    """Concatenate every ``*.hmm`` in ``dir_path`` into one combined database.
+
+    The combined file is cached under ``cache_dir`` (or a temp dir) keyed by
+    a content signature of the member files, so it is rebuilt only when a
+    member is added, removed, or modified — and the same combined file (and
+    its pressed indexes) is reused across runs. Members are concatenated in
+    sorted filename order for a deterministic result.
+    """
+    members = sorted(p for p in dir_path.glob("*.hmm") if p.is_file())
+    if not members:
+        raise HMMDatabaseError(
+            f"HMM database directory {dir_path} contains no .hmm files."
+        )
+    # Content signature: name + size + mtime of every member (cheap, no read).
+    sig_payload = "|".join(
+        f"{p.name}:{p.stat().st_size}:{int(p.stat().st_mtime)}" for p in members
+    ).encode("utf-8")
+    sig = hashlib.sha256(sig_payload).hexdigest()[:16]
+
+    base = Path(cache_dir).expanduser() if cache_dir else Path(tempfile.gettempdir())
+    combined_dir = base / "hmm_combined"
+    combined_dir.mkdir(parents=True, exist_ok=True)
+    combined = combined_dir / f"{dir_path.name}_{sig}.hmm"
+
+    if not combined.exists():
+        tmp = combined.with_suffix(".hmm.partial")
+        with open(tmp, "w") as out:
+            for member in members:
+                text = member.read_text()
+                out.write(text)
+                if not text.endswith("\n"):
+                    out.write("\n")
+        tmp.replace(combined)  # atomic publish so a half-written file is never used
+    return combined
 
 
 def has_press_index(db_path: Path) -> bool:

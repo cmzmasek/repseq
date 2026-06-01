@@ -256,8 +256,12 @@ def check_hmm_database(cfg: dict[str, Any]) -> list[CheckResult]:
         ))
         return results
     user_db = hmm_cfg.get("database")
+    cache_dir = cfg.get("cache_dir")
     try:
-        db_path = resolve_database_path(user_db)
+        db_path = resolve_database_path(
+            user_db,
+            cache_dir=Path(cache_dir).expanduser() if cache_dir else None,
+        )
     except Exception as exc:
         results.append(CheckResult(
             WARN, "hmm.database",

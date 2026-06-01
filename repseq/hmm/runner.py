@@ -63,7 +63,9 @@ def scan_proteins(
         raise HMMScanError("hmmscan is not on PATH")
 
     hcfg = cfg.get("hmm", {}) or {}
-    db_path = resolve_database_path(hcfg.get("database"))
+    db_path = resolve_database_path(
+        hcfg.get("database"), cache_dir=_cache_dir(cfg)
+    )
     ensure_pressed(db_path)
     sig = db_signature(db_path)
 
@@ -102,9 +104,17 @@ def scan_proteins(
     return results
 
 
+def _cache_dir(cfg: dict[str, Any]) -> Optional[Path]:
+    """Cache directory for combined directory-databases (None → temp)."""
+    cd = cfg.get("cache_dir")
+    return Path(cd).expanduser() if cd else None
+
+
 def get_ga_cutoffs(cfg: dict[str, Any]) -> dict[str, Optional[float]]:
     """Parse GA cutoffs from the configured database (call once per run)."""
-    db_path = resolve_database_path(cfg.get("hmm", {}).get("database"))
+    db_path = resolve_database_path(
+        cfg.get("hmm", {}).get("database"), cache_dir=_cache_dir(cfg)
+    )
     return parse_ga_cutoffs(db_path)
 
 

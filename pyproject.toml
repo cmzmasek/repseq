@@ -42,3 +42,8 @@ version = {attr = "repseq.__version__"}
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["repseq*"]
+
+[tool.setuptools.package-data]
+# Bundled HMM sets: the top-level viral-core database plus any
+# family-specific subdirectory of .hmm files (e.g. data/hmms/Filoviridae/).
+repseq = ["data/hmms/*.hmm", "data/hmms/*/*.hmm", "data/hmms/*/README.md"]

@@ -395,11 +395,20 @@ representative:
 # Use `repseq doctor` to verify install state.
 hmm:
   enabled: true
-  # null → use the bundled viral-core profile set shipped with repseq
-  # (repseq/data/hmms/repseq_viral_core.hmm — 19 Pfam-A profiles for
-  # RdRp, nucleocapsid, glycoprotein, helicase, protease across the
-  # main viral families). Absolute path → user-supplied .hmm file;
-  # auto-`hmmpress`-ed on first use if the .h3* index files are missing.
+  # null → bundled viral-core profile set shipped with repseq
+  # (repseq/data/hmms/repseq_viral_core.hmm — Pfam-A profiles for RdRp,
+  # nucleocapsid, glycoprotein, helicase, protease across the main viral
+  # families). Also accepts:
+  #   • a path to a single .hmm FILE (user-supplied database);
+  #   • a path to a DIRECTORY of .hmm files — every *.hmm in it is
+  #     concatenated into one combined database (cached under cache_dir,
+  #     rebuilt only when a member changes), so you can keep family-
+  #     specific profiles as separate files;
+  #   • a BARE NAME of a bundled family set under repseq/data/hmms/, e.g.
+  #     `database: Filoviridae` → repseq/data/hmms/Filoviridae/ (a
+  #     directory, combined as above).
+  # Whatever resolves is auto-`hmmpress`-ed on first use if its .h3*
+  # index files are missing or stale.
   database: null
   # E-value cutoff used for profiles that lack a curated Pfam GA
   # (gathering threshold). Hits with domain E-value ≤ this value pass.

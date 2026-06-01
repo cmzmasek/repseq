@@ -1916,8 +1916,22 @@ The bundled set was assembled from Pfam-A via
 it against a newer Pfam release.
 
 To use your own profiles (e.g. VOGdb, a custom curated set, or the
-full Pfam-A.hmm), set `hmm.database` to an absolute path. The first
-run auto-`hmmpress`-es the file if the `.h3*` index files are missing.
+full Pfam-A.hmm), set `hmm.database` to one of:
+
+- **a single `.hmm` file** — the classic user-supplied database;
+- **a directory of `.hmm` files** — every `*.hmm` in it is concatenated
+  into one combined database (cached under `cache_dir`, rebuilt only when
+  a member file is added/removed/changed). Handy for keeping
+  family-specific profiles as separate files instead of `cat`-ing them
+  yourself;
+- **a bare bundled-set name** — a subdirectory under
+  `repseq/data/hmms/`, e.g. `hmm.database: Filoviridae` selects the
+  bundled `repseq/data/hmms/Filoviridae/` set (combined as above). Drop
+  `*.hmm` files into such a directory to add a family-specific bundled
+  set; see that directory's `README.md` for the convention.
+
+Whatever resolves is auto-`hmmpress`-ed on first use if its `.h3*`
+indexes are missing or stale.
 
 `repseq doctor` reports the DB status (path, profile count, indexed
 Y/N, GA-cutoff coverage).
@@ -1985,7 +1999,7 @@ marker for the same segment, `segment_markers` wins.
 ```yaml
 hmm:
   enabled: true                       # master switch
-  database: null                      # null → bundled; abs path → user-supplied
+  database: null                      # null → bundled core; .hmm file, dir of .hmm files, or bundled-set name (e.g. Filoviridae)
   default_evalue: 1.0e-5              # used when a profile has no curated GA
   use_ga_when_available: true         # prefer curated GA over default_evalue
   relative_length_cutoff: 0.5         # ali_span / hmm_len ≥ this
