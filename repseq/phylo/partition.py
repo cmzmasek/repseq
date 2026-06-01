@@ -506,4 +506,5 @@ def build_partitioned_phylogeny(
         input_fasta=None,
         extra_outputs=extra_outputs,
         trim_note=trim_note,
+        run_review=True,
     )

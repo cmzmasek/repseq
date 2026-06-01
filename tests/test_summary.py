@@ -468,6 +468,29 @@ def test_render_summary_incongruence_omitted_when_disabled(make_seq, tmp_path):
     assert "Robinson-Foulds" not in md
 
 
+def test_render_summary_taxonomy_review_described_when_enabled(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {
+        "tool": "fasttree",
+        "taxonomy_review": {"enabled": True, "ranks": ["family", "genus", "subgenus"]},
+    }
+    md = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True,
+    )
+    assert "Phylogeny-based taxonomy review" in md
+    assert "_taxonomy_review.tsv" in md
+    assert "never auto-changed" in md
+
+
+def test_render_summary_taxonomy_review_absent_when_disabled(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"tool": "fasttree", "taxonomy_review": {"enabled": False}}
+    md = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True,
+    )
+    assert "Phylogeny-based taxonomy review" not in md
+
+
 def test_render_summary_no_phylo_section_when_neither_ran(make_seq, tmp_path):
     cfg = _base_cfg(tmp_path)
     md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])

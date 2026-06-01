@@ -270,6 +270,7 @@ def run_phylogeny(
         xml_name_prefix=prefix,
         color_scheme=color_scheme,
         trimal_settings=(cfg.get("phylo", {}) or {}).get("trimal"),
+        taxonomy_review=True,
     )
 
 
@@ -288,6 +289,7 @@ def _build_tree(
     mafft_use_auto: bool = True,
     domain_architecture: bool = False,
     trimal_settings: Optional[dict[str, Any]] = None,
+    taxonomy_review: bool = False,
 ) -> list[Path]:
     """Build one MSA + tree + phyloXML from a list of leaves.
 
@@ -452,6 +454,7 @@ def _build_tree(
         domain_architecture=domain_architecture,
         input_fasta=input_fasta,
         trim_note=trim_note_str,
+        run_review=taxonomy_review,
     )
 
 
@@ -477,6 +480,7 @@ def _finalize_tree(
     input_fasta: Optional[Path] = None,
     extra_outputs: Optional[list[Path]] = None,
     trim_note: Optional[str] = None,
+    run_review: bool = False,
 ) -> list[Path]:
     """Shared post-tree tail: parse Newick → root → LCA → phyloXML.
 
@@ -592,8 +596,39 @@ def _finalize_tree(
         except OSError:
             pass
 
+    review_extra: list[Path] = []
+    if run_review:
+        # Phylogeny-based taxonomy review (opt-in). Operates on the same
+        # rooted, LCA-annotated tree the phyloXML was built from. Soft-fails
+        # so a review bug never voids a real tree. The imputation map is
+        # stashed on cfg for the cli to apply to the corrected output copies.
+        try:
+            from .taxonomy_review import run_taxonomy_review
+            result = run_taxonomy_review(
+                parsed_tree, reps_by_short_id,
+                tree_tool=tree_tool, cfg=cfg or {},
+                out_dir=out_dir, file_prefix=file_prefix,
+            )
+            if result:
+                if cfg is not None:
+                    cfg["_taxonomy_review"] = result
+                if result.get("path"):
+                    review_extra.append(result["path"])
+                    n = len(result.get("verdicts", []))
+                    n_imp = sum(len(v) for v in result.get("imputations", {}).values())
+                    print(
+                        f"[phylo] taxonomy review: {n} finding(s), "
+                        f"{n_imp} high-confidence imputation(s) → "
+                        f"{result['path'].name}",
+                        file=sys.stderr,
+                    )
+        except Exception as exc:  # noqa: BLE001 — soft-fail, never abort tree
+            logger.warning("[phylo] taxonomy review failed: %s", exc)
+            print(f"[taxonomy-review skipped] {exc}", file=sys.stderr)
+
     return (
         [msa_fasta, newick_path, phyloxml_path, id_map_path]
         + written_extras
         + (extra_outputs or [])
+        + review_extra
     )

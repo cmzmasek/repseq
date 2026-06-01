@@ -448,6 +448,35 @@ DEFAULTS: dict[str, Any] = {
             # dictating the label of a much larger bare clade.
             "coverage_threshold": 0.5,
         },
+        # Phylogeny-based taxonomy review (v0.39.0). OFF by default — a
+        # new scientific inference step. When enabled (and --phylo built a
+        # tree), each representative leaf is checked against the smallest
+        # well-supported, taxonomically-pure clade enclosing it: a blank
+        # rank is imputed from the clade's majority value, a populated rank
+        # that disagrees is flagged (never auto-changed). Writes
+        # {prefix}_taxonomy_review.tsv; with write_corrected, also emits
+        # *_corrected copies of the rep TSV + protein FASTA with
+        # high-confidence imputed blanks filled (each tagged "imputed").
+        # The tree, its colouring, and its LCA labels are NOT modified.
+        "taxonomy_review": {
+            "enabled": False,
+            # Ranks to evaluate, coarse→fine; evaluated in that order so
+            # imputations stay hierarchy-consistent (a finer rank is only
+            # imputed from neighbours agreeing on the coarser ones).
+            # Species is deliberately omitted — viral species monophyly is
+            # too often violated to trust this way.
+            "ranks": ["family", "genus", "subgenus"],
+            # "high"-confidence bar (only high-confidence imputations are
+            # written into the corrected copies; everything down to the
+            # relaxed "medium" bar is still listed in the review TSV).
+            "min_support": 90,        # enclosing-clade branch support, 0-100
+            "min_purity": 0.9,        # fraction of labelled neighbours agreeing
+            "min_agreeing": 3,        # min labelled neighbours backing the call
+            "require_refseq_anchor": True,  # a RefSeq/reviewed leaf must agree
+            # Also write *_corrected copies of the rep TSV + protein FASTA
+            # with high-confidence imputed blanks filled (originals kept).
+            "write_corrected": True,
+        },
         # PhyloXML writer knobs.
         "phyloxml": {
             # Override the <confidence type="..."> attribute. ``auto``

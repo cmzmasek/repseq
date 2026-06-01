@@ -1591,6 +1591,49 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
             click.echo(f"[phylo skipped] {exc}", err=True)
         except Exception as exc:
             click.echo(f"[phylo failed] {exc}", err=True)
+        # Phylogeny-based taxonomy review: the review TSV (imputation
+        # ledger) was written inside the phylo step; here we materialise the
+        # corrected rep TSV + protein FASTA with high-confidence imputed
+        # blanks filled (clean values — the ledger records which cells).
+        # Gated on write_corrected + actual imputations; soft-fails.
+        review = cfg.get("_taxonomy_review")
+        rcfg = (cfg.get("phylo", {}) or {}).get("taxonomy_review", {}) or {}
+        if review and review.get("imputations") and rcfg.get("write_corrected", True):
+            try:
+                import copy as _copy
+                from .output.report import (
+                    write_proteins_fasta,
+                    write_representative_isolates_tsv,
+                    write_representative_sequences_tsv,
+                )
+                from .phylo.taxonomy_review import apply_imputations
+                out_dir = Path(cfg["output"]["dir"])
+                prefix = cfg["output"].get("prefix", "repseq")
+                segmented = bool(cfg.get("segmented", {}).get("enabled"))
+                corrected_reps, corrected_ci = apply_imputations(
+                    result.representatives, complete_isolates,
+                    review["imputations"],
+                )
+                if segmented:
+                    tsv_path = out_dir / f"{prefix}_representative_isolates_corrected.tsv"
+                    write_representative_isolates_tsv(corrected_reps, tsv_path)
+                    fasta_path = out_dir / f"{prefix}_representative_isolate_proteins_corrected.fasta"
+                else:
+                    tsv_path = out_dir / f"{prefix}_representative_sequences_corrected.tsv"
+                    write_representative_sequences_tsv(corrected_reps, tsv_path)
+                    fasta_path = out_dir / f"{prefix}_representative_sequence_proteins_corrected.fasta"
+                out_files.append(tsv_path)
+                corrected_result = _copy.copy(result)
+                corrected_result.representatives = corrected_reps
+                if write_proteins_fasta(corrected_result, corrected_ci, fasta_path):
+                    out_files.append(fasta_path)
+                n_imp = sum(len(v) for v in review["imputations"].values())
+                click.echo(
+                    f"Wrote taxonomy-corrected copies ({n_imp} imputed "
+                    f"value(s) filled): {tsv_path.name}",
+                )
+            except Exception as exc:
+                click.echo(f"[taxonomy-corrected copy skipped] {exc}", err=True)
     if per_protein_phylo:
         out_dir = Path(cfg["output"]["dir"])
         prefix = cfg["output"].get("prefix", "repseq")

@@ -605,6 +605,31 @@ phylo:
     # handful of well-annotated leaves dictating the label of a much
     # larger bare clade.
     coverage_threshold: 0.5
+  taxonomy_review:
+    # Phylogeny-based taxonomy review (OFF by default — a new scientific
+    # inference). When enabled and --phylo built a tree, each
+    # representative leaf is compared against the smallest well-supported,
+    # taxonomically-pure clade enclosing it:
+    #   • a BLANK rank is imputed from the clade's majority value;
+    #   • a POPULATED rank that disagrees is FLAGGED (never auto-changed).
+    # Writes {prefix}_taxonomy_review.tsv (the imputation/conflict ledger).
+    # The tree, its colouring, and its LCA labels are NOT modified.
+    enabled: false
+    # Ranks to evaluate, coarse→fine (evaluated in that order so
+    # imputations stay hierarchy-consistent). Species is omitted on
+    # purpose — viral species monophyly is too often violated to trust.
+    ranks: [family, genus, subgenus]
+    # "high"-confidence bar. Only high-confidence imputations are written
+    # into the corrected copies; everything down to a relaxed "medium" bar
+    # still appears in the review TSV.
+    min_support: 90          # enclosing-clade branch support (0-100)
+    min_purity: 0.9          # fraction of labelled neighbours agreeing
+    min_agreeing: 3          # min labelled neighbours backing the call
+    require_refseq_anchor: true   # a RefSeq/reviewed leaf must be among them
+    # Also write *_corrected copies of the rep TSV + protein FASTA with
+    # high-confidence imputed blanks filled in (clean values; originals
+    # kept untouched — the review TSV records which cells were filled).
+    write_corrected: true
   phyloxml:
     # <confidence> element's type= attribute. "auto" picks "sh_like" for
     # FastTree and "ufboot" for IQ-TREE (which matches the default tree

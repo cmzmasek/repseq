@@ -926,6 +926,33 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             "from the per-protein MSAs already written by "
             "`--per-protein-phylo` — no fresh alignment is run.\n"
         )
+    tr_cfg = (phylo_cfg.get("taxonomy_review", {}) or {})
+    if phylo_ran and tr_cfg.get("enabled", False):
+        tr_ranks = ", ".join(tr_cfg.get("ranks", ["family", "genus", "subgenus"]))
+        paragraphs.append(
+            f"**Phylogeny-based taxonomy review.** Each representative was "
+            f"checked against the smallest well-supported, taxonomically "
+            f"pure clade enclosing it on the whole-genome tree (ranks: "
+            f"{tr_ranks}; minimum branch support "
+            f"{tr_cfg.get('min_support', 90)}, minimum clade purity "
+            f"{tr_cfg.get('min_purity', 0.9)}, at least "
+            f"{tr_cfg.get('min_agreeing', 3)} agreeing neighbours"
+            f"{', a RefSeq/reviewed anchor required' if tr_cfg.get('require_refseq_anchor', True) else ''}"
+            f"). A **blank** rank was imputed from the clade's majority "
+            f"value; a **populated** rank that disagreed was flagged as a "
+            f"suggestion only (never auto-changed). Imputations are kept "
+            f"hierarchy-consistent (a finer rank only filled from "
+            f"neighbours agreeing on the coarser ones). All findings are "
+            f"written to `{{prefix}}_taxonomy_review.tsv`"
+            + (
+                "; high-confidence imputed blanks are additionally filled "
+                "into `{prefix}_representative_*_corrected.tsv` and the "
+                "corresponding corrected protein FASTA (originals kept). "
+                if tr_cfg.get("write_corrected", True) else ". "
+            )
+            + "The tree topology, colouring, and LCA labels are NOT "
+            "modified by this step.\n"
+        )
     return "\n".join(paragraphs)
 
 

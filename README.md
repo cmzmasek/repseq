@@ -290,6 +290,8 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_msa.fasta`, `_tree.nwk`, `_tree.xml`, `_tree_id_map.tsv` | only with `--phylo` | Alignment + tree + name mapping. |
 | `{prefix}_partition.nex`, `_msa_<family>.fasta` | `--phylo`, protein + IQ-TREE | NEXUS partition file + per-family alignments (partitioned-supermatrix tree). |
 | `{prefix}_msa_untrimmed.fasta` | `--phylo` + `phylo.trimal.enabled` | Raw MAFFT alignment retained when trimAl trimming ran (`_msa.fasta` is then the trimmed tree input). |
+| `{prefix}_taxonomy_review.tsv` | `--phylo` + `phylo.taxonomy_review.enabled` | Phylogeny-based taxonomy verdicts: blank ranks imputed from the enclosing clade (`impute_missing`) and populated-but-disagreeing ranks flagged (`conflict_flag`), with evidence + confidence. v0.39.0. |
+| `{prefix}_representative_*_corrected.tsv`, `_representative_*_proteins_corrected.fasta` | above + `write_corrected` | Copies of the rep TSV + protein FASTA with **high-confidence imputed blanks filled** (clean values; originals kept). v0.39.0. |
 | `{prefix}_iqtree_summary.txt` | only with `--phylo` + IQ-TREE | IQ-TREE ModelFinder report. |
 | `{prefix}_iqtree_model.txt` | only with `--phylo` + IQ-TREE | Grep-friendly sidecar with the ModelFinder pick(s): one `<label>: <model>` line per partition (or a single `GENOME: <model>` line for the non-partitioned path). v0.28.0. |
 | `{prefix}_per_protein/` | only with `--per-protein-phylo` | One tree (MSA + Newick + phyloXML + id map) per marker; plus `_incongruence.tsv` of pairwise Robinson-Foulds distances. |
@@ -1635,6 +1637,60 @@ segmented:
 
 Records are fetched from NCBI in batches and cached locally, so a second run on
 the same data needs no network. Skipped automatically under `--no-resolve`.
+
+---
+
+## Phylogeny-based taxonomy review (`phylo.taxonomy_review`, v0.39.0)
+
+Many viral records carry **missing** taxonomy (a blank genus, "unclassified")
+or a **wrong/stale** label that pre-dates an ICTV reclassification. Once
+`--phylo` has built a well-supported, LCA-labelled tree, the tree itself is
+evidence: a representative nested deep inside a strongly-supported,
+taxonomically *pure* clade is very likely the same taxon as its neighbours.
+
+Enable it (off by default — it's a new inference step):
+
+```yaml
+phylo:
+  taxonomy_review:
+    enabled: true
+    ranks: [family, genus, subgenus]   # coarse→fine; species omitted on purpose
+    min_support: 90        # enclosing-clade branch support (0-100)
+    min_purity: 0.9        # fraction of labelled neighbours agreeing
+    min_agreeing: 3        # min labelled neighbours backing the call
+    require_refseq_anchor: true
+    write_corrected: true
+```
+
+For each representative leaf and rank, it walks up to the **smallest enclosing
+clade** that clears the gates (support, purity, neighbour count, RefSeq/reviewed
+anchor) and then:
+
+- **imputes** a *blank* rank from the clade's majority value, or
+- **flags** a *populated* rank that disagrees — a suggestion only, **never**
+  auto-changed.
+
+Ranks are evaluated coarse→fine and imputations are kept **hierarchy-consistent**
+(a subgenus is only imputed from neighbours that agree on genus; a blank genus
+is back-filled when the agreeing neighbours share one). Confidence is tiered
+(high/medium) from support × purity × neighbour count × anchor.
+
+**Outputs.** `{prefix}_taxonomy_review.tsv` lists every verdict (impute +
+conflict) with evidence columns — this is the authoritative **per-cell
+imputation ledger**. With `write_corrected: true`, the **high-confidence
+imputations** are additionally filled into
+`{prefix}_representative_*_corrected.tsv` and the corresponding corrected
+protein FASTA (clean values; the originals are kept untouched, and the review
+TSV records exactly which cells were filled). Conflicts are *never* written
+into the corrected copies.
+
+**Scope & cautions (v1).** Representatives only (the tree's leaves; a
+non-representative inherits nothing here). The tree topology, colouring, and LCA
+labels are **not** modified — no feedback loop. The walk uses the same rooted
+tree shown in the phyloXML; the support + purity + anchor gates are what guard
+against rooting bias and recombination artifacts. Species is intentionally
+excluded (viral species monophyly is too often violated). Soft-fails (a stderr
+note, no files) if `--phylo` didn't build a tree.
 
 ---
 
