@@ -271,6 +271,7 @@ def run_phylogeny(
         color_scheme=color_scheme,
         trimal_settings=(cfg.get("phylo", {}) or {}).get("trimal"),
         taxonomy_review=True,
+        basis_role="genome",
     )
 
 
@@ -290,6 +291,12 @@ def _build_tree(
     domain_architecture: bool = False,
     trimal_settings: Optional[dict[str, Any]] = None,
     taxonomy_review: bool = False,
+    basis_role: Optional[str] = None,
+    basis_family: Optional[str] = None,
+    basis_segment: Optional[str] = None,
+    basis_architecture: Optional[str] = None,
+    basis_families: Optional[list[str]] = None,
+    basis_parent: Optional[str] = None,
 ) -> list[Path]:
     """Build one MSA + tree + phyloXML from a list of leaves.
 
@@ -455,6 +462,12 @@ def _build_tree(
         input_fasta=input_fasta,
         trim_note=trim_note_str,
         run_review=taxonomy_review,
+        basis_role=basis_role,
+        basis_family=basis_family,
+        basis_segment=basis_segment,
+        basis_architecture=basis_architecture,
+        basis_families=basis_families,
+        basis_parent=basis_parent,
     )
 
 
@@ -481,6 +494,12 @@ def _finalize_tree(
     extra_outputs: Optional[list[Path]] = None,
     trim_note: Optional[str] = None,
     run_review: bool = False,
+    basis_role: Optional[str] = None,
+    basis_family: Optional[str] = None,
+    basis_segment: Optional[str] = None,
+    basis_architecture: Optional[str] = None,
+    basis_families: Optional[list[str]] = None,
+    basis_parent: Optional[str] = None,
 ) -> list[Path]:
     """Shared post-tree tail: parse Newick → root → LCA → phyloXML.
 
@@ -585,6 +604,12 @@ def _finalize_tree(
             leaf_protein_ids=leaf_protein_ids,
             domain_architecture=domain_architecture,
             trim_note=trim_note,
+            basis_role=basis_role,
+            basis_family=basis_family,
+            basis_segment=basis_segment,
+            basis_architecture=basis_architecture,
+            basis_families=basis_families,
+            basis_parent=basis_parent,
         )
     except Exception as exc:
         raise PhyloError(f"Newick → phyloXML conversion failed: {exc}") from exc

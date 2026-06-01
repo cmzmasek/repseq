@@ -507,4 +507,6 @@ def build_partitioned_phylogeny(
         extra_outputs=extra_outputs,
         trim_note=trim_note,
         run_review=True,
+        basis_role="genome_partitioned",
+        basis_families=[label for label, _nx, _al in fam_msas],
     )

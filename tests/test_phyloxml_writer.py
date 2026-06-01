@@ -489,6 +489,56 @@ def test_summary_properties_omitted_when_no_proteins(tmp_path):
     assert "repseq:protein_names" not in refs
 
 
+def test_basis_role_leads_description_and_emits_phylogeny_properties(tmp_path):
+    """When basis_role is given, the <description> leads with the
+    plain-English basis sentence and the phylogeny carries machine-readable
+    repseq: basis <property> elements (applies_to="phylogeny")."""
+    reps = [_make_seq("A"), _make_seq("B"), _make_seq("C")]
+    newick = tmp_path / "tree.nwk"
+    _write_newick(newick, "((S0001:0.1,S0002:0.1)0.95:0.2,S0003:0.3);")
+    id_map = {f"S{i + 1:04d}": rep.id for i, rep in enumerate(reps)}
+    out = tmp_path / "tree.xml"
+    write_phyloxml(
+        newick, out, reps, id_map, cfg={}, prefix="test",
+        alphabet="nucleotide", msa_tool="MAFFT", msa_version="v7.520",
+        tree_tool="FastTree", tree_version="2.1.11", model="GTR", ufboot=None,
+        basis_role="genome",
+    )
+    root = ET.parse(out).getroot()
+    phylogeny = root.find(_ns("phylogeny"))
+    desc = phylogeny.find(_ns("description")).text
+    # Description leads with the basis sentence, provenance follows.
+    assert desc.startswith("This tree is based on the whole-genome nucleotide")
+    assert "repseq" in desc and "MSA=MAFFT" in desc
+    # Phylogeny-level basis properties present and namespaced.
+    phylo_props = {
+        p.get("ref"): p.text
+        for p in phylogeny.findall(_ns("property"))
+        if p.get("applies_to") == "phylogeny"
+    }
+    assert phylo_props["repseq:substrate"] == "genome_nt"
+    assert phylo_props["repseq:analysis_mode"] == "non_segmented"
+    assert phylo_props["repseq:alphabet"] == "nucleotide"
+    assert phylo_props["repseq:leaf_unit"] == "sequence"
+    assert phylo_props["repseq:tree_basis"].startswith("This tree is based on")
+
+
+def test_no_basis_role_omits_basis_properties(tmp_path):
+    """Legacy callers (no basis_role) get no phylogeny-level basis props
+    and the description keeps its pre-basis leading token."""
+    reps = [_make_seq("A"), _make_seq("B"), _make_seq("C")]
+    out = _run_write(tmp_path, reps)
+    root = ET.parse(out).getroot()
+    phylogeny = root.find(_ns("phylogeny"))
+    phylo_prop_refs = {
+        p.get("ref") for p in phylogeny.findall(_ns("property"))
+        if p.get("applies_to") == "phylogeny"
+    }
+    assert "repseq:tree_basis" not in phylo_prop_refs
+    desc = phylogeny.find(_ns("description")).text
+    assert desc.startswith("repseq ")
+
+
 def test_leaf_property_elements_use_repseq_namespace(tmp_path):
     reps = [_make_seq("A"), _make_seq("B"), _make_seq("C")]
     out = _run_write(tmp_path, reps)

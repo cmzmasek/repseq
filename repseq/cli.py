@@ -1680,6 +1680,17 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
         complete_isolates=complete_isolates,
         pre_clustering_sequences=pre_clustering_sequences,
     )
+    # One-line provenance header shared by the four plain-text taxonomic
+    # reports, so each is self-describing when read in isolation (dataset
+    # type, clustering substrate, tool, rep count). Computed once; soft so a
+    # build failure never blocks the reports.
+    try:
+        from .output.summary import build_provenance_header
+        _report_provenance = build_provenance_header(
+            cfg, result, segmented=bool(complete_isolates),
+        )
+    except Exception:
+        _report_provenance = None
     # Taxonomic diversity report — distinct taxa per rank before/after
     # clustering, plus a per-taxon breakdown for low-diversity ranks. The
     # "before" pool is the post-QC sequence list fed to the mode (CONCAT
@@ -1695,6 +1706,7 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
                 result.representatives,
                 segmented=bool(complete_isolates),
                 path=tax_path,
+                provenance=_report_provenance,
             )
             out_files.append(tax_path)
         except Exception as exc:
@@ -1727,6 +1739,7 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
                 cfg,
                 segmented=bool(complete_isolates),
                 path=pr_path,
+                provenance=_report_provenance,
             ):
                 out_files.append(pr_path)
         except Exception as exc:
@@ -1758,6 +1771,7 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
                 cfg,
                 segmented=bool(complete_isolates),
                 path=nt_path,
+                provenance=_report_provenance,
             ):
                 out_files.append(nt_path)
         except Exception as exc:
@@ -1792,6 +1806,7 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
                 cfg,
                 segmented=bool(complete_isolates),
                 path=pp_path,
+                provenance=_report_provenance,
             ):
                 out_files.append(pp_path)
         except Exception as exc:

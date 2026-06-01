@@ -146,6 +146,173 @@ def _render_header(cfg: dict, command: str, mode: str) -> str:
     )
 
 
+# Compact substrate labels for the at-a-glance table, keyed by the
+# `substrate` code from repseq.phylo.basis.describe_tree_basis so the
+# glance block, the phyloXML basis, and the detailed sections all agree.
+_SUBSTRATE_SHORT: dict[str, str] = {
+    "segment_marker_concat": "per-isolate marker-protein concatenation (amino-acid)",
+    "segment_nt_concat": "per-isolate segment-NT concatenation (nucleotide)",
+    "marker_protein_concat": "marker-protein concatenation (amino-acid)",
+    "single_marker": "single marker protein (amino-acid)",
+    "genome_nt": "whole-genome nucleotide sequence",
+    "supermatrix": "partitioned supermatrix of per-marker alignments (amino-acid)",
+}
+
+
+def _clustering_substrate_short(cfg: dict) -> str:
+    """Short phrase for what the clustering was actually performed on,
+    matching the branch logic of :func:`_render_selection`."""
+    cluster_cfg = cfg.get("clustering", {}) or {}
+    alphabet = cluster_cfg.get("alphabet_for_clustering", "protein")
+    segmented = bool(cfg.get("segmented", {}).get("enabled"))
+    aa = alphabet == "protein"
+    if segmented:
+        return _SUBSTRATE_SHORT[
+            "segment_marker_concat" if aa else "segment_nt_concat"
+        ]
+    if aa and cluster_cfg.get("concatenate_markers"):
+        return _SUBSTRATE_SHORT["marker_protein_concat"]
+    if aa:
+        return _SUBSTRATE_SHORT["single_marker"]
+    return _SUBSTRATE_SHORT["genome_nt"]
+
+
+def build_provenance_header(cfg: dict, result: RunResult, segmented: bool) -> str:
+    """One-line, ``#``-commented provenance string for the top of a
+    plain-text report, so an isolated ``*_taxonomic_report.txt`` is
+    self-describing without the reader needing ``_summary.md``.
+
+    Shape (single line):
+    ``# repseq <ver> | <mode> selection | segmented (3 segments: L,M,S) |
+    clustering: <substrate> via <tool> | <n> representatives from <m> inputs``
+    """
+    cluster_cfg = cfg.get("clustering", {}) or {}
+    backend = cluster_cfg.get("backend", "mmseqs2")
+    alphabet = cluster_cfg.get("alphabet_for_clustering", "protein")
+    tool_name = (
+        "MMseqs2" if backend != "cdhit"
+        else ("cd-hit" if alphabet == "protein" else "cd-hit-est")
+    )
+    if segmented:
+        seg_cfg = cfg.get("segmented", {}) or {}
+        virus_cfg = (seg_cfg.get("viruses") or {}).get(seg_cfg.get("virus") or "", {})
+        segs = virus_cfg.get("segments") or []
+        seg_str = f": {','.join(segs)}" if segs else ""
+        ds = f"segmented ({len(segs) or virus_cfg.get('expected_segments') or '?'} segments{seg_str})"
+        rep_unit = "representative isolates"
+    else:
+        ds = "non-segmented"
+        rep_unit = "representative sequences"
+    n_reps = len(result.representatives)
+    return (
+        f"# repseq {REPSEQ_VERSION} | {result.mode} selection | {ds} | "
+        f"clustering: {_clustering_substrate_short(cfg)} via {tool_name} | "
+        f"{n_reps} {rep_unit}"
+    )
+
+
+def _render_at_a_glance(
+    cfg: dict, qc_report: QCReport, result: RunResult,
+    phylo_ran: bool, per_protein_ran: bool, per_segment_ran: bool,
+) -> str:
+    """A compact, run-specific "what was done" table at the top of the
+    summary, so a reader unfamiliar with repseq sees the key decisions
+    (dataset type, clustering substrate, tree substrate) immediately
+    rather than having to infer them from the prose sections below.
+
+    Every cell is derived from the live ``cfg`` / ``QCReport`` /
+    ``RunResult`` for this run, so it cannot drift from what actually
+    happened."""
+    seg_cfg = cfg.get("segmented", {}) or {}
+    segmented = bool(seg_cfg.get("enabled"))
+    cluster_cfg = cfg.get("clustering", {}) or {}
+    backend = cluster_cfg.get("backend", "mmseqs2")
+    alphabet = cluster_cfg.get("alphabet_for_clustering", "protein")
+    tool_name = (
+        "MMseqs2" if backend != "cdhit"
+        else ("cd-hit" if alphabet == "protein" else "cd-hit-est")
+    )
+
+    rows: list[tuple[str, str]] = []
+
+    # Dataset type.
+    if segmented:
+        virus_cfg = (seg_cfg.get("viruses") or {}).get(seg_cfg.get("virus") or "", {})
+        expected = virus_cfg.get("expected_segments")
+        segs = virus_cfg.get("segments") or []
+        seg_str = f" ({', '.join(segs)})" if segs else ""
+        rows.append(("Dataset type", f"Segmented virus — {expected} segments{seg_str}"))
+    else:
+        rows.append(("Dataset type", "Non-segmented (one sequence per record)"))
+
+    # Input → representatives.
+    n_in = qc_report.total_input
+    n_reps = len(result.representatives)
+    rep_unit = "representative isolates" if segmented else "representative sequences"
+    rows.append((
+        "Input → representatives",
+        f"{_fmt_int(n_in)} input sequences → {_fmt_int(n_reps)} {rep_unit}",
+    ))
+
+    # Clustering substrate + tool.
+    rows.append(("Clustering substrate", _clustering_substrate_short(cfg)))
+    rows.append(("Clustering tool", tool_name))
+
+    # Selection mode (one short phrase).
+    rows.append(("Selection mode", f"`{result.mode}`"))
+
+    # Whole-genome tree substrate (only when --phylo ran).
+    if phylo_ran:
+        from ..phylo.basis import describe_tree_basis
+        phylo_cfg = cfg.get("phylo", {}) or {}
+        tool_pref = phylo_cfg.get("tool", "auto")
+        tree_aa = alphabet == "protein"
+        if tool_pref == "auto":
+            tree_tool = "IQ-TREE" if tree_aa else "FastTree"
+        else:
+            tree_tool = "IQ-TREE" if tool_pref == "iqtree" else "FastTree"
+        part_cfg = phylo_cfg.get("partition", {}) or {}
+        partitioned = (
+            bool(part_cfg.get("enabled", True)) and tree_aa
+            and tree_tool == "IQ-TREE"
+        )
+        role = "genome_partitioned" if partitioned else "genome"
+        _, props = describe_tree_basis(
+            role,
+            alphabet="protein" if tree_aa else "nucleotide",
+            segmented=segmented,
+            concat_markers=bool(cluster_cfg.get("concatenate_markers")),
+        )
+        substrate_short = _SUBSTRATE_SHORT.get(
+            props["substrate"], props["substrate"]
+        )
+        rows.append(("Whole-genome tree", f"{substrate_short}; {tree_tool}"))
+
+    if per_protein_ran:
+        rows.append((
+            "Per-marker trees",
+            "one tree per declared HMM marker "
+            "(see `{prefix}_per_protein/`)",
+        ))
+    if per_segment_ran:
+        rows.append((
+            "Per-segment NT trees",
+            "one nucleotide tree per segment (see `{prefix}_per_segment/`)",
+        ))
+
+    tr_cfg = (cfg.get("phylo", {}) or {}).get("taxonomy_review", {}) or {}
+    if phylo_ran and tr_cfg.get("enabled", False):
+        rows.append(("Taxonomy review", "enabled (see `{prefix}_taxonomy_review.tsv`)"))
+
+    body = "\n".join(f"| {k} | {v} |" for k, v in rows)
+    return (
+        "## Analysis at a glance\n\n"
+        "| Aspect | This run |\n"
+        "| --- | --- |\n"
+        f"{body}\n"
+    )
+
+
 def _render_input(qc_report: QCReport, input_paths: list[str]) -> str:
     n = _fmt_int(qc_report.total_input)
     n_files = len(input_paths)
@@ -1218,6 +1385,10 @@ def render_summary(
     )
     sections = [
         _render_header(cfg, command, result.mode),
+        _render_at_a_glance(
+            cfg, qc_report, result,
+            phylo_ran, per_protein_ran, per_segment_ran,
+        ),
         _render_input(qc_report, input_paths),
         _render_qc(qc_report, cfg),
         _render_segmented(cfg, qc_report, complete_isolates, segment_names),

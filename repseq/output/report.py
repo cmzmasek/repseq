@@ -1185,6 +1185,7 @@ def write_taxonomic_report(
     segmented: bool,
     path: Path,
     max_breakdown: int = 20,
+    provenance: Optional[str] = None,
 ) -> None:
     """Write ``{prefix}_taxonomic_report.txt``: taxonomic diversity at each
     of the nine :data:`_TAX_RANKS`, before vs after clustering.
@@ -1220,6 +1221,8 @@ def write_taxonomic_report(
         )
 
     lines: list[str] = []
+    if provenance:
+        lines.append(provenance)
     lines.append("Taxonomic report")
     lines.append(f"Generated: {datetime.date.today().isoformat()}")
     lines.append(
@@ -1586,6 +1589,7 @@ def write_protein_taxonomic_report(
     cfg: dict[str, Any],
     segmented: bool,
     path: Path,
+    provenance: Optional[str] = None,
 ) -> bool:
     """Write ``{prefix}_protein_taxonomic_report.txt``.
 
@@ -1622,6 +1626,8 @@ def write_protein_taxonomic_report(
     unit = "isolates" if segmented else "sequences"
 
     lines: list[str] = []
+    if provenance:
+        lines.append(provenance)
     lines.append("Protein taxonomic report")
     lines.append(f"Generated: {datetime.date.today().isoformat()}")
     lines.append(
@@ -1767,6 +1773,7 @@ def write_polyprotein_taxonomic_report(
     cfg: dict[str, Any],
     segmented: bool,
     path: Path,
+    provenance: Optional[str] = None,
 ) -> bool:
     """Write ``{prefix}_polyprotein_taxonomic_report.txt``.
 
@@ -1804,6 +1811,8 @@ def write_polyprotein_taxonomic_report(
     unit = "isolates" if segmented else "sequences"
 
     lines: list[str] = []
+    if provenance:
+        lines.append(provenance)
     lines.append("Polyprotein taxonomic report")
     lines.append(f"Generated: {datetime.date.today().isoformat()}")
     lines.append(
@@ -2478,6 +2487,7 @@ def write_nucleotide_taxonomic_report(
     cfg: dict[str, Any],
     segmented: bool,
     path: Path,
+    provenance: Optional[str] = None,
 ) -> bool:
     """Write ``{prefix}_nucleotide_taxonomic_report.txt``.
 
@@ -2507,6 +2517,8 @@ def write_nucleotide_taxonomic_report(
     unit = "isolates" if segmented else "sequences"
 
     lines: list[str] = []
+    if provenance:
+        lines.append(provenance)
     lines.append("Nucleotide taxonomic report")
     lines.append(f"Generated: {datetime.date.today().isoformat()}")
     lines.append(

@@ -61,6 +61,59 @@ def test_detect_tool_versions_returns_dict_with_known_keys():
 # render_summary — top-level shape and conditional sections
 # ---------------------------------------------------------------------------
 
+def test_at_a_glance_block_present_and_run_specific(make_seq, tmp_path):
+    """The lead 'Analysis at a glance' table states the actual decisions
+    for this run (dataset type, clustering substrate, tool, counts)."""
+    cfg = _base_cfg(tmp_path)
+    qc = _qc(total_input=5231)
+    md = render_summary(cfg, qc, _result(make_seq, n_reps=4, mode="taxonomic1"),
+                        ["a.fasta"])
+    assert "## Analysis at a glance" in md
+    assert "| Dataset type | Non-segmented" in md
+    assert "5,231 input sequences → 4 representative sequences" in md
+    # protein alphabet, non-segmented, no concat → single marker substrate.
+    assert "single marker protein (amino-acid)" in md
+    assert "| Clustering tool | MMseqs2 |" in md
+    assert "| Selection mode | `taxonomic1` |" in md
+
+
+def test_at_a_glance_segmented_and_tree_rows(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["segmented"] = {
+        "enabled": True, "virus": "bunya",
+        "viruses": {"bunya": {"expected_segments": 3, "segments": ["L", "M", "S"]}},
+    }
+    cfg["phylo"] = {"tool": "auto", "partition": {"enabled": True},
+                    "taxonomy_review": {"enabled": True}}
+    md = render_summary(
+        cfg, _qc(), _result(make_seq, mode="global"), ["a.fasta"],
+        complete_isolates={"iso1": {}}, phylo_ran=True, per_protein_ran=True,
+        per_segment_ran=True,
+    )
+    assert "Segmented virus — 3 segments (L, M, S)" in md
+    assert "per-isolate marker-protein concatenation (amino-acid)" in md
+    # Whole-genome tree row reflects the partitioned supermatrix substrate.
+    assert "partitioned supermatrix of per-marker alignments" in md
+    assert "| Per-marker trees |" in md
+    assert "| Per-segment NT trees |" in md
+    assert "| Taxonomy review | enabled" in md
+
+
+def test_build_provenance_header_one_line(make_seq, tmp_path):
+    from repseq.output.summary import build_provenance_header
+    cfg = _base_cfg(tmp_path)
+    line = build_provenance_header(
+        cfg, _result(make_seq, n_reps=7, mode="host"), segmented=False,
+    )
+    assert line.startswith("# repseq ")
+    assert "host selection" in line
+    assert "non-segmented" in line
+    assert "single marker protein (amino-acid)" in line
+    assert "via MMseqs2" in line
+    assert "7 representative sequences" in line
+    assert "\n" not in line
+
+
 def test_render_summary_includes_core_sections(make_seq, tmp_path):
     cfg = _base_cfg(tmp_path)
     md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])

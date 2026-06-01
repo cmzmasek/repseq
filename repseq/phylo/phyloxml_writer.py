@@ -51,6 +51,7 @@ from Bio import Phylo
 
 from .. import __version__ as REPSEQ_VERSION
 from ..models import Sequence
+from .basis import describe_tree_basis
 from .coloring import ColorScheme, build_color_scheme
 from .labels import (
     _parse_year,
@@ -657,10 +658,20 @@ def _build_phylogeny_description(
     rooting_method: Optional[str] = None,
     markers: Optional[str] = None,
     trim_note: Optional[str] = None,
+    basis: Optional[str] = None,
 ) -> str:
-    """Compose the ``<phylogeny><description>`` element."""
+    """Compose the ``<phylogeny><description>`` element.
+
+    When ``basis`` is given (a plain-English "what this tree is based on"
+    sentence from :func:`repseq.phylo.basis.describe_tree_basis`), it
+    leads the description so a repseq-naive reader sees the biological
+    substrate before the tool/version provenance.
+    """
     when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    bits = [
+    bits: list[str] = []
+    if basis:
+        bits.append(basis)
+    bits += [
         f"repseq {REPSEQ_VERSION} phylogeny",
         f"generated {when}",
         f"alphabet={alphabet}",
@@ -711,6 +722,12 @@ def write_phyloxml(
     domain_architecture: bool = False,
     trim_note: Optional[str] = None,
     label_prefix_by_id: Optional[dict[str, str]] = None,
+    basis_role: Optional[str] = None,
+    basis_family: Optional[str] = None,
+    basis_segment: Optional[str] = None,
+    basis_architecture: Optional[str] = None,
+    basis_families: Optional[list[str]] = None,
+    basis_parent: Optional[str] = None,
 ) -> None:
     """Render a tree to a richly-annotated phyloXML file at
     ``phyloxml_path``.
@@ -728,6 +745,13 @@ def write_phyloxml(
     ``rooting_method`` (when provided) is included in the
     ``<phylogeny><description>`` so the user can see which method
     actually fired in the auto chain.
+
+    ``basis_role`` (and the ``basis_*`` context args) drive a plain-English
+    "what is this tree based on" sentence (via
+    :func:`repseq.phylo.basis.describe_tree_basis`) that leads the
+    ``<description>`` and is also emitted as phylogeny-level ``repseq:``
+    ``<property>`` elements. ``None`` omits the basis entirely (legacy /
+    test callers).
     """
     if extra_msa_args is None:
         extra_msa_args = []
@@ -750,6 +774,32 @@ def write_phyloxml(
             terminal._repseq_original_id = id_map[terminal.name]
 
     segmented = bool((cfg or {}).get("segmented", {}).get("enabled"))
+
+    # Compute the plain-English "what is this tree based on" basis (and its
+    # machine-readable properties) once. ``basis_role`` is supplied by the
+    # caller (each tree knows its own role); the substrate detail comes from
+    # this tree's alphabet, the segmented flag, the marker summary, and the
+    # concatenate_markers config. When no role is given (legacy/direct
+    # callers, tests) the basis is omitted entirely.
+    basis_sentence: Optional[str] = None
+    basis_props: dict[str, str] = {}
+    if basis_role:
+        concat_markers = bool(
+            (cfg or {}).get("clustering", {}).get("concatenate_markers")
+        )
+        basis_sentence, basis_props = describe_tree_basis(
+            basis_role,
+            alphabet=alphabet,
+            segmented=segmented,
+            markers=_markers_summary(representatives),
+            families=basis_families,
+            family=basis_family,
+            segment=basis_segment,
+            architecture=basis_architecture,
+            parent=basis_parent,
+            concat_markers=concat_markers,
+        )
+
     label_format = pick_format_string(cfg, segmented=segmented)
     label_opts = labeling_options(cfg)
     label_by_id = {
@@ -816,6 +866,7 @@ def write_phyloxml(
             rooting_method=rooting_method,
             markers=_markers_summary(representatives),
             trim_note=trim_note,
+            basis=basis_sentence,
         ),
     )
 
@@ -831,6 +882,27 @@ def write_phyloxml(
         leaf_protein_ids=leaf_protein_ids,
         domain_architecture=domain_architecture,
     )
+
+    # Phylogeny-level basis properties (repseq: namespace). Per the
+    # phyloXML schema the <property> children of <phylogeny> must follow
+    # the <clade> just serialised, so these are appended last. They make
+    # the tree's substrate machine-readable (analysis_mode, substrate,
+    # alphabet, leaf_unit) without parsing the prose <description>.
+    for ref_suffix in ("tree_basis", "analysis_mode", "substrate",
+                        "alphabet", "leaf_unit"):
+        value = basis_props.get(ref_suffix)
+        if not value:
+            continue
+        prop = ET.SubElement(
+            phylogeny,
+            "property",
+            {
+                "ref": f"repseq:{ref_suffix}",
+                "datatype": "xsd:string",
+                "applies_to": "phylogeny",
+            },
+        )
+        prop.text = value
 
     # Pretty-print: stdlib doesn't ship a pretty printer that handles
     # namespaces correctly, so we run a small one. Indents are 2

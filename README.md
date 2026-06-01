@@ -300,7 +300,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_extra_protein/` | `--per-protein-phylo` + `extra_protein:` declared | Same shape, accessory-protein trees (kept out of the incongruence table by design). |
 | `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment, from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
 | `{prefix}_hmm_diagnostic.tsv` | when the HMM tier ran AND a spec declares `hmms:` | One row per (representative, marker spec, declared HMM profile): `hit` T/F, `best_dom_evalue`, `best_dom_score`, `best_coverage`, `ga_cutoff`, `cutoff_used`, `passing`. Surfaces near-miss patterns the binary gate hides ("65 isolates barely missed the cutoff at E=2e-5"). v0.26.0. |
-| `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations). |
+| `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations). Leads with an **"Analysis at a glance"** table (v0.41.0) stating the run's actual decisions — dataset type, input→representative counts, clustering substrate + alphabet + tool, selection mode, whole-genome tree substrate, per-marker/per-segment tree presence, taxonomy review. |
 | `{prefix}_lockfile.json` | every run | Machine-readable reproducibility record: the elected representative IDs, their parent accessions, the post-mutation config, tool versions, input-FASTA + HMM-DB sha256. Replayable via `repseq replay`. v0.30.0. |
 
 "Segmented + GenBank" means: segmented mode is on **and** the GenBank source
@@ -730,6 +730,15 @@ select?" into a one-glance answer. All three are written on every run
 that has the relevant inputs available; all are safe to open in any
 text editor.
 
+> **Provenance header (v0.41.0).** Each of the four
+> `_*_taxonomic_report.txt` files below begins with a single
+> `#`-commented line recording the run's repseq version, selection mode,
+> dataset type (segmented/non-segmented), clustering substrate + tool,
+> and representative count — so an isolated report file is
+> self-describing without needing `_summary.md` alongside it. The TSV
+> companions don't carry it (a comment line would break a tidy-data
+> parser); the same facts live in their rows.
+
 #### `{prefix}_taxonomic_report.txt` — diversity before vs after
 
 Per-rank counts of **distinct taxa** in the pool fed to selection
@@ -1113,9 +1122,22 @@ phyloXML with rich, browseable annotation:
   default; the labeller keeps each monophyletic clade labelled at its
   crown and suppresses obvious duplications like a 2-leaf same-species
   pair).
-- The `<phylogeny>` element carries a `<name>` and `<description>` with
-  MAFFT/IQ-TREE/FastTree versions, the selected substitution model, the
-  bootstrap settings, and the rooting method that actually fired.
+- The `<phylogeny>` element carries a `<name>` and `<description>`. The
+  `<description>` now **leads with a plain-English "what this tree is
+  based on" sentence** (v0.41.0) — e.g. *"This tree is based on a
+  per-isolate concatenation of one marker protein per segment (L:RdRp,
+  M:GPC, S:N); amino-acid; each leaf is one representative isolate."* —
+  followed by the MAFFT/IQ-TREE/FastTree versions, the selected
+  substitution model, the bootstrap settings, and the rooting method that
+  actually fired. The same substrate is also emitted as machine-readable
+  phylogeny-level `<property>` elements (`repseq:tree_basis`,
+  `repseq:analysis_mode` = segmented/non_segmented, `repseq:substrate`,
+  `repseq:alphabet`, `repseq:leaf_unit` = isolate/sequence), so a script
+  can read what a tree is built on without parsing prose. Every tree
+  type carries its own basis: the whole-genome tree, each per-marker
+  tree (*"the Spike marker protein only … HMM architecture …"*), the
+  per-segment NT trees, the polyprotein-peptide trees, the
+  accessory-protein trees, and the pre-cluster overview tree.
 - Confidence values are normalised to 0–100 integers (`sh_like` for
   FastTree, `ufboot` for IQ-TREE). The tree is ladderized.
 

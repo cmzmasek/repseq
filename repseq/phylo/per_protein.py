@@ -536,8 +536,13 @@ def _build_specs_trees(
     pp_cfg: dict[str, Any],
     min_taxa: int,
     hmm_active: bool,
+    basis_role: str = "marker",
 ) -> tuple[list[Path], list[str], list[str]]:
     """Build one tree per spec into ``sub_dir``; shared by cluster + extra.
+
+    ``basis_role`` is the :func:`repseq.phylo.basis.describe_tree_basis`
+    role for these trees — ``"marker"`` for the cluster-driving markers
+    (2F) and ``"extra_protein"`` for the accessory-protein trees.
 
     Spec form: ``(family_label, hmm_tokens, aliases, segment_or_None)`` —
     same shape ``collect_marker_specs`` / ``collect_extra_specs`` return.
@@ -597,6 +602,10 @@ def _build_specs_trees(
                 mafft_use_auto=pp_mafft_auto,
                 domain_architecture=emit_domains,
                 trimal_settings=pp_cfg.get("trimal"),
+                basis_role=basis_role,
+                basis_family=family_label,
+                basis_segment=segment,
+                basis_architecture=(" OR ".join(tokens) if tokens else None),
             )
         except PhyloError as exc:
             logger.warning("[%s] family %s failed: %s", label, family_label, exc)
@@ -719,6 +728,7 @@ def run_per_protein_phylogeny(
             pp_cfg=pp_cfg,
             min_taxa=min_taxa,
             hmm_active=hmm_active,
+            basis_role="extra_protein",
         )
         written.extend(extra_files)
         # extra_protein trees deliberately do NOT participate in the marker
@@ -977,6 +987,10 @@ def run_polyprotein_phylogeny(
                     mafft_use_auto=pp_mafft_auto,
                     domain_architecture=emit_domains,
                     trimal_settings=pp_cfg.get("trimal"),
+                    basis_role="peptide",
+                    basis_family=pep.name,
+                    basis_parent=spec.name,
+                    basis_segment=spec.segment,
                 )
             except PhyloError as exc:
                 logger.warning(
@@ -1084,6 +1098,8 @@ def run_per_segment_phylogeny(
                 mafft_use_auto=True,
                 domain_architecture=False,
                 trimal_settings=(cfg.get("phylo", {}) or {}).get("trimal"),
+                basis_role="segment_nt",
+                basis_segment=seg_name,
             )
         except PhyloError as exc:
             logger.warning("[per-segment] %s failed: %s", seg_name, exc)

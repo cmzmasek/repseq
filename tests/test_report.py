@@ -411,6 +411,27 @@ def _tax_seq(seq_id, species=None, genus=None, family=None, subgenus=None):
     )
 
 
+def test_taxonomic_report_prepends_provenance_header_when_given(tmp_path):
+    before = [_tax_seq("a", species="Sp A", genus="Gen X", family="Fam")]
+    after = list(before)
+    path = tmp_path / "x_taxonomic_report.txt"
+    write_taxonomic_report(
+        before, after, segmented=False, path=path,
+        provenance="# repseq 9.9.9 | global selection | non-segmented",
+    )
+    lines = path.read_text().splitlines()
+    # The provenance comment is the very first line.
+    assert lines[0] == "# repseq 9.9.9 | global selection | non-segmented"
+    assert lines[1] == "Taxonomic report"
+
+
+def test_taxonomic_report_omits_header_when_no_provenance(tmp_path):
+    before = [_tax_seq("a", species="Sp A", genus="Gen X", family="Fam")]
+    path = tmp_path / "x_taxonomic_report.txt"
+    write_taxonomic_report(before, list(before), segmented=False, path=path)
+    assert path.read_text().splitlines()[0] == "Taxonomic report"
+
+
 def test_taxonomic_report_rank_diversity_before_after(tmp_path):
     """Section 1 counts distinct non-empty taxa per rank before vs after."""
     before = [

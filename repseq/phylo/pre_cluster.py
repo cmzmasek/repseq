@@ -248,6 +248,7 @@ def run_pre_cluster_phylogeny(
             leaf_protein_ids=None,
             domain_architecture=False,
             label_prefix_by_id=label_prefix_by_id,
+            basis_role="pre_cluster",
         )
     except Exception as exc:
         raise PhyloError(
