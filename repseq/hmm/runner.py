@@ -15,6 +15,7 @@ callers don't need to know the cutoff layout themselves.
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from typing import Any, Optional
 
 from .database import (

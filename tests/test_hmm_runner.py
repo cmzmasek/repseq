@@ -1,6 +1,7 @@
 """Tests for repseq.hmm.runner (cache-aware batch scan + cutoff logic)."""
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -8,11 +9,23 @@ import pytest
 from repseq.hmm.errors import HMMScanError
 from repseq.hmm.runner import (
     CACHE_SOURCE,
+    _cache_dir,
     _cache_key,
     coverage_of,
     passes_cutoffs,
     scan_proteins,
 )
+
+
+def test_cache_dir_resolves_path_or_none():
+    """Regression (v0.40.1): _cache_dir builds a Path at call time — guards
+    against the missing `from pathlib import Path` import that only surfaced
+    when the function actually ran (a bare module import didn't catch it)."""
+    out = _cache_dir({"cache_dir": "~/somewhere/cache"})
+    assert isinstance(out, Path)
+    assert "somewhere/cache" in str(out)  # expanduser ran without NameError
+    assert _cache_dir({}) is None
+    assert _cache_dir({"cache_dir": None}) is None
 
 
 def _hit(target="RdRp", dom_score=200.0, dom_evalue=1e-50, hmm_len=300, ali_span=280):
