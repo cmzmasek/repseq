@@ -411,6 +411,28 @@ def test_render_summary_conservation_paragraph_when_run(make_seq, tmp_path):
     assert "conservation plots" not in md_off
 
 
+def test_render_summary_msa_conservation_paragraph(make_seq, tmp_path):
+    """Any MSA-producing phylo step yields the JSD MSA-conservation
+    paragraph by default; disabling the config drops it."""
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"tool": "fasttree"}
+    md_on = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True,
+    )
+    assert "MSA conservation scoring" in md_on
+    assert "{prefix}_msa_conservation.tsv" in md_on
+    assert "Jensen-Shannon divergence" in md_on
+    assert "Henikoff" in md_on
+    assert "mean_conservation_core" in md_on
+
+    cfg_off = _base_cfg(tmp_path)
+    cfg_off["phylo"] = {"tool": "fasttree", "conservation": {"enabled": False}}
+    md_off = render_summary(
+        cfg_off, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True,
+    )
+    assert "MSA conservation scoring" not in md_off
+
+
 def test_render_summary_conservation_paragraph_without_other_phylo(make_seq, tmp_path):
     """Conservation can run on its own (against an existing 2F output
     dir). The section header must still appear when conservation_ran

@@ -639,6 +639,22 @@ phylo:
     # high-confidence imputed blanks filled in (clean values; originals
     # kept untouched — the review TSV records which cells were filled).
     write_corrected: true
+  conservation:
+    # MSA conservation scoring (ON by default). After the phylo steps,
+    # every alignment written this run (genome tree, partition per-family
+    # alignments + supermatrix, per-protein trees, extra-protein /
+    # polyprotein-peptide / per-segment trees) is scored for overall
+    # conservation and the results collected into one file,
+    # {prefix}_msa_conservation.tsv (one row per MSA). The metric is the
+    # mean per-column Jensen-Shannon divergence to a residue background
+    # (Capra & Singh 2007), with Henikoff & Henikoff (1994) sequence
+    # weighting and a (1 - gap-fraction) gap penalty. Bounded [0,1]:
+    # ~0 = unrelated/background columns; a perfectly conserved column
+    # tops out near ~0.85-0.95 (protein) / ~0.55 (nucleotide) — the
+    # JSD-to-background ceiling never reaches exactly 1. Comparable only
+    # within an alphabet. A post-hoc sweep, so it never affects a tree;
+    # writes nothing when no MSA was produced.
+    enabled: true
   phyloxml:
     # <confidence> element's type= attribute. "auto" picks "sh_like" for
     # FastTree and "ufboot" for IQ-TREE (which matches the default tree

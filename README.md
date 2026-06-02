@@ -300,6 +300,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_conservation/{prefix}_<family>.png` | only with `--conservation-heatmap` (needs `--per-protein-phylo` first) | One per-marker conservation plot: line charts of per-column Shannon entropy + fraction-matching-consensus (15-aa sliding-window smoothed) over a labelled domain-architecture ribbon. v0.29.0, line-chart rendering since v0.31.0. |
 | `{prefix}_extra_protein/` | `--per-protein-phylo` + `extra_protein:` declared | Same shape, accessory-protein trees (kept out of the incongruence table by design). |
 | `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment, from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
+| `{prefix}_msa_conservation.tsv` | any phylo step that wrote an MSA (default on; `phylo.conservation.enabled`) | One conservation number per alignment written this run (genome, partition families + supermatrix, per-protein, extra-protein, polyprotein peptides, per-segment NT). Mean per-column **Jensen-Shannon divergence to a residue background** (Capra & Singh 2007), **Henikoff-weighted** + **gap-penalised**. Columns: `msa, role, label, alphabet, trimmed, n_seqs, n_sites, mean_conservation, mean_conservation_core`. v0.43.0. |
 | `{prefix}_hmm_diagnostic.tsv` | when the HMM tier ran AND a spec declares `hmms:` | One row per (representative, marker spec, declared HMM profile): `hit` T/F, `best_dom_evalue`, `best_dom_score`, `best_coverage`, `ga_cutoff`, `cutoff_used`, `passing`. Surfaces near-miss patterns the binary gate hides ("65 isolates barely missed the cutoff at E=2e-5"). v0.26.0. |
 | `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations). Leads with an **"Analysis at a glance"** table (v0.41.0) stating the run's actual decisions — dataset type, input→representative counts, clustering substrate + alphabet + tool, selection mode, whole-genome tree substrate, per-marker/per-segment tree presence, taxonomy review. The **Clustering substrate** and **Whole-genome tree** cells name the actual marker(s) — the canonical `name:`, not the aliases/synonyms — and, when the HMM tier ran, each marker's domain architecture (`name (HMM: tok OR tok)`); single-marker mode lists them in priority order, concat joins with `+`, segmented prefixes each with its segment. v0.42.0. |
 | `{prefix}_config_repseq<ver>.yaml` | every run | **Sanitized effective-config snapshot** (v0.42.0): the full run-time config — every setting resolved, defaults filled in — with all comments stripped and the NCBI credentials (`ncbi_email` / `ncbi_api_key`) blanked to `null`. Re-runnable as-is via `repseq <mode> -c <this-file>`. Filename embeds the repseq version (periods→underscores), e.g. `cov_config_repseq0_42_0.yaml`. |
@@ -1499,6 +1500,56 @@ already written** — no new alignment is run. That means:
 > backwards compatibility, even though the v0.31.0 figure is a line
 > chart rather than a heatmap. The internal function name
 > `write_conservation_heatmap` is similarly preserved.
+
+### One conservation number per MSA — `{prefix}_msa_conservation.tsv` (v0.43.0+)
+
+Separate from the per-marker conservation *plots* above (which draw
+per-column tracks for the marker MSAs only), repseq also reduces **every
+alignment a run produces** to a single conservation score and collects
+them all into one table. Whenever any phylogeny step writes an MSA — the
+whole-genome tree, the partitioned per-family alignments and supermatrix,
+the per-protein marker trees, and any extra-protein, polyprotein-peptide,
+or per-segment trees — a post-hoc sweep scores each `*_msa*.fasta` under
+the output directory and writes `{prefix}_msa_conservation.tsv`, one row
+per alignment. It runs by default (no flag); set
+`phylo.conservation.enabled: false` to turn it off. Being a decoupled
+sweep, a scoring problem never affects a tree, and if no tree was built
+the file simply isn't written.
+
+**The metric.** Mean per-column **Jensen-Shannon divergence to a residue
+background** (Capra & Singh, *Bioinformatics* 2007), with two standard
+corrections:
+
+- **Henikoff & Henikoff (1994) position-based sequence weighting**, so a
+  clade of near-identical sequences plus one outlier doesn't read as
+  artificially conserved (the redundant sequences share the weight one
+  real sequence would carry).
+- a **gap penalty**: each column's JSD is multiplied by `(1 −
+  weighted_gap_fraction)`, so a mostly-gap column contributes little.
+
+Each column score is bounded `[0, 1]` (JSD with log base 2 and the
+symmetric mixture `m = (p+q)/2`). Interpretation:
+
+- `~0` — columns look like the background, i.e. unrelated sequences;
+- `~0.6–0.8` — typical for a real protein family of close homologs;
+- a **perfectly conserved** column tops out at ~0.85–0.95 for protein
+  (the exact ceiling depends on the conserved residue's background
+  frequency — a rarer residue lands closer to 1) and ~0.55 for
+  nucleotide (only four symbols, flat background). JSD-to-background
+  **never reaches exactly 1**, which is why published JSD conservation
+  values don't saturate. Scores are therefore comparable only *within*
+  an alphabet — don't compare a protein MSA's number against a
+  nucleotide MSA's; the `alphabet` column flags which is which.
+
+**Columns:** `msa` (path relative to the output dir), `role` (`genome` /
+`partition_family` / `marker` / `extra_protein` / `peptide` /
+`segment_nt`), `label` (family / segment / peptide name), `alphabet`
+(`protein` / `nucleotide`, auto-detected), `trimmed` (`FALSE` for a
+retained `_untrimmed` companion), `n_seqs`, `n_sites`,
+`mean_conservation` (the headline all-column mean), and
+`mean_conservation_core` (mean over well-occupied — ≥ 50% non-gap —
+columns, ignoring the gap penalty; a view of the well-aligned core that
+ignores ragged ends).
 
 ---
 

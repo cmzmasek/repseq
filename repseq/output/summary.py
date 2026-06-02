@@ -1215,6 +1215,32 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             + "The tree topology, colouring, and LCA labels are NOT "
             "modified by this step.\n"
         )
+    cons_cfg = (phylo_cfg.get("conservation", {}) or {})
+    msa_ran = phylo_ran or per_protein_ran or per_segment_ran or pre_cluster_ran
+    if msa_ran and cons_cfg.get("enabled", True):
+        paragraphs.append(
+            "**MSA conservation scoring.** Every alignment written this "
+            "run — the whole-genome tree, the partition per-family "
+            "alignments and supermatrix, the per-protein marker trees, "
+            "and any extra-protein, polyprotein-peptide, or per-segment "
+            "trees — was scored for overall sequence conservation and "
+            "the results collected into `{prefix}_msa_conservation.tsv` "
+            "(one row per MSA). The metric is the **mean per-column "
+            "Jensen-Shannon divergence to a residue background** (Capra "
+            "& Singh 2007), with **Henikoff & Henikoff (1994) "
+            "position-based sequence weighting** (so redundant near-"
+            "identical sequences don't inflate the score) and a "
+            "**(1 − gap-fraction) gap penalty**. Each column score is "
+            "bounded [0, 1]; the table reports the all-column mean "
+            "(`mean_conservation`) and the mean over well-occupied "
+            "(≥ 50% non-gap) columns (`mean_conservation_core`). The "
+            "score is comparable only *within* an alphabet: ~0 means a "
+            "column looks like background (unrelated sequences), while a "
+            "perfectly conserved column tops out near ~0.85–0.95 for "
+            "protein and ~0.55 for nucleotide (the JSD-to-background "
+            "ceiling, which never reaches 1) — the `alphabet` column "
+            "flags which is which.\n"
+        )
     return "\n".join(paragraphs)
 
 

@@ -477,6 +477,22 @@ DEFAULTS: dict[str, Any] = {
             # with high-confidence imputed blanks filled (originals kept).
             "write_corrected": True,
         },
+        # MSA conservation scoring (always-on when MSAs are produced).
+        # After the phylo steps, every alignment written this run (the
+        # genome tree 2E, the partition per-family alignments +
+        # supermatrix, the per-protein 2F trees, the extra-protein and
+        # polyprotein-peptide trees, the per-segment NT trees) is scored
+        # for overall conservation and the results collected into one
+        # file, {prefix}_msa_conservation.tsv. The metric is the mean
+        # per-column Jensen-Shannon divergence to a residue background
+        # (Capra & Singh 2007), with Henikoff & Henikoff (1994) sequence
+        # weighting and a (1 - gap-fraction) gap penalty. Bounded [0,1]:
+        # ~0 = unrelated/background columns, ~0.85-0.95 = a perfectly
+        # conserved column (the JSD ceiling depends on the conserved
+        # residue's background frequency, so it never reaches exactly 1).
+        "conservation": {
+            "enabled": True,
+        },
         # PhyloXML writer knobs.
         "phyloxml": {
             # Override the <confidence type="..."> attribute. ``auto``

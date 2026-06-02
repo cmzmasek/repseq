@@ -1675,6 +1675,21 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
             click.echo(f"[conservation skipped] {exc}", err=True)
         except Exception as exc:
             click.echo(f"[conservation failed] {exc}", err=True)
+    # Per-MSA conservation scoring — a post-hoc sweep over every
+    # alignment any phylo step wrote this run, collected into one
+    # {prefix}_msa_conservation.tsv (mean per-column JSD-to-background,
+    # Henikoff-weighted, gap-penalised). Decoupled and soft: finds no
+    # MSAs and writes nothing when no tree was built, and a scoring bug
+    # never voids the trees already on disk.
+    try:
+        from .phylo.conservation import write_msa_conservation_report
+        out_dir = Path(cfg["output"]["dir"])
+        prefix = cfg["output"].get("prefix", "repseq")
+        cons_tsv = write_msa_conservation_report(out_dir, prefix, cfg)
+        if cons_tsv is not None:
+            out_files.append(cons_tsv)
+    except Exception as exc:
+        click.echo(f"[MSA conservation report skipped] {exc}", err=True)
     write_all_reports(
         result, qc_report, cfg, list(input_paths), out_files,
         complete_isolates=complete_isolates,
