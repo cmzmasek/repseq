@@ -123,6 +123,9 @@ _CITATIONS: dict[str, str] = {
     "uniprot":     "UniProt Consortium 2023, *Nucleic Acids Res.* 51(D1):D523-D531",
     "hmmer":       "Eddy 2011, *PLoS Comput. Biol.* 7(10):e1002195",
     "pfam":        "Mistry et al. 2021, *Nucleic Acids Res.* 49(D1):D412-D419",
+    "capra_singh": "Capra & Singh 2007, *Bioinformatics* 23(15):1875-1882",
+    "henikoff":    "Henikoff & Henikoff 1994, *J. Mol. Biol.* 243(4):574-578",
+    "valdar":      "Valdar 2002, *Proteins* 48(2):227-241",
 }
 
 
@@ -853,11 +856,9 @@ def _read_iqtree_model_file(cfg: dict) -> dict[str, str]:
 def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
                   versions: dict, per_protein_ran: bool = False,
                   per_segment_ran: bool = False,
-                  conservation_ran: bool = False,
                   pre_cluster_ran: bool = False) -> str:
     if (not phylo_ran and not per_protein_ran
-            and not per_segment_ran and not conservation_ran
-            and not pre_cluster_ran):
+            and not per_segment_ran and not pre_cluster_ran):
         return ""
     n_reps = len(result.representatives)
     alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
@@ -1168,26 +1169,6 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             "`{prefix}_pre_cluster_tree_id_map.tsv` (with an "
             "`is_rep` column for grep-without-XML use).\n"
         )
-    if conservation_ran:
-        paragraphs.append(
-            "Per-marker **conservation plots** were rendered to "
-            "`{prefix}_conservation/{prefix}_<family>.png`, one PNG per "
-            "declared HMM marker spec. Each figure stacks two metric "
-            "line charts — per-column **Shannon entropy** (bits, gaps "
-            "excluded) and **fraction matching consensus** (non-gap "
-            "rows whose residue equals the column mode), both smoothed "
-            "with a **15-residue centered sliding window** so single-"
-            "column spikes (especially from low-coverage columns) "
-            "don't drown out real conservation patterns — over a "
-            "**domain-architecture ribbon** drawn from the HMM hits on "
-            "the longest satisfying CDS across representatives, "
-            "projected from ungapped CDS coordinates onto MSA columns "
-            "and labelled with the HMM profile name. Domain boxes use "
-            "a stable golden-angle family colour so the same marker is "
-            "visually identifiable across runs. Computed in-process "
-            "from the per-protein MSAs already written by "
-            "`--per-protein-phylo` — no fresh alignment is run.\n"
-        )
     tr_cfg = (phylo_cfg.get("taxonomy_review", {}) or {})
     if phylo_ran and tr_cfg.get("enabled", False):
         tr_ranks = ", ".join(tr_cfg.get("ranks", ["family", "genus", "subgenus"]))
@@ -1226,20 +1207,26 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             "trees — was scored for overall sequence conservation and "
             "the results collected into `{prefix}_msa_conservation.tsv` "
             "(one row per MSA). The metric is the **mean per-column "
-            "Jensen-Shannon divergence to a residue background** (Capra "
-            "& Singh 2007), with **Henikoff & Henikoff (1994) "
-            "position-based sequence weighting** (so redundant near-"
-            "identical sequences don't inflate the score) and a "
-            "**(1 − gap-fraction) gap penalty**. Each column score is "
-            "bounded [0, 1]; the table reports the all-column mean "
-            "(`mean_conservation`) and the mean over well-occupied "
-            "(≥ 50% non-gap) columns (`mean_conservation_core`). The "
-            "score is comparable only *within* an alphabet: ~0 means a "
-            "column looks like background (unrelated sequences), while a "
-            "perfectly conserved column tops out near ~0.85–0.95 for "
-            "protein and ~0.55 for nucleotide (the JSD-to-background "
-            "ceiling, which never reaches 1) — the `alphabet` column "
-            "flags which is which.\n"
+            "Jensen-Shannon divergence to a residue background** "
+            f"({_CITATIONS['capra_singh']}), with **position-based "
+            f"sequence weighting** ({_CITATIONS['henikoff']}; so "
+            "redundant near-identical sequences don't inflate the "
+            "score) and a **(1 − gap-fraction) gap penalty**. Each "
+            "column score is bounded [0, 1]; the table reports the "
+            "all-column mean (`mean_conservation`) and the mean over "
+            "well-occupied (≥ 50% non-gap) columns "
+            "(`mean_conservation_core`). The score is comparable only "
+            "*within* an alphabet: ~0 means a column looks like "
+            "background (unrelated sequences), while a perfectly "
+            "conserved column tops out near ~0.85–0.95 for protein and "
+            "~0.55 for nucleotide — because the score measures "
+            "divergence *from a background*, an invariant column is a "
+            "finite (residue-frequency-dependent) divergence, not 1, so "
+            "the JSD-to-background ceiling never reaches 1 and scores "
+            "are comparable only within an alphabet (the `alphabet` "
+            "column flags which is which). For the chemistry-aware "
+            "(substitution-matrix-weighted) alternative repseq does "
+            f"*not* use, see {_CITATIONS['valdar']}.\n"
         )
     return "\n".join(paragraphs)
 
@@ -1495,7 +1482,6 @@ def render_summary(
     phylo_ran: bool = False,
     per_protein_ran: bool = False,
     per_segment_ran: bool = False,
-    conservation_ran: bool = False,
     pre_cluster_ran: bool = False,
     command: str = "",
 ) -> str:
@@ -1517,7 +1503,6 @@ def render_summary(
         _render_phylo(
             cfg, result, phylo_ran, versions,
             per_protein_ran, per_segment_ran,
-            conservation_ran=conservation_ran,
             pre_cluster_ran=pre_cluster_ran,
         ),
         _render_polyprotein(cfg, per_protein_ran=per_protein_ran),
@@ -1538,7 +1523,6 @@ def write_summary(
     phylo_ran: bool = False,
     per_protein_ran: bool = False,
     per_segment_ran: bool = False,
-    conservation_ran: bool = False,
     pre_cluster_ran: bool = False,
     command: str = "",
 ) -> Path:
@@ -1557,7 +1541,6 @@ def write_summary(
         phylo_ran=phylo_ran,
         per_protein_ran=per_protein_ran,
         per_segment_ran=per_segment_ran,
-        conservation_ran=conservation_ran,
         pre_cluster_ran=pre_cluster_ran,
         command=command,
     )

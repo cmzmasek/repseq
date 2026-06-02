@@ -162,7 +162,7 @@ Every mode also accepts: `--input/-i`, `--output-dir/-o`, `--config/-c`,
 `--threads`, `--seed`, `--segmented`, `--dry-run`, `--no-resolve`,
 `--source {auto,uniprot,ncbi,ncbi_virus}`, `--overflow {keep,trim}`, `--plot`,
 `--phylo`, `--per-protein-phylo`, `--per-segment-phylo` (segmented only),
-`--pre-cluster-tree`, `--conservation-heatmap`, `--fast`, `--verbose`,
+`--pre-cluster-tree`, `--fast`, `--verbose`,
 `--alphabet-for-clustering {protein,nucleotide}`.
 
 In addition to the selection modes, two diagnostic/utility subcommands:
@@ -297,7 +297,6 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_iqtree_model.txt` | only with `--phylo` + IQ-TREE | Grep-friendly sidecar with the ModelFinder pick(s): one `<label>: <model>` line per partition (or a single `GENOME: <model>` line for the non-partitioned path). v0.28.0. |
 | `{prefix}_per_protein/` | only with `--per-protein-phylo` | One tree (MSA + Newick + phyloXML + id map) per marker; plus `_incongruence.tsv` of pairwise Robinson-Foulds distances. |
 | `{prefix}_pre_cluster_tree.{nwk,xml}`, `_id_map.tsv` | only with `--pre-cluster-tree` (or `phylo.pre_cluster_tree.enabled`) | Rough overview tree of every post-QC sequence (one leaf per CONCAT isolate in segmented mode), with `[repr] ` prefix on representative leaves in the phyloXML `<name>`. v0.32.0. |
-| `{prefix}_conservation/{prefix}_<family>.png` | only with `--conservation-heatmap` (needs `--per-protein-phylo` first) | One per-marker conservation plot: line charts of per-column Shannon entropy + fraction-matching-consensus (15-aa sliding-window smoothed) over a labelled domain-architecture ribbon. v0.29.0, line-chart rendering since v0.31.0. |
 | `{prefix}_extra_protein/` | `--per-protein-phylo` + `extra_protein:` declared | Same shape, accessory-protein trees (kept out of the incongruence table by design). |
 | `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment, from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
 | `{prefix}_msa_conservation.tsv` | any phylo step that wrote an MSA (default on; `phylo.conservation.enabled`) | One conservation number per alignment written this run (genome, partition families + supermatrix, per-protein, extra-protein, polyprotein peptides, per-segment NT). Mean per-column **Jensen-Shannon divergence to a residue background** (Capra & Singh 2007), **Henikoff-weighted** + **gap-penalised**. Columns: `msa, role, label, alphabet, trimmed, n_seqs, n_sites, mean_conservation, mean_conservation_core`. v0.43.0. |
@@ -1438,75 +1437,11 @@ continues.
 > achievable but the resulting tree may be visually unreadable
 > without subsampling.
 
-### Per-marker conservation plots — `--conservation-heatmap` (v0.29.0+)
-
-A visual companion to the per-protein trees. When you pass
-`--conservation-heatmap`, repseq writes one PNG per declared marker
-spec to `{prefix}_conservation/{prefix}_<family>.png`, each showing
-**how conserved every column of the marker alignment is** alongside
-the **domain architecture** that defines the marker.
-
-Three stacked tracks per figure:
-
-1. **Shannon entropy** — per MSA column, in bits, drawn as a line chart
-   smoothed by a **15-residue centered sliding window** (v0.31.0+).
-   Gaps are treated as missing data (excluded from the per-column
-   residue counts), so the metric measures variability among *present*
-   residues rather than collapsing to "how gappy is this column".
-2. **Fraction matching consensus** — per column, the fraction of
-   non-gap rows whose residue equals the column mode, drawn the same
-   way (line chart, 15-aa centered sliding window). Complementary to
-   entropy: entropy weights *all* residues by frequency, %-consensus
-   answers "how often does the most common residue dominate?".
-3. **Domain-architecture ribbon** — coloured rectangles drawn from
-   the HMM hits on the **longest satisfying CDS across reps**,
-   projected from ungapped CDS coordinates onto MSA columns so the
-   box edges line up with the lines above. **Every** domain is
-   labelled with its HMM profile name (v0.31.0+; previously only
-   wide boxes carried a label). Each family gets a stable
-   golden-angle hue (same HSV space as the taxonomy palette), so a
-   marker that is "the green tree" in `--per-protein-phylo` is also
-   "the green ribbon" here.
-
-The sliding-window smoothing suppresses single-column spikes that
-the raw per-position metric would otherwise show — most often these
-spikes come from columns with very few non-gap rows (an N-or-C-terminal
-fragment in a single isolate) and don't represent real conservation
-patterns. A 15-aa window is wide enough to flatten that single-residue
-noise while keeping real conservation peaks in their actual structural
-location.
-
-The plots **reuse the per-protein MSAs `--per-protein-phylo` has
-already written** — no new alignment is run. That means:
-
-- `--conservation-heatmap` **requires `--per-protein-phylo`** to have
-  produced the per-family MSAs at
-  `{prefix}_per_protein/<family>_msa.fasta`. Without those files the
-  step soft-fails per family with a stderr note (a missing MSA
-  doesn't stop sibling families).
-- It is **cheap** — only matplotlib runs on top of in-memory metric
-  computation; no MAFFT, no tree-builder. A run with twelve markers
-  produces twelve PNGs in seconds.
-- You can re-run **only** `--conservation-heatmap` against an output
-  directory from an earlier full run if you want a fresh PNG without
-  re-aligning.
-
-> **Requirement:** matplotlib (`pip install 'repseq[viz]'` — same
-> extra `--plot` uses). The step soft-fails with a single stderr line
-> if matplotlib can't be imported, leaving the rest of the run
-> intact.
->
-> **Flag-name note:** the flag is still `--conservation-heatmap` for
-> backwards compatibility, even though the v0.31.0 figure is a line
-> chart rather than a heatmap. The internal function name
-> `write_conservation_heatmap` is similarly preserved.
-
 ### One conservation number per MSA — `{prefix}_msa_conservation.tsv` (v0.43.0+)
 
-Separate from the per-marker conservation *plots* above (which draw
-per-column tracks for the marker MSAs only), repseq also reduces **every
-alignment a run produces** to a single conservation score and collects
-them all into one table. Whenever any phylogeny step writes an MSA — the
+repseq reduces **every alignment a run produces** to a single
+conservation score and collects them all into one table. Whenever any
+phylogeny step writes an MSA — the
 whole-genome tree, the partitioned per-family alignments and supermatrix,
 the per-protein marker trees, and any extra-protein, polyprotein-peptide,
 or per-segment trees — a post-hoc sweep scores each `*_msa*.fasta` under
@@ -1541,6 +1476,20 @@ symmetric mixture `m = (p+q)/2`). Interpretation:
   an alphabet — don't compare a protein MSA's number against a
   nucleotide MSA's; the `alphabet` column flags which is which.
 
+**Why a perfectly conserved column isn't 1.** The score measures
+*divergence from a background distribution*, not raw column uniformity. An
+invariant column is a point mass on one residue; its Jensen-Shannon
+divergence from the background is large but finite, and its exact value is
+set by how rare that residue is in the background (rarer ⇒ more surprising
+⇒ closer to 1). With only four symbols and a flat background, nucleotide
+columns have a lower ceiling still (~0.55). This is a deliberate property
+of the Capra & Singh formulation — it rewards columns that are *both*
+invariant *and* enriched for an otherwise-rare residue — and it's why
+published JSD conservation values never saturate at 1. If you want a
+strict 0→1 "fraction identical" instead, that's a different (and less
+informative) statistic; this column reports conservation in the
+divergence-from-background sense.
+
 **Columns:** `msa` (path relative to the output dir), `role` (`genome` /
 `partition_family` / `marker` / `extra_protein` / `peptide` /
 `segment_nt`), `label` (family / segment / peptide name), `alphabet`
@@ -1550,6 +1499,27 @@ retained `_untrimmed` companion), `n_seqs`, `n_sites`,
 `mean_conservation_core` (mean over well-occupied — ≥ 50% non-gap —
 columns, ignoring the gap penalty; a view of the well-aligned core that
 ignores ragged ends).
+
+**References.**
+
+- **Capra JA & Singh M (2007).** Predicting functionally important
+  residues from sequence conservation. *Bioinformatics* 23(15):
+  1875–1882. doi:[10.1093/bioinformatics/btm270](https://doi.org/10.1093/bioinformatics/btm270)
+  — the Jensen-Shannon-divergence conservation score this metric
+  implements (including the gap-penalty term and the
+  divergence-from-background ceiling behaviour above).
+- **Henikoff S & Henikoff JG (1994).** Position-based sequence weights.
+  *J Mol Biol* 243(4): 574–578.
+  doi:[10.1016/0022-2836(94)90032-9](https://doi.org/10.1016/0022-2836(94)90032-9)
+  — the position-based sequence weighting used to down-weight redundant
+  near-identical sequences.
+- **Valdar WSJ (2002).** Scoring residue conservation. *Proteins*
+  48(2): 227–241. doi:[10.1002/prot.10146](https://doi.org/10.1002/prot.10146)
+  — a thorough survey of conservation-scoring schemes and the
+  chemistry-aware (substitution-matrix-weighted) alternative to JSD.
+  repseq reports the JSD score rather than Valdar's, but this is the
+  reference for the broader method space if you need a substitution-
+  similarity-aware measure.
 
 ---
 

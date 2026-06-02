@@ -388,29 +388,6 @@ def test_render_summary_no_pre_cluster_paragraph_when_off(make_seq, tmp_path):
     assert "pre-cluster overview tree" not in md
 
 
-def test_render_summary_conservation_paragraph_when_run(make_seq, tmp_path):
-    """When conservation_ran=True, the phylo section gains a paragraph
-    describing the {prefix}_conservation/ plots. Without the flag,
-    no such paragraph is present."""
-    cfg = _base_cfg(tmp_path)
-    cfg["phylo"] = {"tool": "fasttree"}
-    md_on = render_summary(
-        cfg, _qc(), _result(make_seq), ["a.fasta"],
-        phylo_ran=True, conservation_ran=True,
-    )
-    assert "conservation plots" in md_on
-    assert "{prefix}_conservation/" in md_on
-    assert "Shannon entropy" in md_on
-    assert "fraction matching consensus" in md_on
-    # v0.31.0: prose mentions the 15aa sliding window + line charts.
-    assert "15-residue" in md_on
-    assert "sliding window" in md_on
-    md_off = render_summary(
-        cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True,
-    )
-    assert "conservation plots" not in md_off
-
-
 def test_render_summary_msa_conservation_paragraph(make_seq, tmp_path):
     """Any MSA-producing phylo step yields the JSD MSA-conservation
     paragraph by default; disabling the config drops it."""
@@ -422,8 +399,11 @@ def test_render_summary_msa_conservation_paragraph(make_seq, tmp_path):
     assert "MSA conservation scoring" in md_on
     assert "{prefix}_msa_conservation.tsv" in md_on
     assert "Jensen-Shannon divergence" in md_on
-    assert "Henikoff" in md_on
     assert "mean_conservation_core" in md_on
+    # Full bibliographic citations for the methods used + the alternative.
+    assert "Capra & Singh 2007" in md_on
+    assert "Henikoff & Henikoff 1994" in md_on
+    assert "Valdar 2002" in md_on
 
     cfg_off = _base_cfg(tmp_path)
     cfg_off["phylo"] = {"tool": "fasttree", "conservation": {"enabled": False}}
@@ -431,18 +411,6 @@ def test_render_summary_msa_conservation_paragraph(make_seq, tmp_path):
         cfg_off, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True,
     )
     assert "MSA conservation scoring" not in md_off
-
-
-def test_render_summary_conservation_paragraph_without_other_phylo(make_seq, tmp_path):
-    """Conservation can run on its own (against an existing 2F output
-    dir). The section header must still appear when conservation_ran
-    is the only flag set."""
-    cfg = _base_cfg(tmp_path)
-    md = render_summary(
-        cfg, _qc(), _result(make_seq), ["a.fasta"], conservation_ran=True,
-    )
-    assert "## Phylogenetic inference" in md
-    assert "conservation plots" in md
 
 
 def test_render_summary_phylo_describes_trimal_when_enabled(make_seq, tmp_path):
