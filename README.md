@@ -2510,6 +2510,16 @@ to run anywhere and finish in a couple of seconds.
 
 ---
 
+## License
+
+`repseq` is free software, released under the **GNU General Public License,
+version 3** (GPLv3). You may redistribute it and/or modify it under the terms
+of that license; it comes with **no warranty**. The full license text is in the
+[`LICENSE`](LICENSE) file at the root of this repository, and is also available
+at <https://www.gnu.org/licenses/gpl-3.0.html>.
+
+---
+
 ## Status
 
 Current: **`v0.22.0`**. All 8 selection modes, protein-alphabet
