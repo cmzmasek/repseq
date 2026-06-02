@@ -1493,8 +1493,11 @@ divergence-from-background sense.
 **Columns:** `msa` (path relative to the output dir), `role` (`genome` /
 `partition_family` / `marker` / `extra_protein` / `peptide` /
 `segment_nt`), `label` (family / segment / peptide name), `alphabet`
-(`protein` / `nucleotide`, auto-detected), `trimmed` (`FALSE` for a
-retained `_untrimmed` companion), `n_seqs`, `n_sites`,
+(`protein` / `nucleotide`, auto-detected), `trimmed` (`TRUE` only when
+trimAl actually trimmed *this* alignment — i.e. an `_untrimmed`
+companion exists beside it; `FALSE` for an untrimmed tree input, which
+is the default since trimAl is off by default, and `FALSE` for the
+retained `_untrimmed` companion row itself), `n_seqs`, `n_sites`,
 `mean_conservation` (the headline all-column mean), and
 `mean_conservation_core` (mean over well-occupied — ≥ 50% non-gap —
 columns, ignoring the gap penalty; a view of the well-aligned core that

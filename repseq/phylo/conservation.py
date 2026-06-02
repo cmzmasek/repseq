@@ -267,24 +267,29 @@ def _read_msa_rows(path: Path) -> list[str]:
 
 
 def _classify(rel: Path, prefix: str) -> tuple[str, str, bool]:
-    """Infer ``(role, label, trimmed)`` from an MSA path relative to out_dir.
+    """Infer ``(role, label, is_untrimmed)`` from an MSA path.
 
-    * Top-level ``{prefix}_msa.fasta`` → ``("genome", "", True)``;
+    * Top-level ``{prefix}_msa.fasta`` → ``("genome", "", False)``;
       ``{prefix}_msa_{family}.fasta`` (the partitioned per-family
-      alignments) → ``("partition_family", family, True)``.
+      alignments) → ``("partition_family", family, False)``.
     * Files inside a ``{prefix}_<kind>/`` subdir are named
       ``<label>_msa.fasta``; the subdir maps to a role
       (``per_protein`` → ``marker``, ``extra_protein`` →
       ``extra_protein``, ``polyprotein`` → ``peptide``, ``per_segment``
       → ``segment_nt``; anything else uses the subdir name).
-    * An ``_untrimmed`` infix flags the retained pre-trimAl companion
-      (``trimmed=False``).
+    * ``is_untrimmed`` is True when the filename carries the
+      ``_untrimmed`` infix, i.e. this row is the retained raw MAFFT
+      companion. It says nothing about whether the *sibling* tree-input
+      alignment was trimmed — that's decided by
+      :func:`_untrimmed_sibling` existence in the caller (see the
+      ``trimmed`` column), because with trimAl OFF (the default) the
+      tree-input ``_msa.fasta`` is itself untrimmed and has no
+      ``_untrimmed`` companion at all.
     """
     name = rel.name
     stem = name[:-len(".fasta")] if name.endswith(".fasta") else name
-    trimmed = True
-    if stem.endswith("_untrimmed"):
-        trimmed = False
+    is_untrimmed = stem.endswith("_untrimmed")
+    if is_untrimmed:
         stem = stem[: -len("_untrimmed")]
 
     parts = rel.parts
@@ -306,16 +311,31 @@ def _classify(rel: Path, prefix: str) -> tuple[str, str, bool]:
             ("_per_segment", "segment_nt"),
         ):
             if sub.endswith(suffix):
-                return role, label, trimmed
-        return _strip_prefix(sub), label, trimmed
+                return role, label, is_untrimmed
+        return _strip_prefix(sub), label, is_untrimmed
 
     # Top-level: "{prefix}_msa" or "{prefix}_msa_{family}".
     base = f"{prefix}_msa"
     if stem == base:
-        return "genome", "", trimmed
+        return "genome", "", is_untrimmed
     if stem.startswith(base + "_"):
-        return "partition_family", stem[len(base) + 1:], trimmed
-    return "genome", _strip_prefix(stem), trimmed
+        return "partition_family", stem[len(base) + 1:], is_untrimmed
+    return "genome", _strip_prefix(stem), is_untrimmed
+
+
+def _untrimmed_sibling(rel: Path) -> Path:
+    """The ``_untrimmed`` companion path for a tree-input MSA path.
+
+    ``run_msa.fasta`` → ``run_msa_untrimmed.fasta``;
+    ``per_protein/Spike_msa.fasta`` → ``per_protein/Spike_msa_untrimmed.fasta``.
+    Used to decide whether a tree-input alignment was actually trimmed:
+    ``_build_tree`` writes the ``_untrimmed`` companion **only** when
+    trimAl successfully trimmed (on soft-fail it renames the raw file
+    back to ``_msa.fasta``), so the companion's existence is an exact
+    signal that the ``_msa.fasta`` beside it is the trimmed product.
+    """
+    stem = rel.name[:-len(".fasta")] if rel.name.endswith(".fasta") else rel.name
+    return rel.with_name(stem + "_untrimmed.fasta")
 
 
 def _fmt(v: Optional[float]) -> str:
@@ -341,6 +361,7 @@ def write_msa_conservation_report(
     msa_paths = sorted(out_dir.rglob("*_msa*.fasta"))
     if not msa_paths:
         return None
+    present = {p.relative_to(out_dir) for p in msa_paths}
 
     # Stable role ordering: whole-genome tree first, then its partition
     # families, then the per-protein / extra / peptide / segment trees.
@@ -351,7 +372,15 @@ def write_msa_conservation_report(
     rows_out: list[tuple] = []
     for path in msa_paths:
         rel = path.relative_to(out_dir)
-        role, label, trimmed = _classify(rel, prefix)
+        role, label, is_untrimmed = _classify(rel, prefix)
+        # `trimmed` reflects whether trimAl actually ran on THIS
+        # alignment, not merely whether it's the tree-input file. The
+        # raw `_untrimmed` companion is never trimmed; a tree-input
+        # `_msa.fasta` was trimmed iff its `_untrimmed` companion exists
+        # (trimAl writes that companion only on a successful trim — see
+        # `_untrimmed_sibling`). With trimAl off (the default) there is
+        # no companion, so the tree-input alignment is correctly FALSE.
+        trimmed = (not is_untrimmed) and (_untrimmed_sibling(rel) in present)
         try:
             seqs = _read_msa_rows(path)
             metrics = score_rows(seqs)

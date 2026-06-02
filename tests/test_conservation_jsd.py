@@ -8,6 +8,7 @@ import pytest
 
 from repseq.phylo.conservation import (
     _classify,
+    _untrimmed_sibling,
     detect_alphabet,
     henikoff_weights,
     score_rows,
@@ -87,24 +88,73 @@ def test_rna_u_folds_onto_t():
     assert pytest.approx(dna, abs=1e-9) == rna
 
 
+# Third tuple element is is_untrimmed (the `_untrimmed` filename infix),
+# NOT whether the alignment was trimmed — that's decided by sibling
+# existence in the sweep (see test_trimmed_column_*).
 @pytest.mark.parametrize(
     "rel, expect",
     [
-        ("run_msa.fasta", ("genome", "", True)),
-        ("run_msa_untrimmed.fasta", ("genome", "", False)),
-        ("run_msa_Spike.fasta", ("partition_family", "Spike", True)),
-        ("run_msa_Spike_untrimmed.fasta", ("partition_family", "Spike", False)),
-        ("run_per_protein/Spike_msa.fasta", ("marker", "Spike", True)),
-        ("run_per_protein/run_Spike_msa.fasta", ("marker", "Spike", True)),
-        ("run_extra_protein/ORF7_msa.fasta", ("extra_protein", "ORF7", True)),
-        ("run_polyprotein/ORF1ab_NSP3_msa.fasta", ("peptide", "ORF1ab_NSP3", True)),
-        ("run_per_segment/L_msa.fasta", ("segment_nt", "L", True)),
+        ("run_msa.fasta", ("genome", "", False)),
+        ("run_msa_untrimmed.fasta", ("genome", "", True)),
+        ("run_msa_Spike.fasta", ("partition_family", "Spike", False)),
+        ("run_msa_Spike_untrimmed.fasta", ("partition_family", "Spike", True)),
+        ("run_per_protein/Spike_msa.fasta", ("marker", "Spike", False)),
+        ("run_per_protein/run_Spike_msa.fasta", ("marker", "Spike", False)),
+        ("run_extra_protein/ORF7_msa.fasta", ("extra_protein", "ORF7", False)),
+        ("run_polyprotein/ORF1ab_NSP3_msa.fasta", ("peptide", "ORF1ab_NSP3", False)),
+        ("run_per_segment/L_msa.fasta", ("segment_nt", "L", False)),
     ],
 )
 def test_classify(rel, expect):
     from pathlib import Path
 
     assert _classify(Path(rel), "run") == expect
+
+
+def test_untrimmed_sibling_paths():
+    from pathlib import Path
+
+    assert _untrimmed_sibling(Path("run_msa.fasta")) == Path("run_msa_untrimmed.fasta")
+    assert _untrimmed_sibling(Path("run_msa_Spike.fasta")) == Path(
+        "run_msa_Spike_untrimmed.fasta"
+    )
+    assert _untrimmed_sibling(Path("p/Spike_msa.fasta")) == Path(
+        "p/Spike_msa_untrimmed.fasta"
+    )
+
+
+def _trimmed_col(tmp_path, prefix="run"):
+    """Run the sweep and return {msa_path: trimmed_value} from the TSV."""
+    path = write_msa_conservation_report(tmp_path, prefix, cfg=None)
+    assert path is not None
+    lines = path.read_text().strip().splitlines()
+    header = lines[0].split("\t")
+    i_msa, i_trim = header.index("msa"), header.index("trimmed")
+    out = {}
+    for line in lines[1:]:
+        cells = line.split("\t")
+        out[cells[i_msa]] = cells[i_trim]
+    return out
+
+
+def test_trimmed_column_false_when_trimal_off(tmp_path):
+    """Default run (no `_untrimmed` companion): the tree-input `_msa.fasta`
+    was never trimmed, so `trimmed` must be FALSE — the bug fix."""
+    (tmp_path / "run_msa.fasta").write_text(">a\nMKVL\n>b\nMKVD\n>c\nMKVL\n")
+    cols = _trimmed_col(tmp_path)
+    assert cols["run_msa.fasta"] == "FALSE"
+
+
+def test_trimmed_column_true_only_with_untrimmed_sibling(tmp_path):
+    """With trimAl on, the trimmed tree input has an `_untrimmed` companion:
+    the `_msa.fasta` row is TRUE, the `_untrimmed` row is FALSE."""
+    (tmp_path / "run_msa.fasta").write_text(">a\nMKVL\n>b\nMKVD\n>c\nMKVL\n")
+    (tmp_path / "run_msa_untrimmed.fasta").write_text(
+        ">a\nMK--VL\n>b\nMK--VD\n>c\nMK--VL\n"
+    )
+    cols = _trimmed_col(tmp_path)
+    assert cols["run_msa.fasta"] == "TRUE"
+    assert cols["run_msa_untrimmed.fasta"] == "FALSE"
 
 
 def test_write_report_sweeps_all_msas(tmp_path):
