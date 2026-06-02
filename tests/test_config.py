@@ -5,7 +5,70 @@ from pathlib import Path
 
 import yaml
 
-from repseq.config import DEFAULTS, get_virus_config, load_config, validate_config
+from repseq import __version__ as REPSEQ_VERSION
+from repseq.config import (
+    DEFAULTS,
+    effective_config_filename,
+    get_virus_config,
+    load_config,
+    sanitize_config,
+    validate_config,
+    write_effective_config,
+)
+
+
+def test_sanitize_config_blanks_secrets_keeps_key():
+    cfg = {"taxonomy": {"ncbi_email": "x@y.com", "ncbi_api_key": "SECRET",
+                        "rate_limit": 3}}
+    out = sanitize_config(cfg)
+    assert out["taxonomy"]["ncbi_email"] is None
+    assert out["taxonomy"]["ncbi_api_key"] is None
+    assert out["taxonomy"]["rate_limit"] == 3  # non-secret untouched
+
+
+def test_sanitize_config_drops_private_keys_by_default():
+    cfg = {"a": 1, "_hmm_runtime": {"active": True},
+           "_taxonomy_review": {"verdicts": [1]}}
+    assert sanitize_config(cfg) == {"a": 1}
+
+
+def test_sanitize_config_keeps_private_when_requested():
+    cfg = {"a": 1, "_hmm_runtime": {"active": True},
+           "taxonomy": {"ncbi_api_key": "SECRET"}}
+    out = sanitize_config(cfg, drop_private=False)
+    assert "_hmm_runtime" in out                       # kept
+    assert out["taxonomy"]["ncbi_api_key"] is None      # secret still blanked
+
+
+def test_sanitize_config_is_non_mutating():
+    cfg = {"taxonomy": {"ncbi_api_key": "SECRET"}, "_x": 1}
+    sanitize_config(cfg)
+    assert cfg["taxonomy"]["ncbi_api_key"] == "SECRET"  # original intact
+    assert cfg["_x"] == 1
+
+
+def test_effective_config_filename_uses_underscored_version():
+    name = effective_config_filename("cov")
+    assert name == f"cov_config_repseq{REPSEQ_VERSION.replace('.', '_')}.yaml"
+
+
+def test_write_effective_config_no_comments_no_secrets_reloadable(tmp_path: Path):
+    cfg = load_config(None)
+    cfg["taxonomy"]["ncbi_email"] = "x@y.com"
+    cfg["taxonomy"]["ncbi_api_key"] = "SECRETKEY123"
+    cfg["_hmm_runtime"] = {"active": True, "ga_cutoffs": {"RdRp": 25.0}}
+    path = tmp_path / effective_config_filename("test")
+    write_effective_config(cfg, path)
+    text = path.read_text()
+    assert "SECRETKEY123" not in text and "x@y.com" not in text
+    assert "_hmm_runtime" not in text
+    assert "ncbi_api_key: null" in text   # key kept, value gone
+    # No YAML comment lines (a '#' inside a quoted hex colour value is fine).
+    assert not any(ln.lstrip().startswith("#") for ln in text.splitlines())
+    # Fully resolved (all settings present) AND re-loadable as a config.
+    reloaded = load_config(path)
+    assert set(reloaded) >= set(DEFAULTS)
+    assert reloaded["taxonomy"]["ncbi_api_key"] is None
 
 
 def test_load_config_returns_defaults_when_no_file():

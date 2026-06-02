@@ -64,6 +64,23 @@ def _result_segmented() -> RunResult:
 # build_lockfile — top-level shape
 # ---------------------------------------------------------------------------
 
+def test_build_lockfile_blanks_secrets_keeps_private_keys(tmp_path):
+    """The lockfile must never persist NCBI credentials, but keeps the
+    private `_` runtime keys (replay/audit may inspect them)."""
+    cfg = {
+        "output": {"dir": str(tmp_path), "prefix": "test"},
+        "segmented": {"enabled": False},
+        "taxonomy": {"ncbi_email": "x@y.com", "ncbi_api_key": "SECRETKEY"},
+        "_hmm_runtime": {"active": True},
+    }
+    lf = build_lockfile(cfg, _result_non_seg(), ["/in.fasta"], command="repseq global")
+    blob = json.dumps(lf)
+    assert "SECRETKEY" not in blob and "x@y.com" not in blob
+    assert lf["config"]["taxonomy"]["ncbi_api_key"] is None
+    assert lf["config"]["taxonomy"]["ncbi_email"] is None
+    assert "_hmm_runtime" in lf["config"]  # private keys retained for replay
+
+
 def test_build_lockfile_top_level_keys(tmp_path):
     cfg = {"output": {"dir": str(tmp_path), "prefix": "test"}, "segmented": {"enabled": False}}
     lf = build_lockfile(cfg, _result_non_seg(), ["/path/to/in.fasta"], command="repseq global ...")

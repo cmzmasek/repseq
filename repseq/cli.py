@@ -1862,6 +1862,19 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
         out_files.append(lf_path)
     except Exception as exc:
         click.echo(f"[lockfile skipped] {exc}", err=True)
+    # Sanitized, fully-resolved config snapshot — every setting at the
+    # value it ran with (defaults filled in), comments stripped, NCBI
+    # credentials blanked. Re-runnable as a config. Always emitted;
+    # soft-fails so a dump bug never voids a real selection.
+    try:
+        from .config import effective_config_filename, write_effective_config
+        out_dir = Path(cfg["output"]["dir"])
+        prefix = cfg["output"].get("prefix", "repseq")
+        cfg_path = out_dir / effective_config_filename(prefix)
+        write_effective_config(cfg, cfg_path)
+        out_files.append(cfg_path)
+    except Exception as exc:
+        click.echo(f"[config snapshot skipped] {exc}", err=True)
     click.echo(f"\nOutput written to: {cfg['output']['dir']}")
     for f in out_files:
         click.echo(f"  {f.name}")

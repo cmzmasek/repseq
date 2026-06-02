@@ -232,6 +232,7 @@ your FASTA file(s)
     • tidy TSV companions to all 4 reports    →  {prefix}_*_taxonomic_report.tsv
                                                   (8-col tidy schema; Excel-pivot / R-pandas friendly)
     • Methods-section starter                 →  {prefix}_summary.md
+    • sanitized effective-config snapshot      →  {prefix}_config_repseq<ver>.yaml
     • plain-text run log                      →  {prefix}_run.log
     • (optional) UMAP/MDS clustering plot                        (--plot)
     • (optional) MAFFT MSA + IQ-TREE / FastTree + phyloXML tree  (--phylo)
@@ -300,8 +301,9 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_extra_protein/` | `--per-protein-phylo` + `extra_protein:` declared | Same shape, accessory-protein trees (kept out of the incongruence table by design). |
 | `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment, from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
 | `{prefix}_hmm_diagnostic.tsv` | when the HMM tier ran AND a spec declares `hmms:` | One row per (representative, marker spec, declared HMM profile): `hit` T/F, `best_dom_evalue`, `best_dom_score`, `best_coverage`, `ga_cutoff`, `cutoff_used`, `passing`. Surfaces near-miss patterns the binary gate hides ("65 isolates barely missed the cutoff at E=2e-5"). v0.26.0. |
-| `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations). Leads with an **"Analysis at a glance"** table (v0.41.0) stating the run's actual decisions — dataset type, input→representative counts, clustering substrate + alphabet + tool, selection mode, whole-genome tree substrate, per-marker/per-segment tree presence, taxonomy review. |
-| `{prefix}_lockfile.json` | every run | Machine-readable reproducibility record: the elected representative IDs, their parent accessions, the post-mutation config, tool versions, input-FASTA + HMM-DB sha256. Replayable via `repseq replay`. v0.30.0. |
+| `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations). Leads with an **"Analysis at a glance"** table (v0.41.0) stating the run's actual decisions — dataset type, input→representative counts, clustering substrate + alphabet + tool, selection mode, whole-genome tree substrate, per-marker/per-segment tree presence, taxonomy review. The **Clustering substrate** and **Whole-genome tree** cells name the actual marker(s) — the canonical `name:`, not the aliases/synonyms — and, when the HMM tier ran, each marker's domain architecture (`name (HMM: tok OR tok)`); single-marker mode lists them in priority order, concat joins with `+`, segmented prefixes each with its segment. v0.42.0. |
+| `{prefix}_config_repseq<ver>.yaml` | every run | **Sanitized effective-config snapshot** (v0.42.0): the full run-time config — every setting resolved, defaults filled in — with all comments stripped and the NCBI credentials (`ncbi_email` / `ncbi_api_key`) blanked to `null`. Re-runnable as-is via `repseq <mode> -c <this-file>`. Filename embeds the repseq version (periods→underscores), e.g. `cov_config_repseq0_42_0.yaml`. |
+| `{prefix}_lockfile.json` | every run | Machine-readable reproducibility record: the elected representative IDs, their parent accessions, the post-mutation config (NCBI credentials blanked, v0.42.0), tool versions, input-FASTA + HMM-DB sha256. Replayable via `repseq replay`. v0.30.0. |
 
 "Segmented + GenBank" means: segmented mode is on **and** the GenBank source
 features are reachable (either cached or fetched on demand) so the per-isolate
@@ -647,6 +649,34 @@ makes the selection fully reproducible.
 The "QC SUMMARY" block also shows the new **per-segment length-filter
 breakdown** (since v0.9.1) so you can tell *which* segment caused
 isolates to fall out, not just that "some did".
+
+#### `{prefix}_config_repseq<ver>.yaml` — sanitized effective-config snapshot (v0.42.0+)
+
+A clean, shareable copy of the configuration the run actually used —
+written on every run, no flag. Because repseq deep-merges your YAML over
+its built-in `DEFAULTS`, this file shows **every setting at the value it
+ran with**: anything you set, plus every default you didn't. It is
+*sanitized* in three ways:
+
+- **Comments stripped** — the dump is pure settings (no schema
+  commentary), so it's easy to diff and re-use.
+- **Credentials blanked** — `taxonomy.ncbi_email` and
+  `taxonomy.ncbi_api_key` are set to `null`. The keys stay (so the
+  structure is complete and the file is a valid config) but your secret
+  is never written to disk. Supply your own when re-running, or via the
+  `REPSEQ_NCBI_EMAIL` / `REPSEQ_NCBI_API_KEY` environment variables.
+- **Runtime state dropped** — pipeline-internal keys (anything starting
+  with `_`, e.g. computed HMM cutoffs) are removed; they're recomputed
+  on every run and aren't configuration.
+
+The filename embeds the repseq version with periods replaced by
+underscores (`cov_config_repseq0_42_0.yaml`), so a directory of runs
+self-documents which version produced each. The file is re-loadable
+verbatim: `repseq <mode> -c cov_config_repseq0_42_0.yaml -i <input>`
+reproduces the same settings. (The machine-readable
+`{prefix}_lockfile.json` below also embeds the config — likewise with
+credentials blanked since v0.42.0 — but as JSON, with the elected
+representatives and tool fingerprints, for `repseq replay`.)
 
 #### `{prefix}_lockfile.json` — structured reproducibility record (v0.30.0+)
 

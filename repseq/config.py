@@ -620,6 +620,80 @@ def _expand_paths(cfg: dict) -> dict:
     return cfg
 
 
+# Config keys whose VALUES are secrets and must never be persisted into
+# an output artifact — blanked to ``None`` wherever they appear (any
+# depth), by name. Currently the NCBI credentials (also injectable via
+# the REPSEQ_NCBI_EMAIL / REPSEQ_NCBI_API_KEY env vars).
+SECRET_CONFIG_KEYS: frozenset[str] = frozenset({"ncbi_email", "ncbi_api_key"})
+
+
+def sanitize_config(cfg: dict[str, Any], *, drop_private: bool = True) -> dict[str, Any]:
+    """Return a copy of ``cfg`` safe to write to disk.
+
+    * **Secrets blanked** — any key in :data:`SECRET_CONFIG_KEYS`, at any
+      depth, is set to ``None`` (the key stays so the structure is
+      complete and the file remains a valid, re-runnable config; the
+      user fills in their own credential).
+    * **Private runtime keys dropped** (when ``drop_private``) — any
+      top-level-or-nested key starting with ``_`` (e.g. ``_hmm_runtime``,
+      ``_taxonomy_review``) is removed. These are pipeline-injected
+      runtime state, not configuration, and are recomputed on every run.
+
+    Pure / non-mutating: builds fresh dicts and lists, leaves scalars
+    (immutable) as-is, and coerces tuples to lists so the result is
+    YAML/JSON-native. ``drop_private=False`` keeps the ``_`` keys (used by
+    the lockfile, which records the full post-mutation runtime config for
+    replay but still must not persist credentials)."""
+    def _clean(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            out: dict[Any, Any] = {}
+            for key, value in obj.items():
+                if drop_private and isinstance(key, str) and key.startswith("_"):
+                    continue
+                if isinstance(key, str) and key in SECRET_CONFIG_KEYS:
+                    out[key] = None
+                else:
+                    out[key] = _clean(value)
+            return out
+        if isinstance(obj, (list, tuple)):
+            return [_clean(x) for x in obj]
+        return obj
+
+    return _clean(cfg)
+
+
+def write_effective_config(cfg: dict[str, Any], path: Path) -> Path:
+    """Write the sanitized, fully-resolved effective config to ``path``.
+
+    The dumped config is the run-time ``cfg`` — i.e. the user's YAML
+    already deep-merged over :data:`DEFAULTS`, so **every setting is
+    present at the value it actually ran with** (defaults filled in for
+    anything the user didn't set). Secrets are blanked and runtime ``_``
+    keys dropped (see :func:`sanitize_config`); ``yaml.safe_dump`` emits
+    no comments. Block style + insertion (DEFAULTS) ordering are kept so
+    the file is human-readable and re-loadable verbatim via
+    ``repseq <mode> -c <this-file>``.
+    """
+    sanitized = sanitize_config(cfg, drop_private=True)
+    body = yaml.safe_dump(
+        sanitized,
+        sort_keys=False,
+        default_flow_style=False,
+        allow_unicode=True,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return path
+
+
+def effective_config_filename(prefix: str) -> str:
+    """Filename for the effective-config snapshot:
+    ``{prefix}_config_repseq{version}.yaml`` with the repseq version's
+    periods replaced by underscores (e.g. ``cov_config_repseq0_42_0.yaml``)."""
+    from . import __version__
+    return f"{prefix}_config_repseq{__version__.replace('.', '_')}.yaml"
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------

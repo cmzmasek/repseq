@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import __version__ as REPSEQ_VERSION
+from .config import sanitize_config
 from .models import RunResult, Sequence
 
 # Lockfile JSON shape version. Bump on any breaking change to the
@@ -177,7 +178,11 @@ def build_lockfile(
             f"{sys.version_info.major}.{sys.version_info.minor}."
             f"{sys.version_info.micro}"
         ),
-        "config": cfg,
+        # Full post-mutation runtime config for replay, but with NCBI
+        # credentials blanked so the lockfile never persists secrets.
+        # Private `_` runtime keys are kept (drop_private=False) — replay /
+        # audit may inspect them.
+        "config": sanitize_config(cfg, drop_private=False),
         "inputs": _input_sha256_list(input_paths),
         "tools": dict(tool_versions),
         "hmm_db": _hmm_db_fingerprint(cfg),

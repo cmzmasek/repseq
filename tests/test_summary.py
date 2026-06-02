@@ -99,6 +99,73 @@ def test_at_a_glance_segmented_and_tree_rows(make_seq, tmp_path):
     assert "| Taxonomy review | enabled" in md
 
 
+def test_at_a_glance_names_marker_and_hmm_architecture(make_seq, tmp_path):
+    """Clustering substrate + whole-genome tree cells name the actual
+    marker(s) and (when the HMM tier ran) the domain architecture, not
+    just the substrate kind. Single-marker mode lists declared markers in
+    priority order ('first satisfied of …')."""
+    cfg = _base_cfg(tmp_path)
+    cfg["_hmm_runtime"] = {"active": True}
+    cfg["clustering"]["cluster_protein"] = [
+        {"name": "Spike", "hmms": ["CoV_S1--CoV_S2", "bCoV_S1_N--CoV_S2"],
+         "aliases": ["spike", "surface glycoprotein"]},
+        {"name": "Nucleocapsid", "hmms": ["CoV_nucleocap"]},
+    ]
+    cfg["phylo"] = {"tool": "auto", "partition": {"enabled": True}}
+    md = render_summary(cfg, _qc(), _result(make_seq, mode="global"),
+                        ["a.fasta"], phylo_ran=True)
+    # Marker names present; aliases/synonyms NOT dumped into the cell.
+    assert "Spike (HMM: CoV_S1--CoV_S2 OR bCoV_S1_N--CoV_S2)" in md
+    assert "Nucleocapsid (HMM: CoV_nucleocap)" in md
+    assert "surface glycoprotein" not in md  # synonyms excluded
+    assert "first satisfied of Spike" in md  # single-marker priority order
+
+
+def test_at_a_glance_concat_joins_markers_with_plus(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["_hmm_runtime"] = {"active": True}
+    cfg["clustering"]["concatenate_markers"] = True
+    cfg["clustering"]["cluster_protein"] = [
+        {"name": "Spike", "hmms": ["CoV_S1--CoV_S2"]},
+        {"name": "Nucleocapsid", "hmms": ["CoV_nucleocap"]},
+    ]
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "Spike (HMM: CoV_S1--CoV_S2) + Nucleocapsid (HMM: CoV_nucleocap)" in md
+
+
+def test_at_a_glance_omits_architecture_when_hmm_not_used(make_seq, tmp_path):
+    """No _hmm_runtime.active → the marker name shows but NOT the HMM
+    architecture ('if hmm used')."""
+    cfg = _base_cfg(tmp_path)
+    cfg["clustering"]["cluster_protein"] = [
+        {"name": "Spike", "hmms": ["CoV_S1--CoV_S2"]},
+    ]
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "single marker protein (amino-acid) — Spike" in md
+    assert "HMM:" not in md.split("## Input")[0]
+
+
+def test_at_a_glance_segmented_names_per_segment_markers(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["_hmm_runtime"] = {"active": True}
+    cfg["segmented"] = {
+        "enabled": True, "virus": "bunya",
+        "viruses": {"bunya": {
+            "expected_segments": 3, "segments": ["L", "M", "S"],
+            "segment_markers": {
+                "L": {"name": "RdRp", "hmms": ["Bunya_RdRp"]},
+                "M": {"name": "GPC", "hmms": ["Bunya_G1--Bunya_G2"]},
+                "S": {"name": "N", "hmms": ["Bunya_nucleocap"]},
+            },
+        }},
+    }
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"],
+                        complete_isolates={"iso1": {}})
+    assert "L: RdRp (HMM: Bunya_RdRp)" in md
+    assert "M: GPC (HMM: Bunya_G1--Bunya_G2)" in md
+    assert "S: N (HMM: Bunya_nucleocap)" in md
+
+
 def test_build_provenance_header_one_line(make_seq, tmp_path):
     from repseq.output.summary import build_provenance_header
     cfg = _base_cfg(tmp_path)

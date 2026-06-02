@@ -177,6 +177,80 @@ def _clustering_substrate_short(cfg: dict) -> str:
     return _SUBSTRATE_SHORT["genome_nt"]
 
 
+def _marker_specs_for_glance(cfg: dict) -> list[tuple[Optional[str], str, list[str]]]:
+    """Cluster-driving markers as ``[(scope_or_None, name, hmm_tokens), …]``
+    in declared / segment order.
+
+    ``name`` is the spec's canonical ``name:`` (NOT its aliases / synonyms)
+    — falling back to a single HMM token or the segment name when no
+    ``name:`` was given. ``scope`` is the segment name (segmented) or
+    ``None`` (non-segmented). Used to name the substrate in the
+    'Analysis at a glance' table. Reads the same config surface the
+    marker selector does so the names match what actually drove
+    clustering."""
+    segmented = bool(cfg.get("segmented", {}).get("enabled"))
+    out: list[tuple[Optional[str], str, list[str]]] = []
+    if segmented:
+        seg_cfg = cfg.get("segmented", {}) or {}
+        virus = (seg_cfg.get("viruses") or {}).get(seg_cfg.get("virus") or "", {})
+        segment_markers = virus.get("segment_markers") or {}
+        cluster_protein = virus.get("cluster_protein") or {}
+        segments = list(virus.get("segments") or [])
+        # Reuse the canonical segment-marker resolver (segment_markers wins
+        # over legacy cluster_protein, with the split-config merge) so the
+        # names here match selection exactly.
+        from ..phylo.per_protein import _resolve_segment_marker_full
+        for seg in segments:
+            name, tokens, aliases = _resolve_segment_marker_full(
+                seg, segment_markers, cluster_protein,
+            )
+            if not name and not tokens and not aliases:
+                continue
+            out.append((seg, name or seg, list(tokens)))
+    else:
+        for entry in (cfg.get("clustering", {}) or {}).get("cluster_protein", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            tokens = list(entry.get("hmms") or [])
+            aliases = list(entry.get("aliases") or [])
+            if not name and not tokens and not aliases:
+                continue
+            disp = name or (tokens[0] if len(tokens) == 1 else "marker")
+            out.append((None, disp, tokens))
+    return out
+
+
+def _marker_detail_parts(cfg: dict) -> list[str]:
+    """Per-marker display strings ``"<scope: >name (HMM: arch OR arch)"``.
+
+    The HMM domain architecture is shown only when the HMM tier actually
+    ran this session (``cfg['_hmm_runtime'].active``) — "if hmm used".
+    Alternative architectures within one marker are joined with ``OR``
+    (matching the OR semantics of a spec's ``hmms:`` list)."""
+    hmm_active = bool((cfg.get("_hmm_runtime", {}) or {}).get("active"))
+    parts: list[str] = []
+    for scope, name, tokens in _marker_specs_for_glance(cfg):
+        arch = f" (HMM: {' OR '.join(tokens)})" if (tokens and hmm_active) else ""
+        label = f"{scope}: {name}" if scope else name
+        parts.append(f"{label}{arch}")
+    return parts
+
+
+def _combine_marker_parts(parts: list[str], mode: str) -> str:
+    """Join per-marker parts. ``mode``: ``concat`` (A + B, the clustering
+    string), ``list`` (A, B — independent partitions / per-segment), or
+    ``priority`` (single-marker non-segmented: the first declared marker a
+    record satisfies wins, so list them in that order)."""
+    if len(parts) == 1:
+        return parts[0]
+    if mode == "concat":
+        return " + ".join(parts)
+    if mode == "priority":
+        return "first satisfied of " + ", ".join(parts)
+    return ", ".join(parts)
+
+
 def build_provenance_header(cfg: dict, result: RunResult, segmented: bool) -> str:
     """One-line, ``#``-commented provenance string for the top of a
     plain-text report, so an isolated ``*_taxonomic_report.txt`` is
@@ -254,8 +328,17 @@ def _render_at_a_glance(
         f"{_fmt_int(n_in)} input sequences → {_fmt_int(n_reps)} {rep_unit}",
     ))
 
-    # Clustering substrate + tool.
-    rows.append(("Clustering substrate", _clustering_substrate_short(cfg)))
+    # Clustering substrate + tool. For protein runs, name the actual
+    # marker(s) and (when the HMM tier ran) their domain architecture.
+    aa = alphabet == "protein"
+    concat = bool(cluster_cfg.get("concatenate_markers"))
+    substrate_cell = _clustering_substrate_short(cfg)
+    if aa:
+        parts = _marker_detail_parts(cfg)
+        if parts:
+            mode = "list" if segmented else ("concat" if concat else "priority")
+            substrate_cell += f" — {_combine_marker_parts(parts, mode)}"
+    rows.append(("Clustering substrate", substrate_cell))
     rows.append(("Clustering tool", tool_name))
 
     # Selection mode (one short phrase).
@@ -286,6 +369,18 @@ def _render_at_a_glance(
         substrate_short = _SUBSTRATE_SHORT.get(
             props["substrate"], props["substrate"]
         )
+        # Name the marker(s) + architecture the genome tree is built on,
+        # same as the clustering substrate (a partitioned supermatrix lists
+        # its per-marker partitions; the non-partitioned genome tree uses
+        # the same concatenation/marker string the clustering did).
+        if tree_aa:
+            parts = _marker_detail_parts(cfg)
+            if parts:
+                mode = (
+                    "list" if (partitioned or segmented)
+                    else ("concat" if concat else "priority")
+                )
+                substrate_short += f" — {_combine_marker_parts(parts, mode)}"
         rows.append(("Whole-genome tree", f"{substrate_short}; {tree_tool}"))
 
     if per_protein_ran:
