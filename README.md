@@ -1031,6 +1031,11 @@ MAFFT `--auto` alignment. Pass `--fast` and repseq overrides the
   `phylo.per_protein.trimal.enabled` are forced off).
 - **No partitioned supermatrix** (`phylo.partition.enabled` is forced
   off — FastTree can't fit per-partition models anyway).
+- **Midpoint rooting** for every tree (`phylo.rooting.method` is forced
+  to `midpoint`, overriding any configured method/outgroup). Skips the
+  slower taxonomy-guided / MAD rooting chain, which would otherwise
+  re-score internal-clade specificity against NCBI lineages on every
+  tree.
 
 The override is in-memory only — your YAML file is untouched. A
 banner is printed to stderr at startup so you always know a fast-mode

@@ -138,9 +138,11 @@ def _shared_options(fn):
             "this run (whole-genome 2E AND per-protein 2F): "
             "FastTree (skips IQ-TREE / ModelFinder / UFBoot), MAFFT "
             "'--retree 1' single-pass progressive alignment (drops "
-            "'--auto' and any L-INS-i flags), no trimAl trimming, and no "
-            "partitioned supermatrix. Use this to iterate quickly during "
-            "config tuning; switch it off for the final publication run."
+            "'--auto' and any L-INS-i flags), no trimAl trimming, no "
+            "partitioned supermatrix, and midpoint rooting (skips the "
+            "taxonomy-guided / MAD rooting chain). Use this to iterate "
+            "quickly during config tuning; switch it off for the final "
+            "publication run."
         ),
     )(fn)
     fn = click.option(
@@ -248,15 +250,17 @@ def _apply_fast_overrides(cfg: dict) -> None:
 
     Forces a preliminary-run tree pipeline regardless of YAML: FastTree,
     MAFFT ``--retree 1`` only (no ``--auto``, no L-INS-i), no trimAl, no
-    partitioned supermatrix. Touches both the whole-genome (2E) and
-    per-protein (2F) paths so a run can iterate fast end-to-end. The
-    summary renderer reads the post-mutation cfg, so {prefix}_summary.md
-    will describe what actually ran.
+    partitioned supermatrix, midpoint rooting (skips the taxonomy-guided
+    / MAD chain — all trees in the run are midpoint-rooted). Touches both
+    the whole-genome (2E) and per-protein (2F) paths so a run can iterate
+    fast end-to-end. The summary renderer reads the post-mutation cfg, so
+    {prefix}_summary.md will describe what actually ran.
     """
     phylo = cfg.setdefault("phylo", {})
     phylo["tool"] = "fasttree"
     phylo.setdefault("partition", {})["enabled"] = False
     phylo.setdefault("trimal", {})["enabled"] = False
+    phylo.setdefault("rooting", {})["method"] = "midpoint"
     mafft = phylo.setdefault("mafft", {})
     mafft["extra_args"] = ["--retree", "1"]
     mafft["use_auto"] = False
@@ -266,8 +270,8 @@ def _apply_fast_overrides(cfg: dict) -> None:
     pp_mafft["extra_args"] = ["--retree", "1"]
     click.echo(
         "[--fast] forcing FastTree, MAFFT '--retree 1' (no --auto), "
-        "no trimAl, no partitioned supermatrix — overriding phylo: "
-        "settings from YAML.",
+        "no trimAl, no partitioned supermatrix, midpoint rooting — "
+        "overriding phylo: settings from YAML.",
         err=True,
     )
 

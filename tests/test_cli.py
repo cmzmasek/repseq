@@ -440,6 +440,20 @@ def test_apply_fast_overrides_forces_fasttree_and_skips_trimal_partition():
     assert cfg["phylo"]["per_protein"]["trimal"]["enabled"] is False
 
 
+def test_apply_fast_overrides_forces_midpoint_rooting():
+    """--fast pins midpoint rooting for ALL trees, overriding any config."""
+    cfg = {"phylo": {"rooting": {"method": "taxonomy", "outgroup": "AB123456"}}}
+    _apply_fast_overrides(cfg)
+    assert cfg["phylo"]["rooting"]["method"] == "midpoint"
+
+
+def test_apply_fast_overrides_sets_midpoint_rooting_from_empty():
+    """--fast pins midpoint rooting even when no rooting block is present."""
+    cfg = {"phylo": {}}
+    _apply_fast_overrides(cfg)
+    assert cfg["phylo"]["rooting"]["method"] == "midpoint"
+
+
 def test_apply_fast_overrides_pins_mafft_retree_one_and_disables_auto():
     """--fast pins MAFFT to '--retree 1' (no --auto) for 2E and 2F."""
     cfg = {"phylo": {}}
