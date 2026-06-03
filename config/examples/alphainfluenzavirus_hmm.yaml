@@ -1,0 +1,176 @@
+# repseq example config — Influenza A virus (Alphainfluenzavirus), HMM-gated.
+#
+# Segmented (8 negative-sense RNA segments). Every segment is identity-gated
+# by the bundled Orthomyxoviridae HMM set (repseq/data/hmms/Orthomyxoviridae/,
+# 18 Pfam-A profiles with curated GA cutoffs) and the same HMM markers drive
+# protein clustering and the per-segment trees. Contrast config/examples/
+# influenza_a.yaml, which is the alignment-free, gene-named, A/B/C example
+# (no HMM tier).
+#
+# Segment names follow the GenBank source-feature /segment qualifier, which
+# for influenza A is numeric "1".."8":
+#   1 PB2   2 PB1   3 PA   4 HA   5 NP   6 NA   7 M   8 NS
+# This assumes the default GenBank-metadata path (seq.segment is read from
+# the /segment qualifier). If your input instead carries gene-named segments
+# in the headers and you run with metadata off, rename the keys below (and
+# add segment_aliases) to match — see config/examples/influenza_a.yaml.
+#
+# Scope note: the polymerase / NP / M / NS profiles are influenza-A-specific;
+# `Hemagglutinin` and `Neur` are the broader HA / NA families. Influenza B/C
+# proteins are NOT bundled — run a B/C-tuned set against those.
+#
+# Reassortment readout: run with --per-protein-phylo. Each segment marker
+# becomes its own tree (one leaf per isolate); high pairwise Robinson-Foulds
+# in {prefix}_per_protein/{prefix}_incongruence.tsv between, say, the HA tree
+# and the NP/M trees is the reassortment signal.
+#
+# Usage:
+#   repseq global -c config/examples/alphainfluenzavirus_hmm.yaml \
+#       -i sequences/*.fasta --threshold 0.95 --segmented --per-protein-phylo
+
+cache_dir: ~/.repseq/cache
+temp_dir: /tmp/repseq
+threads: 10
+seed: 42
+
+qc:
+  remove_duplicates: true
+  genome_length_filter:
+    enabled: false
+  ambiguous_threshold: 0.01
+  annotation_filter:
+    enabled: true
+    keywords:
+    - 'MAG:'
+    - metagenome-assembled
+    - synthetic
+    - artificial
+    - fragment
+    - environmental sample
+    - uncultured
+    - unclassified
+    - unidentified
+  protein_annotation:
+    enabled: false
+    min_proteins:
+  # Amino-acid ambiguous-residue gate on the CDS translations (X/B/Z/J).
+  protein_quality:
+    enabled: true
+    max_bad_fraction: 0.01
+
+segmented:
+  enabled: true
+  # Drop any isolate whose segments resolve to different species
+  # (reassortants between distinct parent species, or an /isolate-label
+  # collision). Dropped segments land in _qc_removed.tsv with reason
+  # taxonomy_mismatch:species. NOTE: intra-species reassortment (the
+  # common case in influenza A) is NOT removed here — only segments that
+  # disagree at the species rank are. Use --per-protein-phylo for the
+  # topological reassortment readout (see header).
+  taxonomy_consistency:
+    enabled: true
+    rank: species
+  # Records sharing a strain-derived isolate_id AND a segment (the
+  # over-merge signature of the /strain -> isolate_id fallback).
+  strain_collision_action: warn
+  virus: Alphainfluenzavirus
+  viruses:
+    Alphainfluenzavirus:
+      expected_segments: 8
+      segments:
+      - '1'
+      - '2'
+      - '3'
+      - '4'
+      - '5'
+      - '6'
+      - '7'
+      - '8'
+      # Fallback only — seq.isolate_id/segment come from the GenBank
+      # source feature (/isolate, /segment) first. The regex fires for
+      # UniProt input, missing accessions, or --no-resolve.
+      isolate_regex: '\|(?P<isolate>.+?)(?:\s+segment|\|)'
+      # Approximate full-length segment sizes (nt); windows widened on
+      # both sides to admit near-complete entries.
+      #   1 PB2 ~2341  2 PB1 ~2341  3 PA ~2233  4 HA ~1700-1780
+      #   5 NP ~1565   6 NA ~1410-1470  7 M ~1027  8 NS ~890
+      segment_lengths:
+        '1': {min: 2000, max: 2600}
+        '2': {min: 2000, max: 2600}
+        '3': {min: 1900, max: 2500}
+        '4': {min: 1400, max: 2000}
+        '5': {min: 1300, max: 1800}
+        '6': {min: 1100, max: 1700}
+        '7': {min: 800,  max: 1200}
+        '8': {min: 700,  max: 1100}
+      # Annotated CDS counts per segment. PB1 carries PB1-F2 (+1 ORF),
+      # PA carries PA-X (ribosomal frameshift), M splices to M1+M2, NS
+      # splices to NS1+NEP — hence the 2-CDS alternatives.
+      expected_proteins_per_segment:
+        '1': [1]
+        '2': [1, 2]
+        '3': [1, 2]
+        '4': [1]
+        '5': [1]
+        '6': [1]
+        '7': [1, 2]
+        '8': [1, 2]
+      # HMM identity QC + marker selection. Each `hmms:` entry is a TOKEN
+      # (single "Name", or multidomain "A--B" in N-to-C order). A segment
+      # passes when ANY token has a satisfying CDS (tokens are OR'd); an
+      # isolate is dropped when any segment fails. The same satisfying CDS
+      # (longest) is the marker fed to protein clustering and the
+      # per-segment tree. PB2's Pfam profile is split into 7 sequential
+      # domains, so we OR several conserved ones rather than demand all 7.
+      segment_markers:
+        '1': {hmms: ["Flu_PB2_3rd", "Flu_PB2_5th", "Flu_PB2_2nd", "Flu_PB2_6th"]}
+        '2': {hmms: ["Flu_PB1"]}
+        '3': {hmms: ["Flu_PA"]}
+        '4': {hmms: ["Hemagglutinin"]}
+        '5': {hmms: ["Flu_NP"]}
+        '6': {hmms: ["Neur"]}
+        '7': {hmms: ["Flu_M1", "Flu_M2"]}
+        '8': {hmms: ["Flu_NS1", "Flu_NS2"]}
+
+# HMM identity QC cutoffs. All 18 bundled profiles carry curated Pfam GA
+# cutoffs, so `default_evalue` is effectively unused here — tighten/loosen
+# via `relative_length_cutoff` (raise to require near-full-length
+# alignment; lower to catch partial domains) or set
+# `use_ga_when_available: false` to force a uniform E-value.
+hmm:
+  enabled: true
+  database: Orthomyxoviridae   # bundled repseq/data/hmms/Orthomyxoviridae/ (18 profiles)
+  default_evalue: 1.0e-5
+  use_ga_when_available: true
+  relative_length_cutoff: 0.5
+
+taxonomy:
+  ncbi_email: null   # set your email here or via REPSEQ_NCBI_EMAIL env var
+  ncbi_api_key: null # set your key here or via REPSEQ_NCBI_API_KEY env var
+  cache_ttl_days: 30
+
+clustering:
+  backend: cdhit
+  # Cluster on the concatenated per-segment marker PROTEINS (the HMM-gated
+  # CDS of each segment), not nucleotides — picks `cd-hit` (protein, 0.40
+  # floor) over `cd-hit-est`.
+  alphabet_for_clustering: protein
+  mmseqs2_mode: easy-linclust
+  coverage: 0.8
+  coverage_mode: 0
+  cdhit:
+    global_alignment: true
+    coverage: 0.8
+
+phylo:
+  # FastTree for fast iteration; switch to `auto` (IQ-TREE for protein,
+  # with ModelFinder + UFBoot) for the publication run.
+  tool: fasttree
+  per_protein:
+    # One tree per segment marker → per-segment topology for reassortment
+    # detection (--per-protein-phylo). Floor of 3 taxa per tree.
+    min_taxa: 3
+
+output:
+  dir: ./repseq_output_alphainfluenzavirus
+  prefix: alphainfluenzavirus
