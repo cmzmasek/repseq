@@ -1707,6 +1707,12 @@ the selection least:
   `{prefix}_force_selected.tsv`; both are summarised in
   `{prefix}_summary.md`. A reviewer can see exactly which records bypassed
   which filter and which were pinned into the output.
+- **Count reconciliation.** Force-select runs *after* clustering, so the
+  per-stratum counts in `{prefix}_group_counts.tsv` reflect clustering
+  **before** any pins were added — they can sum to fewer than the final
+  representative count. The pinned additions show up in the representative
+  files, `{prefix}_force_selected.tsv`, and the final counts in
+  `{prefix}_summary.md`.
 
 ---
 

@@ -239,6 +239,12 @@ class QCReport:
     # mix of segments of very different lengths; per-segment bounds are
     # applied later via segmented.viruses.<v>.segment_lengths instead).
     length_filter_skipped: bool = False
+    # Why the whole-genome length filter did not run, so the summary line
+    # reads honestly: "segmented" (segmented mode — per-segment bounds apply
+    # instead) or "disabled" (non-segmented run with the filter off, the
+    # default). ``None`` defaults to the segmented wording for backward
+    # compatibility with callers that set length_filter_skipped directly.
+    length_filter_skip_reason: Optional[str] = None
     # Per-segment isolate drops from the segmented length filter. Shape:
     # {"L": {"too_short": 257, "too_long": 0}, "M": {...}, ...}. Counted
     # in *isolates*, not segments — the filter is isolate-level (one bad
@@ -304,7 +310,12 @@ class QCReport:
                         f"    {seg_name} too long   : {counts['too_long']}"
                     )
         elif self.length_filter_skipped:
-            length_lines = ["  Removed (length)    : skipped (segmented mode)"]
+            why = (
+                "filter disabled"
+                if self.length_filter_skip_reason == "disabled"
+                else "segmented mode"
+            )
+            length_lines = [f"  Removed (length)    : skipped ({why})"]
         else:
             length_lines = [f"  Removed (length)    : {self.removed_length}"]
         dup_line = (

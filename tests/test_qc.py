@@ -110,6 +110,9 @@ def test_run_qc_skips_genome_length_filter_in_segmented_mode(make_seq):
     assert {s.id for s in kept} == {"L1", "M1", "S1"}
     assert report.removed_length == 0
     assert report.length_filter_skipped is True
+    # Reason is recorded so the summary line reads "skipped (segmented mode)".
+    assert report.length_filter_skip_reason == "segmented"
+    assert "skipped (segmented mode)" in report.summary()
 
 
 def test_run_qc_skips_genome_length_filter_when_disabled(make_seq):
@@ -122,6 +125,12 @@ def test_run_qc_skips_genome_length_filter_when_disabled(make_seq):
     assert {s.id for s in kept} == {"L1", "S1"}
     assert report.removed_length == 0
     assert report.length_filter_skipped is True
+    # Non-segmented + disabled must NOT claim "segmented mode" (the v0.46.1
+    # wording fix) — it reads "skipped (filter disabled)" instead.
+    assert report.length_filter_skip_reason == "disabled"
+    summary = report.summary()
+    assert "skipped (filter disabled)" in summary
+    assert "skipped (segmented mode)" not in summary
 
 
 def test_run_qc_skips_dedup_in_segmented_mode(make_seq):

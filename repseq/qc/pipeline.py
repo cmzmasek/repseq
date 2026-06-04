@@ -243,8 +243,12 @@ def run_qc(sequences: list[Sequence], cfg: dict[str, Any]) -> tuple[list[Sequenc
     # filter is disabled (the default) it likewise doesn't run. Either way
     # length_filter_skipped records that the genome filter did not fire.
     glf = qc_cfg.get("genome_length_filter", {}) or {}
-    if segmented or not glf.get("enabled", False):
+    if segmented:
         report.length_filter_skipped = True
+        report.length_filter_skip_reason = "segmented"
+    elif not glf.get("enabled", False):
+        report.length_filter_skipped = True
+        report.length_filter_skip_reason = "disabled"
     else:
         sequences = genome_length_filter(sequences, glf, report, policy=policy)
 
