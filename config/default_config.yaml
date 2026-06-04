@@ -780,3 +780,14 @@ overrides:
   # (Segmented completeness is NOT protectable — protection cannot
   # synthesize a missing segment, so an incomplete isolate still drops.)
   protect_stages: all
+  # force_select: guarantee the named sequences appear among the
+  # representatives, independent of protect_qc. Hybrid policy: a pinned
+  # sequence wins its cluster's representative slot (beating the
+  # refseq/reviewed/longest priority); pinned members that collide in one
+  # cluster are split into singleton clusters so all survive; pins that
+  # clustering deselected (diversity `global -n`) are added as singletons.
+  # Force-select needs the sequence to survive QC first — pair with
+  # protect_qc (same id list) for a "present no matter what" guarantee; a
+  # pin that didn't survive QC is reported as `unavailable`. Per-sequence
+  # actions are written to {prefix}_force_selected.tsv. CLI: --pin-ids FILE.
+  force_select: false

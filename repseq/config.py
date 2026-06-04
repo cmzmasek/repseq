@@ -615,6 +615,15 @@ DEFAULTS: dict[str, Any] = {
         "ids_file": None,
         "protect_qc": False,
         "protect_stages": "all",
+        # force_select: guarantee the named sequences appear among the
+        # representatives (independent of protect_qc). Hybrid policy: a
+        # pinned sequence wins its cluster's representative slot; pins that
+        # collide in one cluster are split into singletons; diversity-
+        # deselected pins are added as singletons. Force-select needs the
+        # sequence to survive QC first — pair with protect_qc for a
+        # "present no matter what" guarantee. Audit in
+        # {prefix}_force_selected.tsv.
+        "force_select": False,
     },
 }
 
@@ -1872,6 +1881,8 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         errors.append("overrides.ids_file must be a path string (or null)")
     if "protect_qc" in ov and not isinstance(ov.get("protect_qc"), bool):
         errors.append("overrides.protect_qc must be a boolean")
+    if "force_select" in ov and not isinstance(ov.get("force_select"), bool):
+        errors.append("overrides.force_select must be a boolean")
     stages = ov.get("protect_stages", "all")
     if stages != "all":
         from .overrides import QC_PROTECT_STAGES

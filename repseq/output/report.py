@@ -145,6 +145,28 @@ def write_overrides_tsv(qc_report: QCReport, path: Path) -> bool:
     return True
 
 
+def write_force_selected_tsv(result: RunResult, path: Path) -> bool:
+    """Write the force-select audit TSV (overrides.force_select).
+
+    One row per pinned sequence: ``id``, the ``action`` taken
+    (elected_representative / split_singleton / added_representative /
+    already_representative / unavailable), and a ``detail`` string. Returns
+    ``False`` (writing nothing) when force-select recorded nothing, so a run
+    without the override leaves no empty file behind.
+    """
+    if not result.force_selected:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("id\taction\tdetail\n")
+        for entry in result.force_selected:
+            fh.write(
+                f"{_tsv_safe(entry['id'])}\t{_tsv_safe(entry['action'])}\t"
+                f"{_tsv_safe(entry.get('detail', ''))}\n"
+            )
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Representative metadata TSV
 # ---------------------------------------------------------------------------
@@ -2627,6 +2649,11 @@ def write_all_reports(
     overrides_path = out_dir / f"{prefix}_overrides.tsv"
     if write_overrides_tsv(qc_report, overrides_path):
         output_files.append(overrides_path)
+    # Force-select audit (overrides.force_select): only written when at
+    # least one sequence was pinned.
+    force_selected_path = out_dir / f"{prefix}_force_selected.tsv"
+    if write_force_selected_tsv(result, force_selected_path):
+        output_files.append(force_selected_path)
     # Mode-aware: segmented runs produce one row per representative
     # isolate (CONCAT|<isolate_id> Sequence with concat_segments
     # populated); non-segmented runs produce one row per representative

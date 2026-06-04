@@ -19,7 +19,9 @@ from repseq.overrides import (
     resolve_ids,
     resolve_stages,
 )
-from repseq.output.report import write_overrides_tsv
+from repseq.models import Cluster, RunResult
+from repseq.overrides import apply_force_select
+from repseq.output.report import write_force_selected_tsv, write_overrides_tsv
 from repseq.qc.pipeline import ambiguous_filter, run_qc
 from repseq.segmented.taxonomy_consistency import (
     filter_taxonomy_consistent_isolates,
@@ -235,6 +237,149 @@ def test_validate_accepts_all_and_subset():
 # ---------------------------------------------------------------------------
 # report writer
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# force_select (apply_force_select)
+# ---------------------------------------------------------------------------
+
+def _S(sid, n=100, *, accession=None, isolate_id=None, refseq=False):
+    s = _seq(sid, "A" * n, accession=accession or sid, isolate_id=isolate_id)
+    s.is_refseq = refseq
+    return s
+
+
+def _fs_cfg(ids, on=True):
+    return {
+        "overrides": {"ids": ids, "force_select": on},
+        "representative": {"priority": ["refseq", "reviewed_uniprot", "longest"]},
+    }
+
+
+def test_force_select_elects_pinned_member_over_representative():
+    r1 = _S("R1", refseq=True)        # would normally win on refseq
+    p1 = _S("P1", 120)                # pinned, not refseq
+    m2 = _S("M2")
+    c = Cluster("c1", representative=r1, members=[p1, m2])
+    result = RunResult(mode="m", representatives=[r1], clusters=[c])
+    apply_force_select(result, [r1, p1, m2], _fs_cfg(["P1"]))
+    assert c.representative is p1                 # pin won election
+    assert r1 in c.members                        # old rep demoted
+    assert p1 in result.representatives and r1 not in result.representatives
+    assert [e["action"] for e in result.force_selected] == ["elected_representative"]
+
+
+def test_force_select_splits_colliding_pins_into_singletons():
+    r1 = _S("R1", refseq=True)
+    p1 = _S("P1", 120)
+    p2 = _S("P2", 90)
+    c = Cluster("c1", representative=r1, members=[p1, p2])
+    result = RunResult(mode="m", representatives=[r1], clusters=[c])
+    apply_force_select(result, [r1, p1, p2], _fs_cfg(["P1", "P2"]))
+    # Longest pin (P1) wins; P2 split into its own singleton cluster.
+    assert c.representative is p1
+    assert any(cl.representative is p2 and cl.members == [] for cl in result.clusters)
+    assert {"P1", "P2"} <= {s.id for s in result.representatives}
+    actions = sorted(e["action"] for e in result.force_selected)
+    assert actions == ["elected_representative", "split_singleton"]
+
+
+def test_force_select_adds_diversity_deselected_orphan():
+    # global -n style: selected reps are singleton clusters; D1 is in the
+    # pool but in no cluster.
+    r1 = _S("R1")
+    d1 = _S("D1")
+    c = Cluster("c1", representative=r1)
+    result = RunResult(mode="global:count", representatives=[r1], clusters=[c])
+    apply_force_select(result, [r1, d1], _fs_cfg(["D1"]))
+    assert d1 in result.representatives
+    assert any(cl.representative is d1 for cl in result.clusters)
+    assert result.force_selected[0]["action"] == "added_representative"
+
+
+def test_force_select_already_representative_is_noop_action():
+    r1 = _S("R1")
+    c = Cluster("c1", representative=r1)
+    result = RunResult(mode="m", representatives=[r1], clusters=[c])
+    apply_force_select(result, [r1], _fs_cfg(["R1"]))
+    assert result.representatives == [r1]
+    assert result.force_selected == [
+        {"id": "R1", "action": "already_representative", "detail": ""}
+    ]
+
+
+def test_force_select_reports_unavailable_pin():
+    r1 = _S("R1")
+    c = Cluster("c1", representative=r1)
+    result = RunResult(mode="m", representatives=[r1], clusters=[c])
+    apply_force_select(result, [r1], _fs_cfg(["GHOST"]))
+    assert [e["action"] for e in result.force_selected] == ["unavailable"]
+    assert result.force_selected[0]["id"] == "GHOST"
+
+
+def test_force_select_noop_when_disabled():
+    r1 = _S("R1")
+    p1 = _S("P1")
+    c = Cluster("c1", representative=r1, members=[p1])
+    result = RunResult(mode="m", representatives=[r1], clusters=[c])
+    apply_force_select(result, [r1, p1], _fs_cfg(["P1"], on=False))
+    assert result.representatives == [r1]
+    assert result.force_selected == []
+
+
+def test_force_select_matches_segmented_isolate_id():
+    # CONCAT rep carries isolate_id; pin by isolate_id.
+    r1 = _S("CONCAT|isoA", isolate_id="isoA")
+    p1 = _S("CONCAT|isoB", isolate_id="isoB")
+    c = Cluster("c1", representative=r1, members=[p1])
+    result = RunResult(mode="m", representatives=[r1], clusters=[c])
+    apply_force_select(result, [r1, p1], _fs_cfg(["isoB"]))
+    assert c.representative is p1
+    assert result.force_selected[0]["action"] == "elected_representative"
+
+
+def test_write_force_selected_tsv(tmp_path):
+    result = RunResult(mode="m")
+    result.force_selected = [
+        {"id": "P1", "action": "elected_representative", "detail": "cluster=c1"},
+        {"id": "GHOST", "action": "unavailable", "detail": "no surviving match"},
+    ]
+    path = tmp_path / "x_force_selected.tsv"
+    assert write_force_selected_tsv(result, path) is True
+    lines = path.read_text().splitlines()
+    assert lines[0] == "id\taction\tdetail"
+    assert lines[1] == "P1\telected_representative\tcluster=c1"
+
+
+def test_write_force_selected_tsv_skips_when_empty(tmp_path):
+    result = RunResult(mode="m")
+    path = tmp_path / "x_force_selected.tsv"
+    assert write_force_selected_tsv(result, path) is False
+    assert not path.exists()
+
+
+def test_validate_rejects_bad_force_select_type():
+    cfg = copy.deepcopy(DEFAULTS)
+    cfg["overrides"] = {"ids": ["x"], "force_select": "yes"}
+    errs = validate_config(cfg)
+    assert any("overrides.force_select must be a boolean" in e for e in errs)
+
+
+def test_pin_ids_flag_enables_force_select(tmp_path):
+    from repseq.cli import _load_and_validate
+
+    pins = tmp_path / "pins.txt"
+    pins.write_text("NC_1.1\nNC_2\n")
+    out = tmp_path / "out"
+    cfg = _load_and_validate(
+        config_path=None, output_dir=str(out), prefix="t",
+        threads=None, seed=None, pin_ids=str(pins),
+    )
+    assert cfg["overrides"]["force_select"] is True
+    rt = cfg["_overrides_runtime"]
+    assert rt["force_select"] is True
+    assert "nc_1.1" in rt["ids"] and "nc_2" in rt["ids"]
+    assert "NC_1.1" in rt["raw_ids"]
+
 
 def test_write_overrides_tsv_skips_when_empty(tmp_path):
     report = QCReport()

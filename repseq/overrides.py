@@ -7,9 +7,13 @@ would otherwise fail (a force-keep / whitelist), so a curated reference
 strain that is slightly noisy, missing an expected protein, or just below a
 length bound is never silently dropped.
 
-Two capabilities are planned over one id list; this module currently
-implements `protect_qc` (force-keep). `force_select` (guaranteed
-representative) is a separate, later step.
+Two capabilities over one id list, independently toggled:
+
+* ``protect_qc`` — **force-keep**: named sequences bypass the QC removal
+  stages they would otherwise fail (this module's stage helpers).
+* ``force_select`` — **force-select**: named sequences are guaranteed to
+  appear among the representatives, regardless of how clustering would have
+  collapsed them (:func:`apply_force_select`).
 
 Config (``overrides:`` block)::
 
@@ -18,6 +22,7 @@ Config (``overrides:`` block)::
       ids_file: vip.txt         # one id per line; '#' comments allowed
       protect_qc: true
       protect_stages: all       # or a subset of QC_PROTECT_STAGES
+      force_select: true
 
 **Matching** is by ``seq.accession`` OR ``seq.id`` OR ``seq.isolate_id``,
 case- and whitespace-normalised, and **version-insensitive** (``NC_045512``
@@ -97,6 +102,29 @@ def load_ids_file(path: str) -> list[str]:
     return ids
 
 
+def resolve_raw_ids(ov: dict[str, Any]) -> tuple[str, ...]:
+    """Return the original (un-normalised) configured ids, order-preserving.
+
+    Inline ``ids`` + ``ids_file`` (best-effort, missing file ignored),
+    de-duplicated. Used for the force-select "unavailable" audit, which
+    must echo the id the user actually typed.
+    """
+    raw: list[str] = list(ov.get("ids") or [])
+    path = ov.get("ids_file")
+    if path:
+        try:
+            raw.extend(load_ids_file(path))
+        except OSError:
+            pass
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in raw:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return tuple(out)
+
+
 def resolve_ids(ov: dict[str, Any]) -> frozenset[str]:
     """Build the normalised, version-augmented id set from an ``overrides`` dict.
 
@@ -124,14 +152,17 @@ def resolve_ids(ov: dict[str, Any]) -> frozenset[str]:
 
 
 class ProtectionPolicy:
-    """Decides whether a sequence is protected against a given QC stage."""
+    """Decides whether a sequence is protected (QC) and/or pinned (selection)."""
 
-    def __init__(self, ids: frozenset[str], stages: frozenset[str], enabled: bool):
+    def __init__(self, ids: frozenset[str], stages: frozenset[str], enabled: bool,
+                 *, force_select: bool = False, raw_ids: tuple[str, ...] = ()):
         self.ids = ids
         self.stages = stages
-        # Only active when force-keep is on AND at least one id is listed —
-        # an empty list with protect_qc=true protects nothing.
+        self.raw_ids = raw_ids
+        # Each capability is active only when its flag is on AND at least one
+        # id is listed — an empty list protects / pins nothing.
         self.enabled = bool(enabled and ids)
+        self.force_select = bool(force_select and ids)
 
     @classmethod
     def from_cfg(cls, cfg: dict[str, Any]) -> "ProtectionPolicy":
@@ -148,12 +179,16 @@ class ProtectionPolicy:
                 ids=rt.get("ids", frozenset()),
                 stages=rt.get("stages", frozenset()),
                 enabled=rt.get("protect_qc", False),
+                force_select=rt.get("force_select", False),
+                raw_ids=rt.get("raw_ids", ()),
             )
         ov = cfg.get("overrides") or {}
         return cls(
             ids=resolve_ids(ov),
             stages=resolve_stages(ov.get("protect_stages", "all")),
             enabled=bool(ov.get("protect_qc", False)),
+            force_select=bool(ov.get("force_select", False)),
+            raw_ids=resolve_raw_ids(ov),
         )
 
     def _matches(self, seq) -> bool:
@@ -181,6 +216,10 @@ class ProtectionPolicy:
             return False
         return any(self._matches(s) for s in seqs)
 
+    def pins(self, seq) -> bool:
+        """True iff ``seq`` is force-selected (guaranteed a representative)."""
+        return self.force_select and self._matches(seq)
+
 
 def protected_keep(seq, stage: str, reason: str, policy: Optional[ProtectionPolicy],
                    report) -> bool:
@@ -195,3 +234,132 @@ def protected_keep(seq, stage: str, reason: str, policy: Optional[ProtectionPoli
         report.add_protected(seq.id, stage, reason)
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Force-select (guaranteed representative)
+# ---------------------------------------------------------------------------
+
+def _audit_id(seq) -> str:
+    """The most user-recognisable id for the force-select audit."""
+    return (getattr(seq, "isolate_id", None)
+            or getattr(seq, "accession", None)
+            or getattr(seq, "id", "") or "")
+
+
+def apply_force_select(result, pool, cfg) -> None:
+    """Guarantee every ``force_select``-pinned sequence is a representative.
+
+    **Hybrid policy** (the chosen design): within a cluster a pinned member
+    *wins* the representative slot — beating the configured
+    refseq/reviewed/longest priority (the demoted old representative drops
+    back into the cluster's members). When several pinned members land in
+    the same cluster, the best one (by that same priority) wins and the
+    rest are *split* into their own singleton clusters, so all pinned
+    members survive. Pinned sequences that were diversity-deselected (and
+    so belong to no cluster — the ``global -n`` path) are *added* as new
+    singleton representatives. Pinned ids that no surviving sequence
+    matched (dropped in QC and not protected, or never in the input) are
+    recorded as ``unavailable`` — the visible half of the
+    force-keep/force-select coupling.
+
+    Mutates ``result.representatives`` / ``result.clusters`` in place and
+    writes an audit list onto ``result.force_selected`` (entries are
+    ``{id, action, detail}``). No-op unless ``overrides.force_select`` is
+    on and at least one id is listed. ``pool`` is the post-QC sequence list
+    fed to the mode (the same objects that populate the clusters, so
+    identity comparison is valid).
+    """
+    from .models import Cluster
+    from .representative.selector import select_representative
+
+    policy = ProtectionPolicy.from_cfg(cfg)
+    if not policy.force_select:
+        return
+    priority = cfg.get("representative", {}).get(
+        "priority", ["refseq", "reviewed_uniprot", "longest"]
+    )
+
+    pool = pool or []
+    pinned_pool = [s for s in pool if policy.pins(s)]
+    audit: list[dict] = []
+
+    # Unavailable: configured ids that no surviving sequence matched.
+    matched_forms: set[str] = set()
+    for s in pinned_pool:
+        for key in (getattr(s, "accession", None), getattr(s, "id", None),
+                    getattr(s, "isolate_id", None)):
+            n = _norm_id(key)
+            if n is not None:
+                matched_forms.add(n)
+                matched_forms.add(_strip_version(n))
+    for raw in policy.raw_ids:
+        n = _norm_id(raw)
+        if n is not None and n not in matched_forms and _strip_version(n) not in matched_forms:
+            audit.append({
+                "id": raw, "action": "unavailable",
+                "detail": "no surviving sequence matched (dropped in QC, or "
+                          "not in input)",
+            })
+
+    if pinned_pool:
+        rep_ids = {id(r) for r in result.representatives}
+        cluster_of: dict[int, Cluster] = {}
+        for c in result.clusters:
+            for m in [c.representative, *c.members]:
+                cluster_of[id(m)] = c
+
+        pins_by_cluster: dict[int, list] = {}
+        cluster_by_key: dict[int, Cluster] = {}
+        orphans: list = []
+        for p in pinned_pool:
+            if id(p) in rep_ids:
+                audit.append({"id": _audit_id(p),
+                              "action": "already_representative", "detail": ""})
+                continue
+            c = cluster_of.get(id(p))
+            if c is None:
+                orphans.append(p)
+                continue
+            pins_by_cluster.setdefault(id(c), []).append(p)
+            cluster_by_key[id(c)] = c
+
+        for ckey, pins in pins_by_cluster.items():
+            cluster = cluster_by_key[ckey]
+            winner = None
+            if not policy._matches(cluster.representative):
+                # Election: a pinned member beats the current representative.
+                winner = select_representative(pins, priority)
+                old = cluster.representative
+                cluster.members = [old] + [m for m in cluster.members if m is not winner]
+                cluster.representative = winner
+                result.representatives = [
+                    winner if r is old else r for r in result.representatives
+                ]
+                audit.append({"id": _audit_id(winner),
+                              "action": "elected_representative",
+                              "detail": f"cluster={cluster.cluster_id}"})
+            # Split the remaining pinned members into singleton clusters.
+            n = 0
+            for p in pins:
+                if p is winner:
+                    continue
+                n += 1
+                cluster.members = [m for m in cluster.members if m is not p]
+                result.clusters.append(
+                    Cluster(cluster_id=f"{cluster.cluster_id}_pin{n}",
+                            representative=p)
+                )
+                result.representatives.append(p)
+                audit.append({"id": _audit_id(p), "action": "split_singleton",
+                              "detail": f"from_cluster={cluster.cluster_id}"})
+
+        for i, p in enumerate(orphans, 1):
+            result.clusters.append(
+                Cluster(cluster_id=f"pin_{i:06d}", representative=p)
+            )
+            result.representatives.append(p)
+            audit.append({"id": _audit_id(p), "action": "added_representative",
+                          "detail": "diversity-deselected; added as singleton"})
+
+    result.force_selected = audit

@@ -364,3 +364,9 @@ class RunResult:
     group_stats: list[GroupStat] = field(default_factory=list)
     qc_report: Optional[QCReport] = None
     config_snapshot: dict = field(default_factory=dict)
+    # Audit of the force-select override (overrides.force_select): one entry
+    # per pinned sequence, {id, action, detail}, where action is one of
+    # elected_representative / split_singleton / added_representative /
+    # already_representative / unavailable. Written to
+    # {prefix}_force_selected.tsv and summarised in {prefix}_summary.md.
+    force_selected: list[dict] = field(default_factory=list)

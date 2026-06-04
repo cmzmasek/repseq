@@ -205,6 +205,31 @@ def test_render_summary_qc_numbers_pulled_from_report(make_seq, tmp_path):
     assert "*1,200* passed basic QC" in md
 
 
+def test_render_summary_reports_force_selected(make_seq, tmp_path):
+    """When sequences were force-selected, the selection section must say so,
+    break down the actions, flag unavailable pins, and point at the TSV."""
+    qc = _qc()
+    result = _result(make_seq)
+    result.force_selected = [
+        {"id": "P1", "action": "elected_representative", "detail": "cluster=c1"},
+        {"id": "P2", "action": "split_singleton", "detail": "from_cluster=c1"},
+        {"id": "D1", "action": "added_representative", "detail": ""},
+        {"id": "GHOST", "action": "unavailable", "detail": ""},
+    ]
+    md = render_summary(_base_cfg(tmp_path), qc, result, ["a.fasta"])
+    assert "force-selected" in md
+    assert "`overrides.force_select`" in md
+    assert "won their cluster's representative slot" in md
+    assert "split into singleton clusters" in md
+    assert "could not be selected" in md          # the unavailable pin
+    assert "{prefix}_force_selected.tsv" in md
+
+
+def test_render_summary_no_force_select_sentence(make_seq, tmp_path):
+    md = render_summary(_base_cfg(tmp_path), _qc(), _result(make_seq), ["a.fasta"])
+    assert "force-selected" not in md
+
+
 def test_render_summary_reports_force_kept_overrides(make_seq, tmp_path):
     """When sequences were force-kept via overrides.protect_qc, the QC
     section must say so, name the stage(s), and point at _overrides.tsv."""

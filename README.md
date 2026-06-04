@@ -165,7 +165,8 @@ Every mode also accepts: `--input/-i`, `--output-dir/-o`, `--config/-c`,
 `--pre-cluster-tree`, `--fast`, `--verbose`,
 `--alphabet-for-clustering {protein,nucleotide}`,
 `--protect-ids FILE` (force-keep a list of special-importance sequences
-through QC — see [Sequences of special importance](#sequences-of-special-importance--overrides)).
+through QC), `--pin-ids FILE` (force-select a list as representatives) —
+see [Sequences of special importance](#sequences-of-special-importance--overrides).
 
 In addition to the selection modes, two diagnostic/utility subcommands:
 
@@ -268,6 +269,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_run.log` | yes | Settings used and per-step counts. Keep with your results. |
 | `{prefix}_qc_removed.tsv` | yes | Every dropped sequence and the reason. |
 | `{prefix}_overrides.tsv` | when any sequence was force-kept | Force-keep audit: each sequence the `overrides.protect_qc` whitelist rescued from a QC stage, with the reason it would otherwise have been dropped. |
+| `{prefix}_force_selected.tsv` | when any sequence was force-selected | Force-select audit: each `overrides.force_select` / `--pin-ids` pin and the action taken (elected / split / added / already-a-rep / unavailable). |
 | `{prefix}_group_counts.tsv` | yes | One row per stratum: in / out / clustered / cutoff. |
 | `{prefix}_clusters.tsv` | yes | Which sequences ended up grouped, who represents whom. |
 | `{prefix}_representatives.fasta` | non-segmented | Selected representative sequences. |
@@ -624,6 +626,18 @@ file behind.
 
 See **[Sequences of special importance](#sequences-of-special-importance--overrides)**
 below for how to configure the list.
+
+#### `{prefix}_force_selected.tsv` — when a sequence was force-selected (v0.46.0+)
+
+The selection-side audit for `overrides.force_select` / `--pin-ids`. One
+row per pinned sequence — `id`, `action`, and `detail`. `action` is one of:
+`elected_representative` (won its cluster), `split_singleton` (split out
+because another pin won the same cluster; `detail` names the cluster),
+`added_representative` (clustering had deselected it; added as a singleton),
+`already_representative` (it was already a rep — nothing to do), or
+`unavailable` (no surviving sequence matched the id — it didn't survive QC,
+or was never in the input). Only written when at least one sequence was
+pinned.
 
 #### `{prefix}_hmm_diagnostic.tsv` — when the HMM tier ran (v0.26.0+)
 
@@ -1609,31 +1623,41 @@ A few things worth knowing:
 
 ## Sequences of special importance — `overrides`
 
-Sometimes a handful of records *must* survive QC no matter what: a type
-strain, a vaccine reference, a genome your reviewers will look for by
-name. The `overrides` block lets you **force-keep** named sequences
-through the QC removal stages they would otherwise fail — a whitelist —
-without loosening the thresholds for everything else.
+Sometimes a handful of records *must* be handled specially: a type strain,
+a vaccine reference, a genome your reviewers will look for by name. The
+`overrides` block names them once (an id list and/or a file) and applies
+**two independent capabilities** over that one list:
+
+- **`protect_qc`** — **force-keep**: the named sequences bypass the QC
+  removal stages they would otherwise fail (a whitelist), without
+  loosening thresholds for everything else.
+- **`force_select`** — **force-select**: the named sequences are
+  guaranteed to appear among the representatives, regardless of how
+  clustering would have collapsed them.
 
 ```yaml
 overrides:
   ids: ["NC_045512.2", "MN908947"]   # accessions (or isolate_ids, segmented)
   ids_file: vip.txt                  # OR a file, one id per line; unioned with `ids`
-  protect_qc: true                   # turn the whitelist on
+  protect_qc: true                   # survive QC
   protect_stages: all                # or a subset (see below)
+  force_select: true                 # appear in the representatives
 ```
 
-Or skip the config entirely and pass the list on the command line — handy
-for a one-off run:
+Or skip the config and pass lists on the command line — handy for a one-off
+run. `--protect-ids FILE` enables force-keep, `--pin-ids FILE` enables
+force-select; both union into the one id list:
 
 ```bash
-repseq global -c my_config.yaml -i seqs.fasta -T 0.9 --protect-ids vip.txt
+# keep these through QC AND guarantee they're in the output
+repseq global -c my_config.yaml -i seqs.fasta -T 0.9 \
+    --protect-ids vip.txt --pin-ids vip.txt
 ```
 
-`--protect-ids FILE` reads one accession/isolate-id per line (`#` comments
-and blank lines ignored), **unions** them with any `overrides.ids` /
-`overrides.ids_file` in the config, and turns `protect_qc` **on** for that
-run. The config's `protect_stages` still applies (defaults to `all`).
+Each CLI flag reads one accession/isolate-id per line (`#` comments and
+blank lines ignored), **unions** with any `overrides.ids` /
+`overrides.ids_file` in the config, and turns its respective flag **on**
+for that run.
 
 - **Matching** is by `accession` (non-segmented) or `isolate_id`
   (segmented), **case- and version-insensitive** — `NC_045512` matches
@@ -1650,15 +1674,39 @@ run. The config's `protect_stages` still applies (defaults to `all`).
   can't synthesize a missing segment, so a protected isolate that is
   missing a segment still drops (it can't be concatenated or treed) — with
   a distinct message rather than a silent fake-keep.
-- **Nothing is silent.** Every rescued record — and the exact reason it
-  would have been removed — is written to `{prefix}_overrides.tsv` and
-  summarised in `{prefix}_summary.md`. This matters for reproducibility:
-  a reviewer can see precisely which records bypassed which filter.
 
-> **Force-keep ≠ force-select.** `protect_qc` only guarantees a sequence
-> *survives QC*. It does not guarantee the sequence ends up as a
-> representative — clustering may still collapse it into another cluster.
-> (A separate "force-select" capability is planned.)
+### How force-select decides (the hybrid policy)
+
+When `force_select` is on, after clustering each pinned sequence is
+guaranteed into the representatives by the rule that disturbs the rest of
+the selection least:
+
+- **Wins its cluster** — a pinned member beats the configured
+  refseq/reviewed/longest priority and becomes that cluster's
+  representative (the displaced representative drops back into the
+  cluster's members).
+- **Splits on collision** — if two or more pinned members land in the
+  *same* cluster, the best one (same priority) wins the slot and the
+  others are split out into their own singleton clusters, so all survive.
+- **Added as a singleton** — a pin that clustering deselected entirely
+  (the diversity-only `global -n` path, where non-selected sequences
+  belong to no cluster) is appended as its own singleton representative.
+- **Unavailable** — a pinned id that no surviving sequence matched (it
+  was dropped in QC, or was never in the input) can't be selected; it's
+  reported as `unavailable` with a warning.
+
+> **Force-keep needs to pair with force-select for a hard guarantee.**
+> `force_select` can only promote a sequence that *survived QC*. If a
+> pinned record would be dropped by QC, enable **both** (`protect_qc` +
+> `force_select`, or `--protect-ids` + `--pin-ids` on the same list) so it
+> survives QC *and* lands in the output.
+
+- **Nothing is silent.** Force-kept records (and the reason each would
+  have been removed) go to `{prefix}_overrides.tsv`; force-select actions
+  (elected / split / added / already-a-rep / unavailable) go to
+  `{prefix}_force_selected.tsv`; both are summarised in
+  `{prefix}_summary.md`. A reviewer can see exactly which records bypassed
+  which filter and which were pinned into the output.
 
 ---
 

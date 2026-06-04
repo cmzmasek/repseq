@@ -722,6 +722,50 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
     else:
         diversity_sentence = ""
 
+    force_select_sentence = ""
+    if result.force_selected:
+        from collections import Counter
+
+        counts = Counter(e["action"] for e in result.force_selected)
+        applied = sum(v for k, v in counts.items() if k != "unavailable")
+        bits = []
+        if counts.get("elected_representative"):
+            bits.append(
+                f"{counts['elected_representative']} won their cluster's "
+                f"representative slot"
+            )
+        if counts.get("split_singleton"):
+            bits.append(
+                f"{counts['split_singleton']} were split into singleton "
+                f"clusters (multiple pinned members in one cluster)"
+            )
+        if counts.get("added_representative"):
+            bits.append(
+                f"{counts['added_representative']} were added as singletons "
+                f"(diversity-deselected)"
+            )
+        if counts.get("already_representative"):
+            bits.append(
+                f"{counts['already_representative']} were already "
+                f"representatives"
+            )
+        detail = ("; ".join(bits) + ".") if bits else ""
+        force_select_sentence = (
+            f" **{_fmt_int(applied)}** sequence(s) of special importance were "
+            f"**force-selected** as representatives via the override list "
+            f"(`overrides.force_select`): {detail}"
+        )
+        if counts.get("unavailable"):
+            force_select_sentence += (
+                f" (**{counts['unavailable']}** pinned id(s) could not be "
+                f"selected — they did not survive QC; pair with "
+                f"`overrides.protect_qc` to keep them.)"
+            )
+        force_select_sentence += (
+            " The per-sequence actions are listed in "
+            "`{prefix}_force_selected.tsv`."
+        )
+
     hmm_sentence = ""
     hmm_rt = cfg.get("_hmm_runtime", {}) or {}
     if hmm_rt.get("active"):
@@ -762,7 +806,8 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
         f"representative was chosen by the configured priority "
         f"(**{priority}**, with sequence length as the final tiebreaker). "
         f"The final set contains **{_fmt_int(n_reps)} {rep_unit}** "
-        f"across **{_fmt_int(n_clusters)} cluster(s)**.{diversity_sentence} "
+        f"across **{_fmt_int(n_clusters)} cluster(s)**.{diversity_sentence}"
+        f"{force_select_sentence} "
         f"Taxonomic diversity at each rank before and after clustering "
         f"(distinct species, genera, families, etc., with per-taxon "
         f"{rep_unit.split()[-1]} counts — the top 20 by member count for "
