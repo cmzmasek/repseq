@@ -183,8 +183,8 @@ def test_fetch_accession_metadata_parses_source_qualifiers(tmp_cache_dir):
                 "organism": "Influenza A virus",
                 "taxid": 111,
                 "title": "Influenza A virus segment 4",
-                "subtype": "strain|host|country|collection_date",
-                "subname": "A/duck/Vietnam/1/2005|Gallus gallus|Viet Nam|2005-01",
+                "subtype": "strain|host|country|collection_date|serotype",
+                "subname": "A/duck/Vietnam/1/2005|Gallus gallus|Viet Nam|2005-01|H5N1",
             }}}
         raise AssertionError(f"unexpected _get({endpoint!r}, {params!r})")
 
@@ -198,6 +198,7 @@ def test_fetch_accession_metadata_parses_source_qualifiers(tmp_cache_dir):
     assert meta["country"] == "Viet Nam"
     assert meta["collection_date"] == "2005-01"
     assert meta["strain"] == "A/duck/Vietnam/1/2005"
+    assert meta["subtype"] == "H5N1"   # viral serotype from /serotype
     assert meta["lineage"]["genus"] == "Alphainfluenzavirus"
     assert meta["lineage"]["family"] == "Orthomyxoviridae"
 

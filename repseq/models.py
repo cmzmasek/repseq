@@ -66,6 +66,11 @@ class Sequence:
     description: Optional[str] = None
     strain: Optional[str] = None
     host: Optional[str] = None
+    # Viral subtype / serotype from the GenBank ``/serotype`` source-feature
+    # qualifier — e.g. influenza A "H5N1". Sample metadata (like host /
+    # country), NOT an NCBI taxonomy rank, so it never enters the 9-rank
+    # ``_TAX_RANKS`` ladder. Blank when the qualifier is absent.
+    subtype: Optional[str] = None
     collection_date: Optional[str] = None
     country: Optional[str] = None
     segment: Optional[str] = None

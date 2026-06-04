@@ -390,6 +390,7 @@ def concatenate_isolate(
         description=_first_non_empty(segments, "description"),
         strain=_first_non_empty(segments, "strain"),
         host=_first_non_empty(segments, "host"),
+        subtype=_first_non_empty(segments, "subtype"),
         collection_date=_first_non_empty(segments, "collection_date"),
         country=_first_non_empty(segments, "country"),
         isolate_id=isolate_id,

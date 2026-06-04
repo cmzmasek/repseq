@@ -545,6 +545,7 @@ phylo:
     #   {order}, {class}, {phylum}     — taxonomy ranks
     #   {id}, {accession}              — sequence identifiers
     #   {host}, {strain}, {isolate_id} — isolate metadata
+    #   {subtype}                      — viral serotype, e.g. influenza "H5N1"
     #   {country}, {date}, {year}      — geography / time
     #   {organism}                     — verbatim organism field
     #

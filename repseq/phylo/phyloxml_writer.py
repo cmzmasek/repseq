@@ -95,6 +95,7 @@ _TAXONOMY_RANKS: tuple[str, ...] = (
 # results are skipped so the XML carries no zombie ``<property/>``.
 _LEAF_PROPERTIES: list[tuple[str, str]] = [
     ("repseq:host", "host"),
+    ("repseq:subtype", "subtype"),   # viral serotype, e.g. influenza "H5N1"
     ("repseq:collection_date", "collection_date"),
     ("repseq:country", "country"),
     ("repseq:strain", "strain"),
@@ -115,7 +116,8 @@ def _leaf_property_value(seq: Sequence, key: str) -> Optional[str]:
     """
     if key == "year":
         return _parse_year(seq.collection_date)
-    if key in ("host", "collection_date", "country", "strain", "isolate_id"):
+    if key in ("host", "subtype", "collection_date", "country", "strain",
+               "isolate_id"):
         v = getattr(seq, key, None)
         return str(v) if v else None
     if key in _TAXONOMY_RANKS:

@@ -172,7 +172,7 @@ In addition to the selection modes, two diagnostic/utility subcommands:
 
 | Command | What it does |
 | --- | --- |
-| `repseq stats -i x.fasta` | Pre-flight inspection of an input FASTA — count, source breakdown, NT length distribution, per-field metadata coverage (organism, host, country, segment, taxonomy, …), RefSeq/reviewed flag counts, and a top-N taxonomy breakdown per rank. No clustering, no output files; use this before committing to a long run. Default `--no-resolve` (fast, network-free); pass `--resolve` to fetch taxonomy. |
+| `repseq stats -i x.fasta` | Pre-flight inspection of an input FASTA — count, source breakdown, NT length distribution, per-field metadata coverage (organism, host, subtype, country, segment, taxonomy, …), RefSeq/reviewed flag counts, and a top-N taxonomy breakdown per rank. No clustering, no output files; use this before committing to a long run. Default `--no-resolve` (fast, network-free); pass `--resolve` to fetch taxonomy. |
 | `repseq replay <lockfile.json> -o <out>` | Re-materialise representatives from a `{prefix}_lockfile.json` written by an earlier run: re-fetches the listed accessions from NCBI (via the cache) and re-emits the same representative FASTAs into a fresh output directory. QC, clustering, and selection are **not** re-run — the lockfile is authoritative. Trees are skipped unless `--rebuild-trees`. v0.30.0. |
 | `repseq doctor` | Self-test the install (dependencies, external tools, network, config). |
 
@@ -373,6 +373,8 @@ self-describing in any downstream pipeline:
 
 Empty fields are omitted; bracket characters in values are scrubbed so
 organism names like `Foo virus [strain X]` can't break the tag syntax.
+When the GenBank `/serotype` qualifier is present (e.g. influenza A), a
+`[subtype=H5N1]` tag is added after `[host=...]` — omitted otherwise.
 
 Use it for: **the protein set you'll almost certainly hand to BLAST,
 DIAMOND, HMMER, MMseqs2 search, or any sequence-search tool** — it's
@@ -457,9 +459,11 @@ One row per representative sequence. **Schema-identical to
 analysis script reads both modes. Columns:
 
 `isolate_id`, `isolate_id_source`, `organism`, `strain`, `host`,
-`collection_date`, `country`, `n_segments`, `segments`, `accessions`,
-`total_length_nt`, `is_refseq`, `is_reviewed`, `ncbi_taxon_id`, then the
-nine-rank taxonomic ladder.
+`subtype`, `collection_date`, `country`, `n_segments`, `segments`,
+`accessions`, `total_length_nt`, `is_refseq`, `is_reviewed`,
+`ncbi_taxon_id`, then the nine-rank taxonomic ladder. (`subtype` is the
+viral serotype, e.g. influenza A `H5N1`, from the GenBank `/serotype`
+qualifier — blank when absent.)
 
 In non-segmented mode the isolate-only cells are blanked
 (`isolate_id`, `isolate_id_source`, `n_segments`, `segments`) or
@@ -479,7 +483,7 @@ One row per representative **isolate** (not per sequence — segmented
 representatives are whole isolates, not single segments). Columns:
 
 `isolate_id`, `isolate_id_source`, `organism`, `strain`, `host`,
-`collection_date`, `country`, `n_segments`, `segments` (comma-joined
+`subtype`, `collection_date`, `country`, `n_segments`, `segments` (comma-joined
 segment names in concat order), `accessions` (comma-joined per-segment
 GenBank accessions in concat order), `total_length_nt`, `is_refseq`,
 `is_reviewed`, `ncbi_taxon_id`, then the nine-rank taxonomic ladder.
@@ -1161,8 +1165,8 @@ phyloXML with rich, browseable annotation:
 - Every leaf gets a formatted `<name>`, a `<taxonomy>` block with NCBI
   taxon id, a `<sequence>` block with the GenBank accession + title, and
   one repseq-namespaced `<property>` per per-leaf attribute (host,
-  collection_date, country, strain, isolate_id, year, plus the full
-  9-rank taxonomy ladder: species, subgenus, genus, subfamily, family,
+  subtype, collection_date, country, strain, isolate_id, year, plus the
+  full 9-rank taxonomy ladder: species, subgenus, genus, subfamily, family,
   suborder, order, subclass, class — empties dropped).
 - Leaf labels are **coloured by taxonomy** (default on, by genus): each
   leaf carries a `<property ref="style:font_color" applies_to="node">`
@@ -2436,8 +2440,8 @@ The default cut strategy is `motif` if any peptide declared
 `{prefix}_polyprotein/{prefix}_<spec>_<peptide>.fasta` — one FASTA per
 peptide of each spec, with all clean (`ok` / `overlap`) slices across
 representatives. Headers carry the standard protein-FASTA bracket-tag
-set (organism, taxonomy ladder, isolate, segment, host, country, date,
-length, parent) plus polyprotein-specific tags:
+set (organism, taxonomy ladder, isolate, segment, host, subtype, country,
+date, length, parent) plus polyprotein-specific tags:
 `[polyprotein=<spec>]`, `[peptide=<peptide>]`,
 `[peptide_range_aa=<from>-<to>]`, `[cut_method=<actual>]`,
 `[matched_arch=<token>]`.

@@ -1437,6 +1437,7 @@ def _populate_genbank_isolate_segment(sequences, cfg, ncbi):
             isolate, isolate_source = None, None
         segment = meta.get("segment")
         strain = meta.get("strain")
+        serotype = meta.get("serotype")
         for seq in by_acc.get(acc, []):
             if isolate and not seq.isolate_id:
                 seq.isolate_id = isolate
@@ -1445,6 +1446,8 @@ def _populate_genbank_isolate_segment(sequences, cfg, ncbi):
                 seq.segment = segment
             if strain and not seq.strain:
                 seq.strain = strain
+            if serotype and not seq.subtype:
+                seq.subtype = serotype
             if isolate or segment:
                 populated += 1
     click.echo(
@@ -2737,6 +2740,7 @@ def _print_input_stats(sequences, *, top_n: int = 10) -> None:
         ("accession", lambda s: s.accession),
         ("strain", lambda s: s.strain),
         ("host", lambda s: s.host),
+        ("subtype", lambda s: s.subtype),
         ("collection_date", lambda s: s.collection_date),
         ("country", lambda s: s.country),
         ("segment", lambda s: s.segment),

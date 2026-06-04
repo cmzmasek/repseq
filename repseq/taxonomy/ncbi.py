@@ -207,6 +207,11 @@ class NCBITaxonomy:
                 strain = quals.get("strain") or quals.get("isolate")
                 if strain:
                     result["strain"] = strain
+                # Viral subtype / serotype (e.g. influenza A "H5N1") from the
+                # /serotype source qualifier, exposed in the same subtype/
+                # subname docsum arrays.
+                if quals.get("serotype"):
+                    result["subtype"] = quals["serotype"]
 
             # Fetch lineage if we have a taxid
             if result["taxid"]:
@@ -250,9 +255,10 @@ class NCBITaxonomy:
         batch_size: int = _GENBANK_BATCH_SIZE,
         progress: Optional[Any] = None,
     ) -> dict[str, dict[str, Optional[str]]]:
-        """Fetch source-feature qualifiers (isolate, strain, segment).
+        """Fetch source-feature qualifiers (isolate, strain, segment, serotype).
 
-        Returns ``accession → {"isolate": ..., "strain": ..., "segment": ...}``.
+        Returns ``accession → {"isolate": ..., "strain": ..., "segment": ...,
+        "serotype": ...}`` (serotype = viral subtype, e.g. influenza "H5N1").
         Values are ``None`` when the qualifier is absent on the GenBank source
         feature. Accessions with no record map to all-None.
 
@@ -265,9 +271,14 @@ class NCBITaxonomy:
         """
         records = self._fetch_genbank_batch(accessions, batch_size, progress=progress)
         empty: dict[str, Optional[str]] = {
-            "isolate": None, "strain": None, "segment": None,
+            "isolate": None, "strain": None, "segment": None, "serotype": None,
         }
-        return {acc: dict(rec.get("source") or empty) for acc, rec in records.items()}
+        # Merge over ``empty`` so every key is present even for cache entries
+        # written by an older repseq that predates a field (e.g. serotype).
+        return {
+            acc: {**empty, **(rec.get("source") or {})}
+            for acc, rec in records.items()
+        }
 
     # ------------------------------------------------------------------
     # Nucleotide-body fetching — used exclusively by `repseq replay` to
@@ -471,6 +482,7 @@ class NCBITaxonomy:
             proteins: list[dict] = []
             source: dict[str, Optional[str]] = {
                 "isolate": None, "strain": None, "segment": None,
+                "serotype": None,
             }
             for feat in record.features:
                 if feat.type == "source":
@@ -478,6 +490,7 @@ class NCBITaxonomy:
                     source["isolate"] = q.get("isolate", [None])[0]
                     source["strain"] = q.get("strain", [None])[0]
                     source["segment"] = q.get("segment", [None])[0]
+                    source["serotype"] = q.get("serotype", [None])[0]
                 elif feat.type == "CDS":
                     q = feat.qualifiers
                     translation = q.get("translation", [None])[0]

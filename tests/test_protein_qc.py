@@ -68,6 +68,7 @@ FEATURES             Location/Qualifiers
                      /isolate="SNV-NM-H10"
                      /strain="Convict Creek 107"
                      /segment="L"
+                     /serotype="H5N1"
      CDS             1..759
                      /protein_id="QQQ12345.1"
                      /product="RNA-dependent RNA polymerase"
@@ -193,6 +194,7 @@ def test_fetch_source_metadata_batch_extracts_qualifiers(tmp_cache_dir):
     assert meta["isolate"] == "SNV-NM-H10"
     assert meta["strain"] == "Convict Creek 107"
     assert meta["segment"] == "L"
+    assert meta["serotype"] == "H5N1"   # viral subtype from /serotype
 
 
 def test_fetch_source_metadata_batch_handles_missing_qualifiers(tmp_cache_dir):
@@ -207,7 +209,9 @@ def test_fetch_source_metadata_batch_handles_missing_qualifiers(tmp_cache_dir):
     with patch("repseq.taxonomy.ncbi.requests.get", return_value=fake_resp):
         out = ncbi.fetch_source_metadata_batch(["XX000001.1"])
 
-    assert out["XX000001.1"] == {"isolate": None, "strain": None, "segment": None}
+    assert out["XX000001.1"] == {
+        "isolate": None, "strain": None, "segment": None, "serotype": None,
+    }
 
 
 def test_fetch_source_metadata_batch_shares_cache_with_proteins(tmp_cache_dir):
@@ -246,7 +250,9 @@ def test_fetch_source_metadata_batch_legacy_cache_returns_none(tmp_cache_dir):
     ):
         out = ncbi.fetch_source_metadata_batch(["ZZ000001.1"])
 
-    assert out["ZZ000001.1"] == {"isolate": None, "strain": None, "segment": None}
+    assert out["ZZ000001.1"] == {
+        "isolate": None, "strain": None, "segment": None, "serotype": None,
+    }
 
 
 # ---------------------------------------------------------------------------

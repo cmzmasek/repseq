@@ -76,6 +76,8 @@ def _resolve_field(seq: Sequence, field: str) -> Optional[str]:
         return seq.accession or seq.id
     if f == "host":
         return seq.host
+    if f == "subtype":
+        return seq.subtype
     if f == "strain":
         return seq.strain
     if f == "isolate_id":
@@ -111,8 +113,9 @@ def format_leaf_label(
 
     Placeholders are ``{name}`` tokens. Supported names: ``species``,
     ``genus``, ``subgenus``, ``family``, ``subfamily``, ``order``,
-    ``class``, ``phylum``, ``id``, ``accession``, ``host``, ``strain``,
-    ``isolate_id``, ``country``, ``date``, ``year``, ``organism``.
+    ``class``, ``phylum``, ``id``, ``accession``, ``host``, ``subtype``,
+    ``strain``, ``isolate_id``, ``country``, ``date``, ``year``,
+    ``organism``.
 
     Empty resolutions trip two behaviours:
 

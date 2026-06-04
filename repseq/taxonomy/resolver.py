@@ -103,6 +103,8 @@ class MetadataResolver:
                 seq.country = db_meta["country"]
             if db_meta.get("strain"):
                 seq.strain = db_meta["strain"]
+            if db_meta.get("subtype"):
+                seq.subtype = db_meta["subtype"]
             if db_meta.get("is_reviewed") is not None:
                 seq.is_reviewed = db_meta["is_reviewed"]
 

@@ -174,8 +174,8 @@ def test_write_representative_isolates_tsv_emits_isolate_columns(tmp_path):
     # Per-isolate columns must appear in the documented order.
     expected_prefix = [
         "isolate_id", "isolate_id_source", "organism", "strain", "host",
-        "collection_date", "country", "n_segments", "segments", "accessions",
-        "total_length_nt",
+        "subtype", "collection_date", "country", "n_segments", "segments",
+        "accessions", "total_length_nt",
     ]
     assert header[: len(expected_prefix)] == expected_prefix
 

@@ -199,7 +199,7 @@ def write_representative_sequences_tsv(
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = [
         "isolate_id", "isolate_id_source", "organism", "strain", "host",
-        "collection_date", "country", "n_segments", "segments", "accessions",
+        "subtype", "collection_date", "country", "n_segments", "segments", "accessions",
         "total_length_nt", "is_refseq", "is_reviewed", "ncbi_taxon_id",
         *_TAX_RANKS,
     ]
@@ -217,6 +217,7 @@ def write_representative_sequences_tsv(
                 _tsv_safe(seq.organism),
                 _tsv_safe(seq.strain),
                 _tsv_safe(seq.host),
+                _tsv_safe(seq.subtype),
                 _tsv_safe(seq.collection_date),
                 _tsv_safe(seq.country),
                 "",  # n_segments
@@ -252,7 +253,7 @@ def write_representative_isolates_tsv(
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = [
         "isolate_id", "isolate_id_source", "organism", "strain", "host",
-        "collection_date", "country", "n_segments", "segments", "accessions",
+        "subtype", "collection_date", "country", "n_segments", "segments", "accessions",
         "total_length_nt", "is_refseq", "is_reviewed", "ncbi_taxon_id",
         *_TAX_RANKS,
     ]
@@ -274,6 +275,7 @@ def write_representative_isolates_tsv(
                 _tsv_safe(seq.organism),
                 _tsv_safe(seq.strain),
                 _tsv_safe(seq.host),
+                _tsv_safe(seq.subtype),
                 _tsv_safe(seq.collection_date),
                 _tsv_safe(seq.country),
                 _tsv_safe(len(segs) if segs else ""),
@@ -318,7 +320,7 @@ def _write_protein_fasta_record(
 
         >{protein_id} {product} [organism=...] [ncbi_taxon_id=...]
         [species=...] [genus=...] [family=...] [order=...] [class=...]
-        [isolate=...] [segment=...] [host=...] [country=...]
+        [isolate=...] [segment=...] [host=...] [subtype=...] [country=...]
         [collection_date=...] [length=...] [parent={parent_accession}]
 
     Tags are NCBI-style ``[key=value]`` and only emitted when the value is
@@ -351,6 +353,7 @@ def _write_protein_fasta_record(
         ("isolate", isolate_id),
         ("segment", parent_seq.segment),
         ("host", parent_seq.host),
+        ("subtype", parent_seq.subtype),
         ("country", parent_seq.country),
         ("collection_date", parent_seq.collection_date),
         ("length", prot.get("length")),
@@ -623,8 +626,8 @@ def _write_sliced_peptide_record(
     """Emit one FASTA record for a mature peptide.
 
     Headers reuse the existing protein-FASTA bracket-tag set
-    (organism + 9-rank taxonomy + isolate + segment + host + country +
-    collection_date + length + parent) and append polyprotein-specific
+    (organism + 9-rank taxonomy + isolate + segment + host + subtype +
+    country + collection_date + length + parent) and append polyprotein-specific
     tags so a downstream consumer can grep them: ``[polyprotein=...]``,
     ``[peptide=...]``, ``[peptide_range_aa=from-to]``, ``[cut_method=...]``.
     The ``>{header_id}`` is built as ``<parent_protein_id>:<peptide_name>``
@@ -649,6 +652,7 @@ def _write_sliced_peptide_record(
         ("isolate", isolate_id),
         ("segment", parent_seq.segment),
         ("host", parent_seq.host),
+        ("subtype", parent_seq.subtype),
         ("country", parent_seq.country),
         ("collection_date", parent_seq.collection_date),
         ("length", sliced.length_aa),
