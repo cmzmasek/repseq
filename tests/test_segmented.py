@@ -676,6 +676,88 @@ def test_build_concat_protein_no_aliases_match_falls_back_to_longest(make_seq):
     assert out[0].protein_sequence == "N" * 400 + "M" * 2200
 
 
+def _hmm_hit(target, passing):
+    return {
+        "target": target, "passing": passing, "dom_evalue": 1e-3,
+        "dom_score": 50.0, "hmm_len": 300, "ali_span": 280,
+        "ali_from": 1, "ali_to": 280,
+    }
+
+
+def _hmm_gated_isolate(make_seq):
+    """An isolate whose L segment fails the HMM gate (hit present but not
+    passing), so build_concatenated_sequences would normally re-drop it."""
+    s_seg = make_seq("a_S", "AAA", segment="S")
+    l_seg = make_seq("a_L", "TTT", segment="L")
+    s_seg.accession = "ACC_S"
+    l_seg.accession = "ACC_L"
+    s_seg.isolate_id = l_seg.isolate_id = "iso1"
+    s_seg.proteins = [
+        {"protein_id": "P_N", "product": "nucleoprotein", "length": 400,
+         "sequence": "N" * 400, "hmm_hits": [_hmm_hit("Bunya_N", True)]},
+    ]
+    l_seg.proteins = [
+        {"protein_id": "P_L", "product": "polymerase", "length": 2200,
+         "sequence": "M" * 2200, "hmm_hits": [_hmm_hit("RdRP_4", False)]},
+    ]
+    sm = {"S": {"hmms": ["Bunya_N"]}, "L": {"hmms": ["RdRP_4"]}}
+    return {"iso1": [s_seg, l_seg]}, sm
+
+
+def test_build_concat_hmm_gate_drops_unprotected_isolate(make_seq):
+    """Baseline: with no override policy, an isolate failing the HMM gate
+    at marker selection is dropped under removed_hmm_failed."""
+    iso, sm = _hmm_gated_isolate(make_seq)
+    report = QCReport()
+    out = build_concatenated_sequences(
+        iso, segment_names=["S", "L"], require_protein=True, report=report,
+        segment_markers=sm, hmm_active=True,
+    )
+    assert out == []
+    assert report.removed_hmm_failed == 1
+
+
+def test_build_concat_hmm_protection_keeps_isolate_with_longest_cds(make_seq):
+    """The force-keep whitelist must survive the marker-selection backstop:
+    a protected isolate failing the HMM gate is rescued by retrying without
+    the gate (longest CDS), kept, and recorded on report.protected."""
+    from repseq.overrides import ProtectionPolicy, resolve_ids, resolve_stages
+
+    iso, sm = _hmm_gated_isolate(make_seq)
+    report = QCReport()
+    policy = ProtectionPolicy(
+        resolve_ids({"ids": ["iso1"]}), resolve_stages("all"), enabled=True,
+    )
+    out = build_concatenated_sequences(
+        iso, segment_names=["S", "L"], require_protein=True, report=report,
+        segment_markers=sm, hmm_active=True, policy=policy,
+    )
+    assert len(out) == 1
+    # L marker is the longest CDS (M*2200), gate bypassed for the protected isolate.
+    assert out[0].protein_sequence == "N" * 400 + "M" * 2200
+    assert report.removed_hmm_failed == 0
+    assert any(p["stage"] == "hmm" for p in report.protected)
+
+
+def test_build_concat_hmm_protection_only_for_hmm_stage(make_seq):
+    """A policy that protects a DIFFERENT stage must not rescue the HMM
+    backstop — the isolate still drops."""
+    from repseq.overrides import ProtectionPolicy, resolve_ids, resolve_stages
+
+    iso, sm = _hmm_gated_isolate(make_seq)
+    report = QCReport()
+    policy = ProtectionPolicy(
+        resolve_ids({"ids": ["iso1"]}), resolve_stages(["ambiguous"]),
+        enabled=True,
+    )
+    out = build_concatenated_sequences(
+        iso, segment_names=["S", "L"], require_protein=True, report=report,
+        segment_markers=sm, hmm_active=True, policy=policy,
+    )
+    assert out == []
+    assert report.removed_hmm_failed == 1
+
+
 # ---------------------------------------------------------------------------
 # isolate_id_source provenance + strain-collision detector
 # ---------------------------------------------------------------------------

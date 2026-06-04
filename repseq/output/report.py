@@ -123,6 +123,28 @@ def write_qc_tsv(qc_report: QCReport, path: Path) -> None:
             fh.write(f"{_tsv_safe(entry['id'])}\t{_tsv_safe(entry['reason'])}\n")
 
 
+def write_overrides_tsv(qc_report: QCReport, path: Path) -> bool:
+    """Write the force-keep audit TSV (overrides.protect_qc).
+
+    One row per (sequence, stage) the override list rescued from removal:
+    ``id``, the ``stage`` it was protected against, and the
+    ``would_be_reason`` it would otherwise have been dropped for. Returns
+    ``False`` (writing nothing) when no sequence was protected, so a run
+    without overrides leaves no empty file behind.
+    """
+    if not qc_report.protected:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("id\tstage\twould_be_reason\n")
+        for entry in qc_report.protected:
+            fh.write(
+                f"{_tsv_safe(entry['id'])}\t{_tsv_safe(entry['stage'])}\t"
+                f"{_tsv_safe(entry['reason'])}\n"
+            )
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Representative metadata TSV
 # ---------------------------------------------------------------------------
@@ -2600,6 +2622,11 @@ def write_all_reports(
 
     write_run_log(result, qc_report, cfg, input_paths, output_files, out_dir / f"{prefix}_run.log")
     write_qc_tsv(qc_report, out_dir / f"{prefix}_qc_removed.tsv")
+    # Force-keep audit (overrides.protect_qc): only written when something
+    # was actually protected, so a normal run leaves no empty file.
+    overrides_path = out_dir / f"{prefix}_overrides.tsv"
+    if write_overrides_tsv(qc_report, overrides_path):
+        output_files.append(overrides_path)
     # Mode-aware: segmented runs produce one row per representative
     # isolate (CONCAT|<isolate_id> Sequence with concat_segments
     # populated); non-segmented runs produce one row per representative

@@ -53,6 +53,8 @@ def filter_taxonomy_consistent_isolates(
     sequences: list[Sequence],
     *,
     rank: str = "species",
+    policy=None,
+    protected_out: Optional[list[tuple[str, str, str]]] = None,
 ) -> tuple[list[Sequence], list[tuple[str, str]]]:
     """Drop isolates whose segments disagree on the given taxonomy rank.
 
@@ -94,6 +96,16 @@ def filter_taxonomy_consistent_isolates(
             continue
         labels = {lbl for lbl in (_rank_value(s, rank) for s in segs) if lbl}
         if len(labels) <= 1:
+            continue
+        # Force-keep whitelist: naming any one segment protects the whole
+        # isolate from being dropped. Record each segment as protected (one
+        # row per segment, mirroring the per-segment removal granularity).
+        if policy is not None and policy.protects_any(segs, "taxonomy_consistency"):
+            if protected_out is not None:
+                for seq in segs:
+                    protected_out.append(
+                        (seq.id, "taxonomy_consistency", reason)
+                    )
             continue
         # Mismatch — drop every segment of this isolate. We record the
         # accession (matches the column header on _qc_removed.tsv) and

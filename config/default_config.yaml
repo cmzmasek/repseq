@@ -751,3 +751,32 @@ output:
   # for publication runs where the full per-rank table is expected.
   protein_report:
     max_breakdown: 20
+
+# ---------------------------------------------------------------------------
+# Overrides — sequences of special importance
+# ---------------------------------------------------------------------------
+# `protect_qc` force-keeps the named sequences through the QC removal stages
+# they would otherwise fail (a whitelist), so a curated reference strain is
+# never silently dropped. Matching is by accession (non-segmented) or
+# isolate_id (segmented), case- and version-insensitive (NC_045512 matches
+# NC_045512.2 and vice versa). In segmented mode you typically list
+# isolate_ids; note the early QC stages (ambiguous, annotation) run before
+# isolate_id is populated, so those match on accession only. Every rescued
+# record — and the reason it would have been removed — is written to
+# `{prefix}_overrides.tsv` and described in `{prefix}_summary.md`, so
+# protection is never silent. Default off (empty list = no-op).
+overrides:
+  # ids: inline list of accessions / isolate-ids of special importance.
+  ids: []
+  # ids_file: path to a file with one accession/isolate-id per line
+  # ('#' comments and blank lines ignored); unioned with `ids`.
+  ids_file: null
+  # protect_qc: turn the force-keep whitelist on.
+  protect_qc: false
+  # protect_stages: which QC removal stages to protect against. Either the
+  # string "all", or a list naming any of:
+  #   duplicates, length, ambiguous, annotation, protein_count,
+  #   taxonomy_consistency, protein_quality, hmm
+  # (Segmented completeness is NOT protectable — protection cannot
+  # synthesize a missing segment, so an incomplete isolate still drops.)
+  protect_stages: all

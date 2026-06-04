@@ -601,6 +601,21 @@ DEFAULTS: dict[str, Any] = {
             "max_breakdown": 20,
         },
     },
+    # Sequences of special importance. `protect_qc` force-keeps the named
+    # sequences through the QC removal stages they would otherwise fail (a
+    # whitelist), so a curated reference strain is never silently dropped.
+    # Matching is by accession (non-segmented) / isolate_id (segmented),
+    # case- and version-insensitive. `protect_stages` is "all" or a subset
+    # of the QC stage tokens (duplicates, length, ambiguous, annotation,
+    # protein_count, taxonomy_consistency, protein_quality, hmm). Kept
+    # sequences are recorded in {prefix}_overrides.tsv and the run summary —
+    # protection is never silent. Default off (empty id list = no-op).
+    "overrides": {
+        "ids": [],
+        "ids_file": None,
+        "protect_qc": False,
+        "protect_stages": "all",
+    },
 }
 
 
@@ -1846,6 +1861,38 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         errors.append(
             "output.protein_report.max_breakdown must be a positive integer"
         )
+
+    # Overrides (force-keep whitelist).
+    ov = cfg.get("overrides", {}) or {}
+    ids = ov.get("ids", [])
+    if ids is not None and not isinstance(ids, list):
+        errors.append("overrides.ids must be a list of accession/isolate-id strings")
+    ids_file = ov.get("ids_file")
+    if ids_file is not None and not isinstance(ids_file, str):
+        errors.append("overrides.ids_file must be a path string (or null)")
+    if "protect_qc" in ov and not isinstance(ov.get("protect_qc"), bool):
+        errors.append("overrides.protect_qc must be a boolean")
+    stages = ov.get("protect_stages", "all")
+    if stages != "all":
+        from .overrides import QC_PROTECT_STAGES
+
+        if isinstance(stages, str):
+            stages_list = [stages]
+        elif isinstance(stages, list):
+            stages_list = stages
+        else:
+            stages_list = None
+            errors.append(
+                "overrides.protect_stages must be \"all\" or a list of stage tokens"
+            )
+        if stages_list is not None:
+            bad = [s for s in stages_list if s not in QC_PROTECT_STAGES]
+            if bad:
+                errors.append(
+                    f"overrides.protect_stages has unknown stage(s): "
+                    f"{', '.join(map(str, bad))}. Valid tokens: "
+                    f"{', '.join(QC_PROTECT_STAGES)} (or \"all\")."
+                )
 
     return errors
 

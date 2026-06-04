@@ -205,6 +205,27 @@ def test_render_summary_qc_numbers_pulled_from_report(make_seq, tmp_path):
     assert "*1,200* passed basic QC" in md
 
 
+def test_render_summary_reports_force_kept_overrides(make_seq, tmp_path):
+    """When sequences were force-kept via overrides.protect_qc, the QC
+    section must say so, name the stage(s), and point at _overrides.tsv."""
+    qc = _qc(total_input=100, passed=98, dedup=0, length=0, ambig=0)
+    qc.add_protected("NC_1.1", "ambiguous", "ambiguous_fraction:0.200>0.05")
+    qc.add_protected("NC_1.1", "hmm", "hmm_failed:S:Foo")
+    qc.add_protected("NC_2.1", "ambiguous", "ambiguous_fraction:0.300>0.05")
+    md = render_summary(_base_cfg(tmp_path), qc, _result(make_seq), ["a.fasta"])
+    assert "**2** sequence(s) of special importance" in md  # distinct ids
+    assert "kept despite failing QC" in md
+    assert "`overrides.protect_qc`" in md
+    assert "`ambiguous`" in md and "`hmm`" in md
+    assert "{prefix}_overrides.tsv" in md
+
+
+def test_render_summary_no_overrides_no_force_keep_sentence(make_seq, tmp_path):
+    qc = _qc()
+    md = render_summary(_base_cfg(tmp_path), qc, _result(make_seq), ["a.fasta"])
+    assert "kept despite failing QC" not in md
+
+
 def test_render_summary_segmented_length_filter_uses_per_segment_wording(make_seq, tmp_path):
     """When the segmented per-segment length filter fired, the QC section
     must describe the per-segment drops in isolate units — NOT the

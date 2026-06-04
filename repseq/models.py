@@ -266,8 +266,21 @@ class QCReport:
     final_survivors_unit: str = "sequences"
     details: list[dict] = field(default_factory=list)
 
+    # Sequences of special importance that bypassed a QC removal stage via
+    # the `overrides.protect_qc` whitelist. Each entry records the id, the
+    # stage it was protected against, and the reason it *would* have been
+    # removed (so `_overrides.tsv` and the run summary stay transparent —
+    # protection is never silent). Populated by overrides.protected_keep.
+    protected: list[dict] = field(default_factory=list)
+
     def add_removed(self, seq_id: str, reason: str) -> None:
         self.details.append({"id": seq_id, "reason": reason})
+
+    def add_protected(self, seq_id: str, stage: str, would_be_reason: str) -> None:
+        """Record a sequence kept despite failing ``stage`` (override list)."""
+        self.protected.append(
+            {"id": seq_id, "stage": stage, "reason": would_be_reason}
+        )
 
     def summary(self) -> str:
         length_lines: list[str]
@@ -324,6 +337,12 @@ class QCReport:
                 ]
                 hmm_line += f" ({', '.join(parts)})"
             lines.append(hmm_line)
+        if self.protected:
+            n_ids = len({p["id"] for p in self.protected})
+            lines.append(
+                f"  Protected (overrides): {n_ids} record(s) kept despite "
+                f"failing QC ({len(self.protected)} stage-hit(s))"
+            )
         # Add a Final survivors line when the CLI driver populated it.
         # Older callers / tests that build a QCReport directly (without
         # going through _handle_segmented) will see the field as None

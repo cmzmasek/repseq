@@ -7,13 +7,19 @@ import re
 from typing import Any
 
 from ..models import QCReport, Sequence, SequenceType
+from ..overrides import ProtectionPolicy, protected_keep
 
 
 # ---------------------------------------------------------------------------
 # Step 1 – Exact duplicate removal
 # ---------------------------------------------------------------------------
 
-def remove_duplicates(sequences: list[Sequence], report: QCReport) -> list[Sequence]:
+def remove_duplicates(
+    sequences: list[Sequence],
+    report: QCReport,
+    *,
+    policy: ProtectionPolicy | None = None,
+) -> list[Sequence]:
     """Remove exact-duplicate sequences, keeping the highest-quality copy.
 
     Among byte-identical sequences the survivor is chosen by
@@ -42,10 +48,14 @@ def remove_duplicates(sequences: list[Sequence], report: QCReport) -> list[Seque
         for seq in members:
             if seq is best:
                 continue
+            reason = f"exact_duplicate_of:{best.id}"
+            if protected_keep(seq, "duplicates", reason, policy, report):
+                kept.append(seq)
+                continue
             seq.qc_passed = False
-            seq.qc_fail_reason = f"exact_duplicate_of:{best.id}"
+            seq.qc_fail_reason = reason
             report.removed_duplicates += 1
-            report.add_removed(seq.id, seq.qc_fail_reason)
+            report.add_removed(seq.id, reason)
     return kept
 
 
@@ -54,7 +64,11 @@ def remove_duplicates(sequences: list[Sequence], report: QCReport) -> list[Seque
 # ---------------------------------------------------------------------------
 
 def genome_length_filter(
-    sequences: list[Sequence], cfg: dict[str, Any], report: QCReport
+    sequences: list[Sequence],
+    cfg: dict[str, Any],
+    report: QCReport,
+    *,
+    policy: ProtectionPolicy | None = None,
 ) -> list[Sequence]:
     """Drop whole sequences outside absolute nucleotide-length bounds.
 
@@ -82,6 +96,9 @@ def genome_length_filter(
             reason = f"length_too_long:{seq.length}>{max_len}"
 
         if reason:
+            if protected_keep(seq, "length", reason, policy, report):
+                kept.append(seq)
+                continue
             seq.qc_passed = False
             seq.qc_fail_reason = reason
             report.removed_length += 1
@@ -97,7 +114,11 @@ def genome_length_filter(
 # ---------------------------------------------------------------------------
 
 def ambiguous_filter(
-    sequences: list[Sequence], threshold: float, report: QCReport
+    sequences: list[Sequence],
+    threshold: float,
+    report: QCReport,
+    *,
+    policy: ProtectionPolicy | None = None,
 ) -> list[Sequence]:
     """Remove sequences with ambiguous character fraction above threshold."""
     kept: list[Sequence] = []
@@ -105,6 +126,9 @@ def ambiguous_filter(
         frac = seq.ambiguous_fraction
         if frac > threshold:
             reason = f"ambiguous_fraction:{frac:.3f}>{threshold}"
+            if protected_keep(seq, "ambiguous", reason, policy, report):
+                kept.append(seq)
+                continue
             seq.qc_passed = False
             seq.qc_fail_reason = reason
             report.removed_ambiguous += 1
@@ -144,7 +168,11 @@ def _build_keyword_pattern(keywords: list[str]) -> re.Pattern:
 
 
 def annotation_filter(
-    sequences: list[Sequence], cfg: dict[str, Any], report: QCReport
+    sequences: list[Sequence],
+    cfg: dict[str, Any],
+    report: QCReport,
+    *,
+    policy: ProtectionPolicy | None = None,
 ) -> list[Sequence]:
     """Remove sequences whose annotation/description matches any keyword.
 
@@ -167,6 +195,9 @@ def annotation_filter(
         m = pattern.search(seq.description or seq.header)
         if m:
             reason = f"annotation_keyword:{m.group(1)}"
+            if protected_keep(seq, "annotation", reason, policy, report):
+                kept.append(seq)
+                continue
             seq.qc_passed = False
             seq.qc_fail_reason = reason
             report.removed_annotation += 1
@@ -188,6 +219,10 @@ def run_qc(sequences: list[Sequence], cfg: dict[str, Any]) -> tuple[list[Sequenc
 
     qc_cfg = cfg.get("qc", {})
     segmented = bool(cfg.get("segmented", {}).get("enabled"))
+    # Force-keep whitelist: named sequences bypass the QC removal stages
+    # they would fail (overrides.protect_qc). Built once from cfg and
+    # threaded into each stage; inactive (a no-op) when not configured.
+    policy = ProtectionPolicy.from_cfg(cfg)
 
     if qc_cfg.get("remove_duplicates", True):
         # In segmented mode a single segment can be byte-identical between two
@@ -198,7 +233,7 @@ def run_qc(sequences: list[Sequence], cfg: dict[str, Any]) -> tuple[list[Sequenc
         if segmented:
             report.dedup_skipped = True
         else:
-            sequences = remove_duplicates(sequences, report)
+            sequences = remove_duplicates(sequences, report, policy=policy)
 
     # The whole-genome length filter is non-segmented-only and opt-in. In
     # segmented mode the input is a mixed pool of segments with very
@@ -211,13 +246,13 @@ def run_qc(sequences: list[Sequence], cfg: dict[str, Any]) -> tuple[list[Sequenc
     if segmented or not glf.get("enabled", False):
         report.length_filter_skipped = True
     else:
-        sequences = genome_length_filter(sequences, glf, report)
+        sequences = genome_length_filter(sequences, glf, report, policy=policy)
 
     thresh = qc_cfg.get("ambiguous_threshold", 0.05)
-    sequences = ambiguous_filter(sequences, thresh, report)
+    sequences = ambiguous_filter(sequences, thresh, report, policy=policy)
 
     sequences = annotation_filter(
-        sequences, qc_cfg.get("annotation_filter", {}), report
+        sequences, qc_cfg.get("annotation_filter", {}), report, policy=policy
     )
 
     report.passed = len(sequences)

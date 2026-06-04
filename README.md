@@ -163,7 +163,9 @@ Every mode also accepts: `--input/-i`, `--output-dir/-o`, `--config/-c`,
 `--source {auto,uniprot,ncbi,ncbi_virus}`, `--overflow {keep,trim}`, `--plot`,
 `--phylo`, `--per-protein-phylo`, `--per-segment-phylo` (segmented only),
 `--pre-cluster-tree`, `--fast`, `--verbose`,
-`--alphabet-for-clustering {protein,nucleotide}`.
+`--alphabet-for-clustering {protein,nucleotide}`,
+`--protect-ids FILE` (force-keep a list of special-importance sequences
+through QC — see [Sequences of special importance](#sequences-of-special-importance--overrides)).
 
 In addition to the selection modes, two diagnostic/utility subcommands:
 
@@ -265,6 +267,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | --- | --- | --- |
 | `{prefix}_run.log` | yes | Settings used and per-step counts. Keep with your results. |
 | `{prefix}_qc_removed.tsv` | yes | Every dropped sequence and the reason. |
+| `{prefix}_overrides.tsv` | when any sequence was force-kept | Force-keep audit: each sequence the `overrides.protect_qc` whitelist rescued from a QC stage, with the reason it would otherwise have been dropped. |
 | `{prefix}_group_counts.tsv` | yes | One row per stratum: in / out / clustered / cutoff. |
 | `{prefix}_clusters.tsv` | yes | Which sequences ended up grouped, who represents whom. |
 | `{prefix}_representatives.fasta` | non-segmented | Selected representative sequences. |
@@ -608,6 +611,19 @@ Every sequence dropped during cleaning, with the reason. Two columns:
 **Check this file first when more was dropped than you expected.** Sort
 by `reason` to see which filter did the damage; the same information
 shows up summarised in `_run.log`.
+
+#### `{prefix}_overrides.tsv` — when a sequence was force-kept (v0.45.0+)
+
+The flip side of `_qc_removed.tsv`: every sequence that the **force-keep
+override list** (`overrides.protect_qc`) rescued from a QC removal stage.
+Three columns — `id`, `stage` (which QC stage it bypassed), and
+`would_be_reason` (exactly the reason it would have appeared with in
+`_qc_removed.tsv` had it not been protected). Only written when at least
+one sequence was actually protected, so a normal run leaves no empty
+file behind.
+
+See **[Sequences of special importance](#sequences-of-special-importance--overrides)**
+below for how to configure the list.
 
 #### `{prefix}_hmm_diagnostic.tsv` — when the HMM tier ran (v0.26.0+)
 
@@ -1588,6 +1604,61 @@ A few things worth knowing:
   pairs that collide; set `segmented.strain_collision_action: drop` to
   remove the colliders instead of just warning. See
   [Strain-as-isolate fallback](#strain-as-isolate-fallback-and-collision-detection).
+
+---
+
+## Sequences of special importance — `overrides`
+
+Sometimes a handful of records *must* survive QC no matter what: a type
+strain, a vaccine reference, a genome your reviewers will look for by
+name. The `overrides` block lets you **force-keep** named sequences
+through the QC removal stages they would otherwise fail — a whitelist —
+without loosening the thresholds for everything else.
+
+```yaml
+overrides:
+  ids: ["NC_045512.2", "MN908947"]   # accessions (or isolate_ids, segmented)
+  ids_file: vip.txt                  # OR a file, one id per line; unioned with `ids`
+  protect_qc: true                   # turn the whitelist on
+  protect_stages: all                # or a subset (see below)
+```
+
+Or skip the config entirely and pass the list on the command line — handy
+for a one-off run:
+
+```bash
+repseq global -c my_config.yaml -i seqs.fasta -T 0.9 --protect-ids vip.txt
+```
+
+`--protect-ids FILE` reads one accession/isolate-id per line (`#` comments
+and blank lines ignored), **unions** them with any `overrides.ids` /
+`overrides.ids_file` in the config, and turns `protect_qc` **on** for that
+run. The config's `protect_stages` still applies (defaults to `all`).
+
+- **Matching** is by `accession` (non-segmented) or `isolate_id`
+  (segmented), **case- and version-insensitive** — `NC_045512` matches
+  `NC_045512.2` and vice versa. In segmented mode you usually list
+  `isolate_id`s; note the *early* QC stages (`ambiguous`, `annotation`)
+  run before `isolate_id` is populated, so those only match on accession.
+- **`protect_stages`** is either `all` or a list naming any of:
+  `duplicates`, `length`, `ambiguous`, `annotation`, `protein_count`,
+  `taxonomy_consistency`, `protein_quality`, `hmm`. This is per-stage on
+  purpose: you can keep a slightly noisy reference through the `hmm`
+  identity gate while *still* dropping it if its translation is genuine
+  garbage (`protein_quality`).
+- **Segmented completeness is deliberately *not* protectable.** Protection
+  can't synthesize a missing segment, so a protected isolate that is
+  missing a segment still drops (it can't be concatenated or treed) — with
+  a distinct message rather than a silent fake-keep.
+- **Nothing is silent.** Every rescued record — and the exact reason it
+  would have been removed — is written to `{prefix}_overrides.tsv` and
+  summarised in `{prefix}_summary.md`. This matters for reproducibility:
+  a reviewer can see precisely which records bypassed which filter.
+
+> **Force-keep ≠ force-select.** `protect_qc` only guarantees a sequence
+> *survives QC*. It does not guarantee the sequence ends up as a
+> representative — clustering may still collapse it into another cluster.
+> (A separate "force-select" capability is planned.)
 
 ---
 

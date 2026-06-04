@@ -614,6 +614,18 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
             f"reasons: {breakdown}."
         )
 
+    if qc_report.protected:
+        n_ids = len({p["id"] for p in qc_report.protected})
+        stages = sorted({p["stage"] for p in qc_report.protected})
+        extra_lines.append(
+            f"**{_fmt_int(n_ids)}** sequence(s) of special importance were "
+            f"**kept despite failing QC** via the force-keep override list "
+            f"(`overrides.protect_qc`) — they would otherwise have been dropped "
+            f"at the {', '.join(f'`{s}`' for s in stages)} stage(s). Every "
+            f"rescued record (and the reason it would have been removed) is "
+            f"listed in `{{prefix}}_overrides.tsv`."
+        )
+
     extra_block = ("\n\n" + " ".join(extra_lines)) if extra_lines else ""
     return f"## Quality control\n\n{basic}{extra_block}\n"
 

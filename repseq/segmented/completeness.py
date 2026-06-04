@@ -464,6 +464,7 @@ def build_concatenated_sequences(
     hmm_active: bool = False,
     ga_cutoffs: Optional[dict[str, Optional[float]]] = None,
     hmm_cfg: Optional[dict[str, Any]] = None,
+    policy=None,
 ) -> list[Sequence]:
     """Return one concatenated Sequence per complete isolate.
 
@@ -528,6 +529,34 @@ def build_concatenated_sequences(
                     hmm_cfg=hmm_cfg,
                 )
                 if marker is None:
+                    # Force-keep whitelist: this isolate was protected
+                    # against the `hmm` stage upstream, but the marker
+                    # selector re-applies the HMM gate here and would re-drop
+                    # it. Honour the protection by retrying WITHOUT the gate
+                    # (longest-CDS / alias marker) so the isolate still gets
+                    # a marker to concatenate. Only HMM-gate failures are
+                    # rescued — a genuine "no usable CDS" still drops (it
+                    # can't be concatenated, like an incomplete isolate).
+                    if (
+                        failure is not None
+                        and failure.reason == "hmm_failed"
+                        and policy is not None
+                        and policy.protects_any(segs, "hmm")
+                    ):
+                        marker, _ = select_marker_protein(
+                            seg.proteins, marker_specs, hmm_active=False,
+                        )
+                        if marker is not None:
+                            if report is not None:
+                                report.add_protected(
+                                    seg.accession or seg.id,
+                                    "hmm",
+                                    f"hmm_failed:{failure.marker_name or seg_name}",
+                                )
+                            parts.append(marker["sequence"])
+                            if marker.get("protein_id"):
+                                ids.append(marker["protein_id"])
+                            continue
                     failed_segment = seg_name
                     failure_info = failure
                     break

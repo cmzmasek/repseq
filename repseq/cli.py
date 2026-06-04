@@ -15,6 +15,7 @@ from .errors import InputError, RepseqError
 from .io.fasta import read_fasta
 from .models import SequenceSource
 from .models import RunResult
+from .overrides import ProtectionPolicy, protected_keep, resolve_ids, resolve_stages
 from .output.report import (
     write_all_reports,
     write_nucleotide_taxonomic_report,
@@ -211,12 +212,30 @@ def _shared_options(fn):
             "tree. Default: from config (off)."
         ),
     )(fn)
+    fn = click.option(
+        "--protect-ids", "protect_ids", default=None,
+        help=(
+            "Path to a file of accessions / isolate-ids of special "
+            "importance (one per line; '#' comments and blank lines "
+            "ignored). These sequences are FORCE-KEPT through the QC "
+            "removal stages they would otherwise fail; the file is unioned "
+            "with any overrides.ids / overrides.ids_file in the config and "
+            "turns overrides.protect_qc ON for the run. Matching is by "
+            "accession (non-segmented) / isolate_id (segmented), case- and "
+            "version-insensitive (NC_045512 matches NC_045512.2). Rescued "
+            "records — and the reason each would have been dropped — are "
+            "written to {prefix}_overrides.tsv. To protect only specific QC "
+            "stages (not all), set overrides.protect_stages in the config. "
+            "Note: force-keep guarantees a sequence survives QC, NOT that it "
+            "becomes a representative."
+        ),
+    )(fn)
     return fn
 
 
 def _load_and_validate(config_path, output_dir, prefix, threads, seed,
                        alphabet_for_clustering=None, concatenate_markers=None,
-                       fast=False, verbose=False) -> dict:
+                       fast=False, verbose=False, protect_ids=None) -> dict:
     cfg = load_config(config_path)
     if output_dir:
         cfg["output"]["dir"] = output_dir
@@ -234,6 +253,28 @@ def _load_and_validate(config_path, output_dir, prefix, threads, seed,
     # wrappers can read it via cfg.get("verbose", False) without having
     # to thread an extra arg through every call site.
     cfg["verbose"] = bool(verbose)
+    # --protect-ids: merge the CLI force-keep file into overrides.ids and
+    # turn protect_qc on for the run (the flag is an explicit request to
+    # protect, so it overrides a config that left protect_qc off). Merged
+    # before validation so the injected ids are validated too.
+    if protect_ids:
+        from pathlib import Path as _Path
+
+        if not _Path(protect_ids).expanduser().is_file():
+            click.echo(
+                f"[error] --protect-ids file not found: {protect_ids}. "
+                f"Provide a readable file with one accession/isolate-id per "
+                f"line.",
+                err=True,
+            )
+            sys.exit(1)
+        from .overrides import load_ids_file
+
+        ov = cfg.setdefault("overrides", {})
+        ov["ids"] = list(ov.get("ids") or []) + load_ids_file(
+            str(_Path(protect_ids).expanduser())
+        )
+        ov["protect_qc"] = True
     errors = validate_config(cfg)
     if errors:
         for e in errors:
@@ -241,8 +282,56 @@ def _load_and_validate(config_path, output_dir, prefix, threads, seed,
         sys.exit(1)
     if fast:
         _apply_fast_overrides(cfg)
+    _resolve_overrides(cfg)
     _check_output_dir(cfg)
     return cfg
+
+
+def _resolve_overrides(cfg: dict) -> None:
+    """Resolve the overrides id list once and cache it on the cfg.
+
+    Reads ``overrides.ids_file`` from disk (friendly error if missing),
+    unions it with the inline ``overrides.ids``, normalises + version-
+    augments the set, and stashes ``cfg["_overrides_runtime"]`` so every QC
+    stage reads a pre-resolved policy (one file read per run, not per
+    stage). Warns when force-keep is requested but no ids are listed —
+    that protects nothing, and a silent no-op would be surprising.
+    """
+    ov = cfg.get("overrides") or {}
+    protect_qc = bool(ov.get("protect_qc", False))
+    path = ov.get("ids_file")
+    if path:
+        from pathlib import Path as _Path
+
+        if not _Path(path).expanduser().is_file():
+            click.echo(
+                f"[config error] overrides.ids_file not found: {path}. "
+                f"Provide a readable file (one accession/isolate-id per line) "
+                f"or remove the key.",
+                err=True,
+            )
+            sys.exit(1)
+        ov = {**ov, "ids_file": str(_Path(path).expanduser())}
+    ids = resolve_ids(ov)
+    stages = resolve_stages(ov.get("protect_stages", "all"))
+    cfg["_overrides_runtime"] = {
+        "ids": ids,
+        "stages": stages,
+        "protect_qc": protect_qc,
+    }
+    if protect_qc and not ids:
+        click.echo(
+            "[overrides] protect_qc is set but no overrides.ids / "
+            "overrides.ids_file were provided — nothing will be protected.",
+            err=True,
+        )
+    elif protect_qc and ids:
+        n_stages = "all" if stages == resolve_stages("all") else len(stages)
+        click.echo(
+            f"[overrides] force-keep active: {len(ids)} id-form(s) protected "
+            f"across {n_stages} QC stage(s).",
+            err=True,
+        )
 
 
 def _apply_fast_overrides(cfg: dict) -> None:
@@ -859,6 +948,19 @@ def _run_hmm_qc_segmented(sequences, cfg, qc_report):
                     (seg_name, failed_token)
                 )
 
+    # Force-keep whitelist: drop protected isolates from the failing set
+    # (naming any one segment protects the whole isolate). Record each
+    # protected isolate's segments with the would-be HMM-failure reason.
+    policy = ProtectionPolicy.from_cfg(cfg)
+    if policy.enabled:
+        for isolate_id in list(failures_by_isolate):
+            segs = by_isolate.get(isolate_id, [])
+            if policy.protects_any(segs, "hmm"):
+                primary = failures_by_isolate.pop(isolate_id)[0]
+                reason = f"hmm_failed:{primary[0]}:{primary[1]}"
+                for seq in segs:
+                    qc_report.add_protected(seq.id, "hmm", reason)
+
     if not failures_by_isolate:
         return sequences
 
@@ -934,6 +1036,7 @@ def _run_hmm_qc_non_segmented(sequences, cfg, qc_report):
     overlap_tol = int(
         cfg.get("hmm", {}).get("multidomain_overlap_tolerance", 30)
     )
+    policy = ProtectionPolicy.from_cfg(cfg)
     kept: list = []
     for seq in sequences:
         failed_spec: Optional[tuple[str, str]] = None
@@ -947,6 +1050,9 @@ def _run_hmm_qc_non_segmented(sequences, cfg, qc_report):
             continue
         spec_name, failed_token = failed_spec
         reason = f"hmm_failed:{spec_name}:{failed_token}"
+        if protected_keep(seq, "hmm", reason, policy, qc_report):
+            kept.append(seq)
+            continue
         seq.qc_passed = False
         seq.qc_fail_reason = reason
         qc_report.add_removed(seq.id, reason)
@@ -1046,17 +1152,18 @@ def _run_protein_quality_qc(sequences, cfg, qc_report, ncbi):
         click.echo("Fetching CDS proteins for protein-quality QC ...")
         attach_proteins(sequences, ncbi)
 
+    policy = ProtectionPolicy.from_cfg(cfg)
     segmented = bool(cfg.get("segmented", {}).get("enabled"))
     if segmented:
         return _run_protein_quality_qc_segmented(
-            sequences, qc_report, threshold
+            sequences, qc_report, threshold, policy
         )
     return _run_protein_quality_qc_non_segmented(
-        sequences, qc_report, threshold
+        sequences, qc_report, threshold, policy
     )
 
 
-def _run_protein_quality_qc_segmented(sequences, qc_report, threshold):
+def _run_protein_quality_qc_segmented(sequences, qc_report, threshold, policy=None):
     """Per-isolate protein-quality QC for segmented runs.
 
     Group by ``isolate_id``; if any segment carries an over-threshold
@@ -1082,6 +1189,21 @@ def _run_protein_quality_qc_segmented(sequences, qc_report, threshold):
                 failures_by_isolate.setdefault(isolate_id, []).append(
                     (seq.segment, worst)
                 )
+
+    # Force-keep whitelist: drop protected isolates from the failing set
+    # (naming any one segment protects the whole isolate). Record each
+    # protected isolate's segments before they would have been dropped.
+    if policy is not None:
+        for isolate_id in list(failures_by_isolate):
+            segs = by_isolate.get(isolate_id, [])
+            if policy.protects_any(segs, "protein_quality"):
+                primary = failures_by_isolate.pop(isolate_id)[0]
+                reason = (
+                    f"protein_quality:{primary[0]}:"
+                    f"bad_fraction={primary[1]:.3f}>{threshold}"
+                )
+                for seq in segs:
+                    qc_report.add_protected(seq.id, "protein_quality", reason)
 
     if not failures_by_isolate:
         return sequences
@@ -1119,7 +1241,7 @@ def _run_protein_quality_qc_segmented(sequences, qc_report, threshold):
     return kept
 
 
-def _run_protein_quality_qc_non_segmented(sequences, qc_report, threshold):
+def _run_protein_quality_qc_non_segmented(sequences, qc_report, threshold, policy=None):
     """Per-sequence protein-quality QC for non-segmented runs.
 
     A sequence is dropped when any of its CDS proteins exceeds the
@@ -1132,6 +1254,9 @@ def _run_protein_quality_qc_non_segmented(sequences, qc_report, threshold):
             kept.append(seq)
             continue
         reason = f"protein_quality:bad_fraction={worst:.3f}>{threshold}"
+        if protected_keep(seq, "protein_quality", reason, policy, qc_report):
+            kept.append(seq)
+            continue
         seq.qc_passed = False
         seq.qc_fail_reason = reason
         qc_report.add_removed(seq.id, reason)
@@ -1308,7 +1433,13 @@ def _filter_taxonomy_consistent(sequences, cfg, qc_report):
         return sequences
     rank = tc_cfg.get("rank", "species")
     before = len(sequences)
-    kept, removed = filter_taxonomy_consistent_isolates(sequences, rank=rank)
+    policy = ProtectionPolicy.from_cfg(cfg)
+    protected_out: list[tuple[str, str, str]] = []
+    kept, removed = filter_taxonomy_consistent_isolates(
+        sequences, rank=rank, policy=policy, protected_out=protected_out,
+    )
+    for seq_id, stage, would_be_reason in protected_out:
+        qc_report.add_protected(seq_id, stage, would_be_reason)
     if not removed:
         return kept
     for accession, reason in removed:
@@ -1462,6 +1593,7 @@ def _handle_segmented(sequences, cfg, qc_report):
         hmm_active=hmm_rt.get("active", False),
         ga_cutoffs=hmm_rt.get("ga_cutoffs"),
         hmm_cfg=hmm_rt.get("hmm_cfg"),
+        policy=ProtectionPolicy.from_cfg(cfg),
     )
     # Drop isolates that lost a marker on any segment from complete_isolates
     # too, so the per-segment FASTA writer and isolate_proteins.tsv don't
@@ -2044,14 +2176,14 @@ def run_doctor_cmd(config_path, no_network):
 @click.option("--n-select", "-n", default=None, type=int,
               help="Number of representative sequences to select.")
 def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree,threshold, n_select):
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids,threshold, n_select):
     """Global mode: cluster at a threshold or select N diverse sequences."""
     if threshold is None and n_select is None:
         raise click.UsageError("Provide --threshold or --n-select.")
 
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose)
+                             verbose=verbose, protect_ids=protect_ids)
     if segmented:
         cfg["segmented"]["enabled"] = True
 
@@ -2090,11 +2222,11 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-group", "-n", required=True, type=int,
               help="Target representatives per taxonomic group.")
 def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree,rank, n_per_group):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids,rank, n_per_group):
     """Taxonomic mode 1: N representatives per taxonomic rank group."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose)
+                             verbose=verbose, protect_ids=protect_ids)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2130,7 +2262,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--rank-levels", "-r", required=True,
               help='JSON list of {rank, n_per_group} dicts. E.g. \'[{"rank":"family","n_per_group":20},{"rank":"genus","n_per_group":5}]\'')
 def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree,rank_levels):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids,rank_levels):
     """Taxonomic mode 2: hierarchical multi-rank nested clustering."""
     import json as _json
     try:
@@ -2140,7 +2272,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
 
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose)
+                             verbose=verbose, protect_ids=protect_ids)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2176,11 +2308,11 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-host", "-n", required=True, type=int,
               help="Target representatives per host organism.")
 def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree,n_per_host):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids,n_per_host):
     """Host-stratified mode: N representatives per host organism."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose)
+                             verbose=verbose, protect_ids=protect_ids)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2218,11 +2350,11 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--window", default="year",
               help='Time window: "year", "decade", or a number (e.g. "5" for 5-year bins).')
 def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree,n_per_window, window):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids,n_per_window, window):
     """Time-stratified mode: N representatives per time window."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose)
+                             verbose=verbose, protect_ids=protect_ids)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2258,11 +2390,11 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-country", "-n", required=True, type=int,
               help="Target representatives per country.")
 def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree,n_per_country):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids,n_per_country):
     """Geographic mode: N representatives per country."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose)
+                             verbose=verbose, protect_ids=protect_ids)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2304,12 +2436,12 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--field-regex", default=None,
               help="Regex to extract the field value from FASTA headers.")
 def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree,field, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids,field, n_per_group,
                metadata_table, field_regex):
     """Custom metadata mode: group by any field or metadata table column."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose)
+                             verbose=verbose, protect_ids=protect_ids)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2354,13 +2486,13 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--metadata-table", default=None,
               help="Path to TSV/CSV metadata table with accession column.")
 def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree,fields, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids,fields, n_per_group,
                metadata_table):
     """Hybrid mode: multi-dimensional stratification (e.g. genus × host × year)."""
     field_list = [f.strip() for f in fields.split(",")]
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose)
+                             verbose=verbose, protect_ids=protect_ids)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:

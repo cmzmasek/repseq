@@ -12,6 +12,7 @@ import sys
 from typing import Any, Optional
 
 from ..models import QCReport, Sequence, SequenceSource
+from ..overrides import ProtectionPolicy, protected_keep
 from ..segmented.completeness import identify_segment
 from ..taxonomy.ncbi import NCBITaxonomy
 
@@ -81,6 +82,8 @@ def filter_by_protein_count(
     qc_cfg: dict[str, Any],
     virus_cfg: Optional[dict[str, Any]],
     report: QCReport,
+    *,
+    policy: Optional[ProtectionPolicy] = None,
 ) -> list[Sequence]:
     """Drop sequences with insufficient protein annotations.
 
@@ -142,6 +145,9 @@ def filter_by_protein_count(
                         )
 
         if fail_reason:
+            if protected_keep(seq, "protein_count", fail_reason, policy, report):
+                kept.append(seq)
+                continue
             seq.qc_passed = False
             seq.qc_fail_reason = fail_reason
             report.removed_proteins += 1
@@ -176,4 +182,7 @@ def run_protein_qc(
         return sequences
 
     attach_proteins(sequences, ncbi)
-    return filter_by_protein_count(sequences, qc_cfg, virus_cfg, report)
+    policy = ProtectionPolicy.from_cfg(cfg)
+    return filter_by_protein_count(
+        sequences, qc_cfg, virus_cfg, report, policy=policy
+    )
