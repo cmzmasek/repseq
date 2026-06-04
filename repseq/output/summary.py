@@ -254,6 +254,17 @@ def _combine_marker_parts(parts: list[str], mode: str) -> str:
     return ", ".join(parts)
 
 
+def _is_diversity_only(result: RunResult) -> bool:
+    """True when representatives came from the alignment-free MaxMin
+    diversity selection (``global -n`` / ``global:count``) rather than an
+    identity-clustering run — so NO clustering binary (MMseqs2 / cd-hit)
+    executed. Used so the summary never names or cites a clustering program
+    that did not actually run (the diversity path uses
+    ``clustering.diversity.select_diverse``, a k-mer Jaccard MaxMin sampler).
+    """
+    return getattr(result, "mode", "") == "global:count"
+
+
 def build_provenance_header(cfg: dict, result: RunResult, segmented: bool) -> str:
     """One-line, ``#``-commented provenance string for the top of a
     plain-text report, so an isolated ``*_taxonomic_report.txt`` is
@@ -281,9 +292,20 @@ def build_provenance_header(cfg: dict, result: RunResult, segmented: bool) -> st
         ds = "non-segmented"
         rep_unit = "representative sequences"
     n_reps = len(result.representatives)
+    # The diversity path (global -n) runs no clustering binary — describe the
+    # MaxMin sampler instead of naming MMseqs2/cd-hit.
+    if _is_diversity_only(result):
+        select_clause = (
+            f"selection: {_clustering_substrate_short(cfg)} via MaxMin "
+            f"diversity (alignment-free)"
+        )
+    else:
+        select_clause = (
+            f"clustering: {_clustering_substrate_short(cfg)} via {tool_name}"
+        )
     return (
         f"# repseq {REPSEQ_VERSION} | {result.mode} selection | {ds} | "
-        f"clustering: {_clustering_substrate_short(cfg)} via {tool_name} | "
+        f"{select_clause} | "
         f"{n_reps} {rep_unit}"
     )
 
@@ -342,7 +364,12 @@ def _render_at_a_glance(
             mode = "list" if segmented else ("concat" if concat else "priority")
             substrate_cell += f" — {_combine_marker_parts(parts, mode)}"
     rows.append(("Clustering substrate", substrate_cell))
-    rows.append(("Clustering tool", tool_name))
+    # global -n runs no clustering binary — say so rather than naming one.
+    tool_cell = (
+        "none — MaxMin diversity selection (alignment-free)"
+        if _is_diversity_only(result) else tool_name
+    )
+    rows.append(("Clustering tool", tool_cell))
 
     # Selection mode (one short phrase).
     rows.append(("Selection mode", f"`{result.mode}`"))
@@ -799,15 +826,30 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
                 "marker is dropped."
             )
 
+    if _is_diversity_only(result):
+        # global -n: alignment-free MaxMin sampling, no clustering binary,
+        # no within-cluster rep election, no diversity-curve diagnostic.
+        lead = (
+            f"Representatives were selected from {input_desc} by "
+            f"**alignment-free maximum-diversity sampling** (MaxMin on a "
+            f"k-mer Jaccard distance — the `global --n-select` path), so no "
+            f"sequence-identity clustering step (MMseqs2 / cd-hit) was run "
+            f"and each of the **{_fmt_int(n_reps)} {rep_unit}** is its own "
+            f"singleton.{hmm_sentence}{force_select_sentence} "
+        )
+    else:
+        lead = (
+            f"Clustering was performed on {input_desc} using **{tool_name}** "
+            f"({tool_cite}). {mode_desc}{hmm_sentence} Within each cluster the "
+            f"representative was chosen by the configured priority "
+            f"(**{priority}**, with sequence length as the final tiebreaker). "
+            f"The final set contains **{_fmt_int(n_reps)} {rep_unit}** "
+            f"across **{_fmt_int(n_clusters)} cluster(s)**.{diversity_sentence}"
+            f"{force_select_sentence} "
+        )
     return (
         f"## Representative selection\n\n"
-        f"Clustering was performed on {input_desc} using **{tool_name}** "
-        f"({tool_cite}). {mode_desc}{hmm_sentence} Within each cluster the "
-        f"representative was chosen by the configured priority "
-        f"(**{priority}**, with sequence length as the final tiebreaker). "
-        f"The final set contains **{_fmt_int(n_reps)} {rep_unit}** "
-        f"across **{_fmt_int(n_clusters)} cluster(s)**.{diversity_sentence}"
-        f"{force_select_sentence} "
+        f"{lead}"
         f"Taxonomic diversity at each rank before and after clustering "
         f"(distinct species, genera, families, etc., with per-taxon "
         f"{rep_unit.split()[-1]} counts — the top 20 by member count for "
@@ -1468,7 +1510,8 @@ def _render_polyprotein(cfg: dict, per_protein_ran: bool = False) -> str:
     )
 
 
-def _render_software(cfg: dict, versions: dict, phylo_ran: bool) -> str:
+def _render_software(cfg: dict, versions: dict, phylo_ran: bool,
+                     diversity_only: bool = False) -> str:
     backend = cfg.get("clustering", {}).get("backend", "mmseqs2")
     alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
     cdhit_binary = "cd-hit" if alphabet == "protein" else "cd-hit-est"
@@ -1483,7 +1526,13 @@ def _render_software(cfg: dict, versions: dict, phylo_ran: bool) -> str:
         _row("Python",  _python_version(),         "Runtime",                 _CITATIONS["python"]),
         _row("BioPython", _biopython_version(),    "FASTA / GenBank parsing", _CITATIONS["biopython"]),
     ]
-    if backend == "mmseqs2":
+    if diversity_only:
+        # global -n: neither clustering binary ran — MaxMin diversity sampling
+        # (clustering.diversity.select_diverse) selected the representatives.
+        role = "Sequence clustering (not used — MaxMin diversity selection)"
+        rows.append(_row("MMseqs2",     versions.get("mmseqs"),         role, _CITATIONS["mmseqs"]))
+        rows.append(_row(cdhit_binary,  versions.get(cdhit_binary),     role, _CITATIONS["cd-hit"]))
+    elif backend == "mmseqs2":
         rows.append(_row("MMseqs2", versions.get("mmseqs"), "Sequence clustering (used)",      _CITATIONS["mmseqs"]))
         rows.append(_row("cd-hit",  versions.get("cd-hit"), "Sequence clustering (not used)",  _CITATIONS["cd-hit"]))
     else:
@@ -1563,7 +1612,8 @@ def render_summary(
             pre_cluster_ran=pre_cluster_ran,
         ),
         _render_polyprotein(cfg, per_protein_ran=per_protein_ran),
-        _render_software(cfg, versions, any_phylo),
+        _render_software(cfg, versions, any_phylo,
+                         diversity_only=_is_diversity_only(result)),
         _render_footer(),
     ]
     # Drop empty sections (segmented + phylo are conditional).

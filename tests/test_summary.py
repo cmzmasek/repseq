@@ -205,6 +205,52 @@ def test_render_summary_qc_numbers_pulled_from_report(make_seq, tmp_path):
     assert "*1,200* passed basic QC" in md
 
 
+def test_render_summary_diversity_mode_does_not_name_a_clustering_binary(make_seq, tmp_path):
+    """global -n (global:count) runs alignment-free MaxMin selection — NO
+    clustering binary executes. The summary must not claim/cite that a
+    clustering program ran (regression for the cd-hit/MMseqs2 mislabel)."""
+    qc = _qc()
+    cfg = _base_cfg(tmp_path)
+    cfg["clustering"]["backend"] = "cdhit"
+    cfg["clustering"]["alphabet_for_clustering"] = "nucleotide"
+    result = _result(make_seq, mode="global:count")
+    md = render_summary(cfg, qc, result, ["a.fasta"])
+    # No false "Clustering was performed ... using **<binary>**" claim/citation.
+    assert "Clustering was performed" not in md
+    assert "using **cd-hit" not in md
+    assert "using **MMseqs2**" not in md
+    # Honest MaxMin description instead.
+    assert "maximum-diversity sampling" in md
+    assert "MaxMin" in md
+    # Glance row says no clustering tool.
+    assert "| Clustering tool | none — MaxMin diversity selection (alignment-free) |" in md
+    # Software table marks BOTH binaries not-used.
+    assert md.count("Sequence clustering (not used — MaxMin diversity selection)") == 2
+    assert "Sequence clustering (used)" not in md
+
+
+def test_render_summary_threshold_mode_still_names_the_clustering_tool(make_seq, tmp_path):
+    """Regression guard: an actual clustering run (global:threshold) must
+    still name and cite the clustering binary it used."""
+    qc = _qc()
+    cfg = _base_cfg(tmp_path)
+    cfg["clustering"]["backend"] = "mmseqs2"
+    result = _result(make_seq, mode="global:threshold")
+    md = render_summary(cfg, qc, result, ["a.fasta"])
+    assert "Clustering was performed" in md
+    assert "using **MMseqs2**" in md
+    assert "| Clustering tool | MMseqs2 |" in md
+    assert "MMseqs2 |" in md and "Sequence clustering (used)" in md
+
+
+def test_provenance_header_diversity_mode_describes_maxmin(make_seq, tmp_path):
+    from repseq.output.summary import build_provenance_header
+    result = _result(make_seq, mode="global:count")
+    hdr = build_provenance_header(_base_cfg(tmp_path), result, segmented=False)
+    assert "via MaxMin diversity (alignment-free)" in hdr
+    assert "via MMseqs2" not in hdr and "via cd-hit" not in hdr
+
+
 def test_render_summary_reports_force_selected(make_seq, tmp_path):
     """When sequences were force-selected, the selection section must say so,
     break down the actions, flag unavailable pins, and point at the TSV."""
