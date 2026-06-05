@@ -293,15 +293,16 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_polyprotein_taxonomic_report.txt` | any run with `polyprotein:` declared and HMM tier active | Per-rank peptide coverage + AA length statistics (one column per declared peptide of each spec) — sliced-peptide analogue of `_protein_taxonomic_report.txt`. v0.35.0. |
 | `{prefix}_taxonomic_report.tsv`, `_protein_taxonomic_report.tsv`, `_nucleotide_taxonomic_report.tsv`, `_polyprotein_taxonomic_report.tsv` | parallel to the matching `.txt` reports | **Machine-readable tidy long-format TSV** companions (8-column schema: `report, rank, pool, taxon, taxon_count, spec, metric, value`). Excel-pivot / R-pandas friendly. v0.35.0. |
 | `{prefix}_clustering.png` | only with `--plot` | Diagnostic scatter of the clustering. |
-| `{prefix}_msa.fasta`, `_tree.nwk`, `_tree.xml`, `_tree_id_map.tsv` | only with `--phylo` | Alignment + tree + name mapping. |
+| `{prefix}_msa.fasta`, `_tree.xml`, `_tree_id_map.tsv` | only with `--phylo` | Alignment + annotated tree (phyloXML) + short-id↔accession map. |
+| `{prefix}_tree.nwk` | `--phylo` **and** `phylo.newick: true` (or `--newick`) | Plain-text Newick. **Off by default** (`phylo.newick: false`) to cut clutter — the phyloXML is a topological superset. Same for every tree below (`*_tree.nwk`). |
 | `{prefix}_partition.nex`, `_msa_<family>.fasta` | `--phylo`, protein + IQ-TREE | NEXUS partition file + per-family alignments (partitioned-supermatrix tree). |
 | `{prefix}_msa_untrimmed.fasta` | `--phylo` + `phylo.trimal.enabled` | Raw MAFFT alignment retained when trimAl trimming ran (`_msa.fasta` is then the trimmed tree input). |
 | `{prefix}_taxonomy_review.tsv` | `--phylo` + `phylo.taxonomy_review.enabled` | Phylogeny-based taxonomy verdicts: blank ranks imputed from the enclosing clade (`impute_missing`) and populated-but-disagreeing ranks flagged (`conflict_flag`), with evidence + confidence. v0.39.0. |
 | `{prefix}_representative_*_corrected.tsv`, `_representative_*_proteins_corrected.fasta` | above + `write_corrected` | Copies of the rep TSV + protein FASTA with **high-confidence imputed blanks filled** (clean values; originals kept). v0.39.0. |
 | `{prefix}_iqtree_summary.txt` | only with `--phylo` + IQ-TREE | IQ-TREE ModelFinder report. |
 | `{prefix}_iqtree_model.txt` | only with `--phylo` + IQ-TREE | Grep-friendly sidecar with the ModelFinder pick(s): one `<label>: <model>` line per partition (or a single `GENOME: <model>` line for the non-partitioned path). v0.28.0. |
-| `{prefix}_per_protein/` | only with `--per-protein-phylo` | One tree (MSA + Newick + phyloXML + id map) per marker; plus `_incongruence.tsv` of pairwise Robinson-Foulds distances. |
-| `{prefix}_pre_cluster_tree.{nwk,xml}`, `_id_map.tsv` | only with `--pre-cluster-tree` (or `phylo.pre_cluster_tree.enabled`) | Rough overview tree of every post-QC sequence (one leaf per CONCAT isolate in segmented mode), with `[repr] ` prefix on representative leaves in the phyloXML `<name>`. v0.32.0. |
+| `{prefix}_per_protein/` | only with `--per-protein-phylo` | One tree (MSA + phyloXML + id map; Newick opt-in via `phylo.newick`) per marker; plus `_incongruence.tsv` of pairwise Robinson-Foulds distances. |
+| `{prefix}_pre_cluster_tree.xml`, `_id_map.tsv` | only with `--pre-cluster-tree` (or `phylo.pre_cluster_tree.enabled`) | Rough overview tree of every post-QC sequence (one leaf per CONCAT isolate in segmented mode), with `[repr] ` prefix on representative leaves in the phyloXML `<name>`. The `.nwk` is opt-in (`phylo.newick`). v0.32.0. |
 | `{prefix}_extra_protein/` | `--per-protein-phylo` + `extra_protein:` declared | Same shape, accessory-protein trees (kept out of the incongruence table by design). |
 | `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment, from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
 | `{prefix}_msa_conservation.tsv` | any phylo step that wrote an MSA (default on; `phylo.conservation.enabled`) | One conservation number per alignment written this run (genome, partition families + supermatrix, per-protein, extra-protein, polyprotein peptides, per-segment NT). Mean per-column **Jensen-Shannon divergence to a residue background** (Capra & Singh 2007), **Henikoff-weighted** + **gap-penalised**. Columns: `msa, role, label, alphabet, trimmed, n_seqs, n_sites, mean_conservation, mean_conservation_core`. v0.43.0. |
@@ -1047,6 +1048,24 @@ contains the full subprocess output regardless of `--verbose`.
 (v0.26.0 introduced the streaming; v0.27.0 made it opt-in because the
 firehose was too noisy for a successful run.)
 
+##### Plain-text Newick is opt-in: `phylo.newick` / `--newick` (v0.48.0+)
+
+Each tree is written as annotated **phyloXML** (`*_tree.xml`) and, when
+you ask for it, as plain-text **Newick** (`*_tree.nwk`). The Newick is
+**off by default** (`phylo.newick: false`) to keep output directories
+tidy — the phyloXML carries the same topology plus taxonomy, metadata,
+LCA labels and colours, so the `.nwk` is redundant for most workflows.
+
+Set `phylo.newick: true` (or pass `--newick`) to retain the `*_tree.nwk`
+for **every** tree of the run — whole-genome, per-protein, extra-protein,
+per-segment, pre-cluster, and partitioned. `--no-newick` forces it off
+even if the YAML turned it on. Turning it off costs nothing scientifically:
+the Newick is still produced internally (the phyloXML is parsed from it,
+and the per-protein incongruence RF table reads it) and only deleted at
+the very end of the run; the `_tree_id_map.tsv` (short-id↔accession) and
+`_msa.fasta` are kept regardless, so the retained alignment stays
+decodable.
+
 ##### Preliminary-run shortcut: `--fast` (v0.24.0+)
 
 When you are iterating on a config (tuning QC thresholds, HMM
@@ -1152,11 +1171,22 @@ phylo tool), and the descriptive label (built from `phylo.labeling.format`
 Jalview / MEGA show recognisable names without confusing the underlying
 tools.
 
-#### `{prefix}_tree.nwk`
+#### `{prefix}_tree.nwk` — **off by default**
 
 Tree-builder Newick output. Leaf names are the **short ids** (`S0001`,
 `S0002`, …) so the file works with any downstream tool that expects
 short, safe leaf labels. Use the id map below to recover real names.
+
+**Not retained by default** (`phylo.newick: false`) — the phyloXML below
+is a topological superset, so the plain-text Newick is redundant for most
+workflows and was removed to cut output clutter. Set `phylo.newick: true`
+(or pass `--newick`) to keep the `*_tree.nwk` for *every* tree of the run
+(whole-genome, per-protein, extra-protein, per-segment, pre-cluster,
+partition); `--no-newick` forces it off regardless of config. The Newick
+is still generated internally during the run — the phyloXML is parsed from
+it and the per-protein incongruence table reads it — so turning it off
+costs nothing but the files; the `_tree_id_map.tsv` and `_msa.fasta` are
+kept either way.
 
 #### `{prefix}_tree.xml` — **the tree you'll usually open**
 
@@ -1288,6 +1318,11 @@ segmented mode (`M_Spike`, `S_Bunya_nucleocap`):
   {prefix}_incongruence.tsv
 ```
 
+(The `*_tree.nwk` files shown above are written only when `phylo.newick`
+/ `--newick` is on — off by default; see **"Plain-text Newick is opt-in"**
+under [Phylogeny outputs](#phylogeny-outputs). The phyloXML, MSA, id-map,
+and incongruence table are always written.)
+
 **Extra-protein trees (v0.22.0+):** when you've also declared
 [`extra_protein:`](#accessory-proteins-extra_protein) accessory
 proteins, a **separate** `{prefix}_extra_protein/` directory is emitted
@@ -1370,8 +1405,9 @@ builds one **nucleotide** tree per declared segment — every
 representative isolate contributes its raw per-segment NT (from
 `concat_segments`) to one tree per segment. Outputs land in a
 `{prefix}_per_segment/` subdirectory with the same per-tree shape
-(`<segment>_msa.fasta`, `<segment>_tree.nwk`, `<segment>_tree.xml`,
-`<segment>_tree_id_map.tsv` per segment).
+(`<segment>_msa.fasta`, `<segment>_tree.xml`,
+`<segment>_tree_id_map.tsv` per segment; the `<segment>_tree.nwk` only
+when `phylo.newick` / `--newick` is on).
 
 Why a per-**segment** tree on top of the per-**marker** tree set:
 reassortment can show up at the segment level without appearing in any
@@ -1444,10 +1480,11 @@ it falls back to NT. This keeps the overview tree's distance space
 consistent with the selection it depicts. In segmented mode the
 leaves are CONCAT isolates (same unit as the post-cluster tree).
 
-Three output files:
+Output files:
 
 - `{prefix}_pre_cluster_tree.nwk` — Newick, short-id leaves
-  (`S0001`, `S0002`, …)
+  (`S0001`, `S0002`, …). **Opt-in** — written only when `phylo.newick`
+  / `--newick` is on (off by default, like every other `*_tree.nwk`)
 - `{prefix}_pre_cluster_tree.xml` — phyloXML with the full
   taxonomy `<property>` enrichment + per-leaf taxonomy colour
   (same palette as `--phylo` / `--per-protein-phylo`, so taxa stay

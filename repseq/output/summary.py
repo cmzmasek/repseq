@@ -962,6 +962,12 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
     n_reps = len(result.representatives)
     alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
     phylo_cfg = cfg.get("phylo", {}) or {}
+    # Newick retention (phylo.newick, default false) governs whether the
+    # plain-text *_tree.nwk survives the run; the phyloXML and id-map always
+    # do. Keep the output-naming prose honest about which files exist.
+    keep_newick = bool(phylo_cfg.get("newick", False))
+    newick_and = "the Newick and " if keep_newick else ""
+    newick_file_and = "the underlying Newick file and " if keep_newick else ""
     tool_pref = phylo_cfg.get("tool", "auto")
     # Match the runtime auto-pick: protein → IQ-TREE, NT → FastTree.
     if tool_pref == "auto":
@@ -1124,7 +1130,7 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"descendants. Outputs include the supermatrix alignment "
             f"(`{{prefix}}_msa.fasta`), the per-family alignments "
             f"(`{{prefix}}_msa_<family>.fasta`), a NEXUS partition file "
-            f"(`{{prefix}}_partition.nex`), the Newick, and the PhyloXML. When "
+            f"(`{{prefix}}_partition.nex`), {newick_and}the PhyloXML. When "
             f"fewer than two marker families are resolvable, the pipeline "
             f"falls back to a single concatenated-marker alignment under one "
             f"model.\n"
@@ -1138,7 +1144,7 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"{rooting_clause} and internal nodes "
             f"were annotated with the last common ancestor (LCA) of their "
             f"descendants. The final tree was emitted as PhyloXML alongside "
-            f"the underlying Newick file and FASTA alignment.\n"
+            f"{newick_file_and}FASTA alignment.\n"
         )
     if per_protein_ran:
         pp_cfg = phylo_cfg.get("per_protein", {}) or {}
@@ -1192,7 +1198,8 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"same rooting and "
             f"LCA annotation as above. Markers carried by fewer than "
             f"**{min_taxa}** representatives were skipped. Each tree was "
-            f"emitted as PhyloXML with its alignment, Newick, and id-map "
+            f"emitted as PhyloXML with its alignment"
+            f"{', Newick,' if keep_newick else ''} and id-map "
             f"into the `{{prefix}}_per_protein/` subdirectory (named after "
             f"the marker's `name:`, or its domain-architecture token when "
             f"unnamed)."
@@ -1263,8 +1270,9 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             "`<name>` of each representative leaf is prefixed with "
             "`[repr] ` so the elected representatives can be picked "
             "out at a glance against the broader diversity of the "
-            "input pool. Outputs: `{prefix}_pre_cluster_tree.nwk`, "
-            "`{prefix}_pre_cluster_tree.xml`, and "
+            "input pool. Outputs: "
+            + ("`{prefix}_pre_cluster_tree.nwk`, " if keep_newick else "")
+            + "`{prefix}_pre_cluster_tree.xml`, and "
             "`{prefix}_pre_cluster_tree_id_map.tsv` (with an "
             "`is_rep` column for grep-without-XML use).\n"
         )
@@ -1327,6 +1335,30 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             "(substitution-matrix-weighted) alternative repseq does "
             f"*not* use, see {_CITATIONS['valdar']}.\n"
         )
+    if msa_ran:
+        if keep_newick:
+            paragraphs.append(
+                "**Tree file formats.** Each tree was written both as "
+                "annotated **phyloXML** (`*_tree.xml`; taxonomy, metadata "
+                "properties, leaf colours, internal-node LCA labels) and as "
+                "plain-text **Newick** (`*_tree.nwk`; topology + support "
+                "only), with `phylo.newick: true` keeping the latter "
+                "(`--no-newick` drops it). The `*_tree_id_map.tsv` decodes "
+                "the short leaf ids used in the Newick and the retained "
+                "`*_msa.fasta`.\n"
+            )
+        else:
+            paragraphs.append(
+                "**Tree file formats.** Each tree was written as annotated "
+                "**phyloXML** (`*_tree.xml`; taxonomy, metadata properties, "
+                "leaf colours, internal-node LCA labels). The plain-text "
+                "Newick (`*_tree.nwk`) was **not retained** (`phylo.newick: "
+                "false`, the default) — phyloXML is a topological superset; "
+                "pass `--newick` (or set `phylo.newick: true`) to also keep "
+                "the `.nwk` files. The `*_tree_id_map.tsv` (kept regardless) "
+                "decodes the short leaf ids used in the retained "
+                "`*_msa.fasta`.\n"
+            )
     return "\n".join(paragraphs)
 
 
@@ -1471,7 +1503,8 @@ def _render_polyprotein(cfg: dict, per_protein_ran: bool = False) -> str:
             "the per-marker trees (`phylo.per_protein` settings apply "
             "verbatim). Peptide trees land alongside the FASTAs under "
             "`{prefix}_polyprotein/` with `{prefix}_<spec>_<peptide>_msa.fasta`, "
-            "`_tree.nwk`, `_tree.xml`, `_tree_id_map.tsv` basenames. "
+            + ("`_tree.nwk`, " if keep_newick else "")
+            + "`_tree.xml`, `_tree_id_map.tsv` basenames. "
             "Sparse peptides (fewer than "
             f"`phylo.per_protein.min_taxa` `ok`-status slices) are "
             "skipped. Peptide trees are intentionally **kept out** of "

@@ -287,6 +287,16 @@ DEFAULTS: dict[str, Any] = {
         #   "iqtree"   — always IQ-TREE (slower; ModelFinder + UFBoot)
         #   "fasttree" — always FastTree (faster; approximate-ML)
         "tool": "auto",
+        # Retain the plain-text Newick (*_tree.nwk) for every tree built
+        # this run (whole-genome 2E, per-protein/extra/segment 2F,
+        # pre-cluster, partition). OFF by default to reduce output clutter:
+        # the annotated phyloXML (*_tree.xml) is a topological superset, and
+        # the short-id *_tree_id_map.tsv (which decodes the retained
+        # *_msa.fasta leaves) is kept regardless. The Newick is still
+        # generated internally during the run — the phyloXML is re-parsed
+        # from it and the incongruence RF table reads it — then dropped at
+        # the end unless this is true. CLI: --newick / --no-newick.
+        "newick": False,
         "mafft": {
             # Raw mafft flags appended to "mafft --auto --thread N <input>".
             # Examples: ["--maxiterate", "1000"] for L-INS-i; or

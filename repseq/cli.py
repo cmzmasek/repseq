@@ -87,9 +87,11 @@ def _shared_options(fn):
         help=(
             "After selection, build an MSA (MAFFT) and an ML tree over the "
             "representatives, then write {prefix}_msa.fasta, "
-            "{prefix}_tree.nwk, {prefix}_tree.xml (phyloXML with taxonomy + "
+            "{prefix}_tree.xml (phyloXML with taxonomy + "
             "metadata properties and taxonomy-driven leaf colours), and "
-            "{prefix}_tree_id_map.tsv. Tree builder is chosen by phylo.tool "
+            "{prefix}_tree_id_map.tsv. The plain-text {prefix}_tree.nwk is "
+            "off by default (phylo.newick / --newick to keep it). Tree "
+            "builder is chosen by phylo.tool "
             "(default 'auto': IQ-TREE with ModelFinder + UFBoot for protein "
             "alignments, FastTree -nt -gtr for nucleotide). For protein + "
             "IQ-TREE with >=2 HMM-resolvable marker families, builds a "
@@ -132,6 +134,20 @@ def _shared_options(fn):
         ),
     )(fn)
     fn = click.option(
+        "--newick/--no-newick", "newick", default=None,
+        help=(
+            "Keep the plain-text Newick (*_tree.nwk) for every tree built "
+            "this run (whole-genome, per-protein / extra / segment, "
+            "pre-cluster, partition). OFF by default to reduce output "
+            "clutter — the annotated phyloXML (*_tree.xml) is a topological "
+            "superset and the *_tree_id_map.tsv that decodes the retained "
+            "*_msa.fasta is kept regardless. The Newick is still built "
+            "internally (the phyloXML is parsed from it; the incongruence "
+            "table reads it), then dropped at the end unless kept. "
+            "Overrides phylo.newick in the YAML; --no-newick forces it off."
+        ),
+    )(fn)
+    fn = click.option(
         "--fast", "fast", is_flag=True, default=False,
         help=(
             "Preliminary-run mode for fast tree building. Overrides the "
@@ -168,8 +184,9 @@ def _shared_options(fn):
             "is hard-coded for speed regardless of the rest of phylo: "
             "MAFFT --retree 1, FastTree, midpoint root only, no LCA, "
             "no trimAl, no bootstrap. Outputs: "
-            "{prefix}_pre_cluster_tree.{nwk,xml} + _tree_id_map.tsv "
-            "(short_id\\taccession\\tis_rep). Can also be enabled via "
+            "{prefix}_pre_cluster_tree.xml + _tree_id_map.tsv "
+            "(short_id\\taccession\\tis_rep); the .nwk is kept only with "
+            "phylo.newick / --newick. Can also be enabled via "
             "phylo.pre_cluster_tree.enabled: true in the YAML."
         ),
     )(fn)
@@ -254,7 +271,7 @@ def _shared_options(fn):
 def _load_and_validate(config_path, output_dir, prefix, threads, seed,
                        alphabet_for_clustering=None, concatenate_markers=None,
                        fast=False, verbose=False, protect_ids=None,
-                       pin_ids=None) -> dict:
+                       pin_ids=None, newick=None) -> dict:
     cfg = load_config(config_path)
     if output_dir:
         cfg["output"]["dir"] = output_dir
@@ -268,6 +285,8 @@ def _load_and_validate(config_path, output_dir, prefix, threads, seed,
         cfg.setdefault("clustering", {})["alphabet_for_clustering"] = alphabet_for_clustering
     if concatenate_markers is not None:
         cfg.setdefault("clustering", {})["concatenate_markers"] = bool(concatenate_markers)
+    if newick is not None:
+        cfg.setdefault("phylo", {})["newick"] = bool(newick)
     # Stash --verbose on the cfg so the MAFFT / IQ-TREE / FastTree
     # wrappers can read it via cfg.get("verbose", False) without having
     # to thread an extra arg through every call site.
@@ -1700,6 +1719,38 @@ def _handle_segmented(sequences, cfg, qc_report):
     return concat_seqs, complete_isolates, virus_cfg.get("segments")
 
 
+def _drop_unwanted_newick(out_files: list, cfg: dict) -> int:
+    """Delete every ``*_tree.nwk`` and prune it from ``out_files`` unless
+    ``phylo.newick`` is true.
+
+    The Newick is an unavoidable intermediate — the phyloXML is re-parsed
+    from it and the per-protein incongruence RF table reads it — so it's
+    generated during the run and dropped here, AFTER every phylo step and
+    the incongruence/conservation sweeps have consumed it. The annotated
+    phyloXML (``*_tree.xml``) is a topological superset; the short-id
+    ``*_tree_id_map.tsv`` is kept regardless because the retained
+    ``*_msa.fasta`` uses the same short-id leaves. Mutates ``out_files`` in
+    place; returns the number of files dropped.
+    """
+    if (cfg.get("phylo", {}) or {}).get("newick", False):
+        return 0
+    kept: list = []
+    dropped = 0
+    for f in out_files:
+        p = Path(f)
+        if p.name.endswith("_tree.nwk"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+            dropped += 1
+        else:
+            kept.append(f)
+    if dropped:
+        out_files[:] = kept
+    return dropped
+
+
 def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segment_names,
                   pre_clustering_sequences=None, plot: bool = False, phylo: bool = False,
                   per_protein_phylo: bool = False, per_segment_phylo: bool = False,
@@ -1873,6 +1924,18 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
             out_files.append(cons_tsv)
     except Exception as exc:
         click.echo(f"[MSA conservation report skipped] {exc}", err=True)
+    # Newick retention is opt-in (phylo.newick, default false). Drop the
+    # *_tree.nwk files HERE — after every phylo step + the incongruence table
+    # + the conservation sweep have consumed them — and prune them from the
+    # tracked list so _summary.md / the report writers never name a file
+    # that is no longer on disk.
+    n_dropped = _drop_unwanted_newick(out_files, cfg)
+    if n_dropped:
+        click.echo(
+            f"Dropped {n_dropped} Newick tree file(s) (phylo.newick: false). "
+            f"The annotated phyloXML (_tree.xml) is retained; pass --newick "
+            f"to keep the .nwk files too.",
+        )
     write_all_reports(
         result, qc_report, cfg, list(input_paths), out_files,
         complete_isolates=complete_isolates,
@@ -2255,14 +2318,14 @@ def run_doctor_cmd(config_path, no_network):
 @click.option("--n-select", "-n", default=None, type=int,
               help="Number of representative sequences to select.")
 def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids,threshold, n_select):
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick,threshold, n_select):
     """Global mode: cluster at a threshold or select N diverse sequences."""
     if threshold is None and n_select is None:
         raise click.UsageError("Provide --threshold or --n-select.")
 
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick)
     if segmented:
         cfg["segmented"]["enabled"] = True
 
@@ -2301,11 +2364,11 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-group", "-n", required=True, type=int,
               help="Target representatives per taxonomic group.")
 def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids,rank, n_per_group):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick,rank, n_per_group):
     """Taxonomic mode 1: N representatives per taxonomic rank group."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2341,7 +2404,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--rank-levels", "-r", required=True,
               help='JSON list of {rank, n_per_group} dicts. E.g. \'[{"rank":"family","n_per_group":20},{"rank":"genus","n_per_group":5}]\'')
 def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids,rank_levels):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick,rank_levels):
     """Taxonomic mode 2: hierarchical multi-rank nested clustering."""
     import json as _json
     try:
@@ -2351,7 +2414,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
 
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2387,11 +2450,11 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-host", "-n", required=True, type=int,
               help="Target representatives per host organism.")
 def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids,n_per_host):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick,n_per_host):
     """Host-stratified mode: N representatives per host organism."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2429,11 +2492,11 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--window", default="year",
               help='Time window: "year", "decade", or a number (e.g. "5" for 5-year bins).')
 def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids,n_per_window, window):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick,n_per_window, window):
     """Time-stratified mode: N representatives per time window."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2469,11 +2532,11 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-country", "-n", required=True, type=int,
               help="Target representatives per country.")
 def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids,n_per_country):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick,n_per_country):
     """Geographic mode: N representatives per country."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2515,12 +2578,12 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--field-regex", default=None,
               help="Regex to extract the field value from FASTA headers.")
 def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids,field, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick,field, n_per_group,
                metadata_table, field_regex):
     """Custom metadata mode: group by any field or metadata table column."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2565,13 +2628,13 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--metadata-table", default=None,
               help="Path to TSV/CSV metadata table with accession column.")
 def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids,fields, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick,fields, n_per_group,
                metadata_table):
     """Hybrid mode: multi-dimensional stratification (e.g. genus × host × year)."""
     field_list = [f.strip() for f in fields.split(",")]
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:

@@ -469,7 +469,23 @@ def test_render_summary_pre_cluster_paragraph_when_run(make_seq, tmp_path):
     assert "FastTree" in md
     assert "midpoint" in md.lower()
     assert "[repr]" in md
+    # phylo.newick defaults to false → the .nwk is NOT listed; the phyloXML
+    # and id_map are.
+    assert "{prefix}_pre_cluster_tree.nwk" not in md
+    assert "{prefix}_pre_cluster_tree.xml" in md
+    assert "{prefix}_pre_cluster_tree_id_map.tsv" in md
+    assert "not retained" in md  # the retention-policy sentence
+
+
+def test_render_summary_pre_cluster_lists_newick_when_enabled(make_seq, tmp_path):
+    """With phylo.newick: true the pre-cluster .nwk is named again."""
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"newick": True}
+    md = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], pre_cluster_ran=True,
+    )
     assert "{prefix}_pre_cluster_tree.nwk" in md
+    assert "not retained" not in md
 
 
 def test_render_summary_no_pre_cluster_paragraph_when_off(make_seq, tmp_path):

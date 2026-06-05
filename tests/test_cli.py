@@ -416,6 +416,92 @@ def test_load_and_validate_concatenate_markers_override(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# _load_and_validate — --newick / --no-newick CLI override + default
+# ---------------------------------------------------------------------------
+
+def test_load_and_validate_newick_default_off(tmp_path):
+    """Without --newick the YAML default (false) wins."""
+    cfg = _load_and_validate(
+        config_path=None, output_dir=str(tmp_path / "n0"), prefix=None,
+        threads=None, seed=None, newick=None,
+    )
+    assert cfg["phylo"]["newick"] is False
+
+
+def test_load_and_validate_newick_override(tmp_path):
+    """--newick / --no-newick flips phylo.newick on/off explicitly."""
+    cfg = _load_and_validate(
+        config_path=None, output_dir=str(tmp_path / "n1"), prefix=None,
+        threads=None, seed=None, newick=True,
+    )
+    assert cfg["phylo"]["newick"] is True
+
+    cfg = _load_and_validate(
+        config_path=None, output_dir=str(tmp_path / "n2"), prefix=None,
+        threads=None, seed=None, newick=False,
+    )
+    assert cfg["phylo"]["newick"] is False
+
+
+# ---------------------------------------------------------------------------
+# _drop_unwanted_newick — end-of-run Newick cleanup
+# ---------------------------------------------------------------------------
+
+def test_drop_unwanted_newick_removes_nwk_when_off(tmp_path):
+    """Default (phylo.newick: false): every *_tree.nwk is unlinked and
+    pruned from the tracked output list; non-.nwk files are untouched."""
+    from repseq.cli import _drop_unwanted_newick
+
+    nwk = tmp_path / "test_tree.nwk"
+    pp_nwk = tmp_path / "test_Spike_tree.nwk"
+    xml = tmp_path / "test_tree.xml"
+    idmap = tmp_path / "test_tree_id_map.tsv"
+    for p in (nwk, pp_nwk, xml, idmap):
+        p.write_text("x")
+    out_files = [nwk, xml, idmap, pp_nwk]
+
+    n = _drop_unwanted_newick(out_files, {"phylo": {"newick": False}})
+
+    assert n == 2
+    assert not nwk.exists() and not pp_nwk.exists()
+    assert xml.exists() and idmap.exists()
+    assert out_files == [xml, idmap]  # order preserved, .nwk pruned
+
+
+def test_drop_unwanted_newick_keeps_nwk_when_enabled(tmp_path):
+    """phylo.newick: true → no-op: files stay, list unchanged, returns 0."""
+    from repseq.cli import _drop_unwanted_newick
+
+    nwk = tmp_path / "test_tree.nwk"
+    xml = tmp_path / "test_tree.xml"
+    for p in (nwk, xml):
+        p.write_text("x")
+    out_files = [nwk, xml]
+
+    n = _drop_unwanted_newick(out_files, {"phylo": {"newick": True}})
+
+    assert n == 0
+    assert nwk.exists() and xml.exists()
+    assert out_files == [nwk, xml]
+
+
+def test_drop_unwanted_newick_tolerates_missing_file(tmp_path):
+    """A tracked .nwk already gone (e.g. a half-failed tree) is pruned
+    without raising."""
+    from repseq.cli import _drop_unwanted_newick
+
+    ghost = tmp_path / "gone_tree.nwk"  # never created
+    xml = tmp_path / "test_tree.xml"
+    xml.write_text("x")
+    out_files = [ghost, xml]
+
+    n = _drop_unwanted_newick(out_files, {})  # no phylo key → default off
+
+    assert n == 1
+    assert out_files == [xml]
+
+
+# ---------------------------------------------------------------------------
 # --fast: preliminary-run tree pipeline overrides
 # ---------------------------------------------------------------------------
 

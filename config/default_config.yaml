@@ -452,6 +452,15 @@ phylo:
   #                via ModelFinder, ultrafast bootstrap support values)
   #   "fasttree" — always FastTree (faster, approximate-ML)
   tool: auto
+  # Retain the plain-text Newick (*_tree.nwk) for every tree built this run
+  # (whole-genome, per-protein / extra / segment, pre-cluster, partition).
+  # Off by default to cut output clutter: the annotated phyloXML (*_tree.xml)
+  # is a topological superset, and the short-id *_tree_id_map.tsv (which
+  # decodes the retained *_msa.fasta leaves) is kept either way. The Newick
+  # is still produced internally during the run (the phyloXML is re-parsed
+  # from it; the incongruence RF table reads it), then deleted at the end
+  # unless this is true. CLI override: --newick / --no-newick.
+  newick: false
   mafft:
     # Raw mafft flags appended to "mafft --auto --thread N <input>".
     # Examples: ["--maxiterate", "1000"] for accurate L-INS-i;
