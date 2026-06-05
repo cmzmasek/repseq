@@ -968,6 +968,9 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
     keep_newick = bool(phylo_cfg.get("newick", False))
     newick_and = "the Newick and " if keep_newick else ""
     newick_file_and = "the underlying Newick file and " if keep_newick else ""
+    # Graphical PDF + PNG rendering (phylo.pdf, default true) — a sibling
+    # *_tree.pdf / *_tree.png per phyloXML tree.
+    render_pdf = bool(phylo_cfg.get("pdf", True))
     tool_pref = phylo_cfg.get("tool", "auto")
     # Match the runtime auto-pick: protein → IQ-TREE, NT → FastTree.
     if tool_pref == "auto":
@@ -1358,6 +1361,29 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
                 "the `.nwk` files. The `*_tree_id_map.tsv` (kept regardless) "
                 "decodes the short leaf ids used in the retained "
                 "`*_msa.fasta`.\n"
+            )
+    if msa_ran:
+        if render_pdf:
+            paragraphs.append(
+                "**Tree figures.** Each phyloXML tree was also rendered as a "
+                "graphical **PDF** (`*_tree.pdf`) and **PNG** (`*_tree.png`, "
+                "150 dpi) — a ladderized rectangular phylogram (matplotlib + "
+                "Bio.Phylo) with taxonomy-coloured leaf labels, a "
+                "genus/subfamily colour legend, internal-node labels for the "
+                "genus–family ranks, and branch-support labels for nodes with "
+                "support ≥ 50. Rendered from the phyloXML itself, so the "
+                "figure colours match the tree annotation exactly "
+                "(`phylo.pdf: true`, the default; `--no-pdf` disables it). "
+                "Rendering needs matplotlib (the `[viz]` extra) and soft-fails "
+                "with a note if it is missing.\n"
+            )
+        else:
+            paragraphs.append(
+                "**Tree figures.** Graphical tree rendering was disabled "
+                "(`phylo.pdf: false` / `--no-pdf`), so no `*_tree.pdf` / "
+                "`*_tree.png` figures were written; the annotated phyloXML "
+                "(`*_tree.xml`) is retained and can be rendered later "
+                "(e.g. in Archaeopteryx).\n"
             )
     return "\n".join(paragraphs)
 

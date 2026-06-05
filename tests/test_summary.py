@@ -521,6 +521,28 @@ def test_render_summary_msa_conservation_paragraph(make_seq, tmp_path):
     assert "MSA conservation scoring" not in md_off
 
 
+def test_render_summary_tree_figures_paragraph_on_by_default(make_seq, tmp_path):
+    """phylo.pdf defaults to true → the Tree figures paragraph names the
+    PDF + PNG outputs and the knob."""
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"tool": "fasttree"}
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "Tree figures" in md
+    assert "*_tree.pdf" in md and "*_tree.png" in md
+    assert "`phylo.pdf: true`" in md
+    assert "--no-pdf" in md
+
+
+def test_render_summary_tree_figures_paragraph_when_disabled(make_seq, tmp_path):
+    """phylo.pdf: false → the paragraph states no figures were written."""
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"tool": "fasttree", "pdf": False}
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True)
+    assert "Tree figures" in md
+    assert "`phylo.pdf: false`" in md
+    assert "no `*_tree.pdf`" in md
+
+
 def test_render_summary_phylo_describes_trimal_when_enabled(make_seq, tmp_path):
     cfg = _base_cfg(tmp_path)
     # FastTree path → concat branch; trimming enabled on the genome tree.

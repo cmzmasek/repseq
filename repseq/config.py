@@ -297,6 +297,17 @@ DEFAULTS: dict[str, Any] = {
         # from it and the incongruence RF table reads it — then dropped at
         # the end unless this is true. CLI: --newick / --no-newick.
         "newick": False,
+        # Render a graphical PDF + PNG of every phyloXML tree built this run
+        # (whole-genome 2E, per-protein/extra/segment 2F, pre-cluster,
+        # partition). ON by default. Each {prefix}..._tree.xml gets a sibling
+        # {prefix}..._tree.pdf and {prefix}..._tree.png — a ladderized
+        # rectangular phylogram (matplotlib + Bio.Phylo) with taxonomy-coloured
+        # leaf labels, a genus/subfamily legend, and branch-support labels,
+        # reconstructed entirely from the phyloXML. Soft-fails with a single
+        # stderr line (and emits no figures) when matplotlib is unavailable —
+        # same posture as --plot; matplotlib is the [viz] extra. CLI:
+        # --pdf / --no-pdf.
+        "pdf": True,
         "mafft": {
             # Raw mafft flags appended to "mafft --auto --thread N <input>".
             # Examples: ["--maxiterate", "1000"] for L-INS-i; or

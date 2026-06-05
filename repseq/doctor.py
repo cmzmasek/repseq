@@ -11,10 +11,11 @@ WARN vs FAIL policy:
     if missing — but they're hard dependencies so this almost never
     fires; included anyway because the failure mode would otherwise be
     a bare ImportError at start-up.
-  * optional Python packages (matplotlib, umap-learn) → WARN — only used
-    by ``--plot``. matplotlib is what ``--plot`` actually needs; umap-learn
-    is a best-effort upgrade and ``--plot`` falls back to classical MDS
-    without it.
+  * optional Python packages (matplotlib, umap-learn) → WARN. matplotlib
+    is needed by ``--plot`` AND by the default tree-figure rendering
+    (``phylo.pdf``, the ``*_tree.pdf`` / ``*_tree.png`` outputs); umap-learn
+    is a best-effort ``--plot`` upgrade and ``--plot`` falls back to classical
+    MDS without it.
   * every external clustering / phylogeny binary (mmseqs, cd-hit,
     cd-hit-est, mafft, trimal, FastTree, iqtree2) → WARN. None of them is
     strictly required: you can pick the backend you have installed,
@@ -72,7 +73,8 @@ _REQUIRED_PACKAGES: tuple[tuple[str, str], ...] = (
     ("requests", "requests"),
 )
 _OPTIONAL_PACKAGES: tuple[tuple[str, str, str], ...] = (
-    ("matplotlib", "matplotlib", "needed for --plot (pip install 'repseq[viz]')"),
+    ("matplotlib", "matplotlib", "needed for --plot and tree-figure PDFs/PNGs "
+     "(phylo.pdf) (pip install 'repseq[viz]')"),
     ("umap", "umap-learn",
      "optional --plot upgrade (pip install 'repseq[viz-umap]'); "
      "without it --plot falls back to numpy-only classical MDS"),

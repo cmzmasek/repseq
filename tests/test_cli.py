@@ -444,6 +444,109 @@ def test_load_and_validate_newick_override(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# _load_and_validate — --pdf / --no-pdf CLI override + default
+# ---------------------------------------------------------------------------
+
+def test_load_and_validate_pdf_default_on(tmp_path):
+    """Without --pdf the YAML default (true) wins."""
+    cfg = _load_and_validate(
+        config_path=None, output_dir=str(tmp_path / "p0"), prefix=None,
+        threads=None, seed=None, pdf=None,
+    )
+    assert cfg["phylo"]["pdf"] is True
+
+
+def test_load_and_validate_pdf_override(tmp_path):
+    """--pdf / --no-pdf flips phylo.pdf on/off explicitly."""
+    cfg = _load_and_validate(
+        config_path=None, output_dir=str(tmp_path / "p1"), prefix=None,
+        threads=None, seed=None, pdf=False,
+    )
+    assert cfg["phylo"]["pdf"] is False
+
+    cfg = _load_and_validate(
+        config_path=None, output_dir=str(tmp_path / "p2"), prefix=None,
+        threads=None, seed=None, pdf=True,
+    )
+    assert cfg["phylo"]["pdf"] is True
+
+
+# ---------------------------------------------------------------------------
+# _render_tree_pdfs — end-of-run graphical tree-figure sweep
+# ---------------------------------------------------------------------------
+
+def test_render_tree_pdfs_disabled_is_noop(tmp_path):
+    """phylo.pdf: false → no-op: nothing rendered, list unchanged, returns 0."""
+    from repseq.cli import _render_tree_pdfs
+
+    xml = tmp_path / "test_tree.xml"
+    xml.write_text("x")
+    out_files = [xml]
+    n = _render_tree_pdfs(out_files, {"phylo": {"pdf": False}})
+    assert n == 0
+    assert out_files == [xml]
+    assert not xml.with_suffix(".pdf").exists()
+
+
+def test_render_tree_pdfs_no_xml_is_noop(tmp_path):
+    """Default-on but no *_tree.xml tracked → nothing to render, returns 0."""
+    from repseq.cli import _render_tree_pdfs
+
+    other = tmp_path / "test_clusters.tsv"
+    other.write_text("x")
+    out_files = [other]
+    n = _render_tree_pdfs(out_files, {})  # no phylo key → default on
+    assert n == 0
+    assert out_files == [other]
+
+
+def test_render_tree_pdfs_renders_and_appends(tmp_path, monkeypatch):
+    """Default-on with a tracked *_tree.xml renders a figure and appends the
+    new files; only *_tree.xml entries drive rendering."""
+    import repseq.cli as cli
+
+    xml = tmp_path / "test_tree.xml"
+    xml.write_text("x")
+    other = tmp_path / "test_clusters.tsv"
+    other.write_text("x")
+    out_files = [xml, other]
+
+    pdf_out = xml.with_suffix(".pdf")
+    png_out = xml.with_suffix(".png")
+
+    def _fake_render(xml_paths, want_png=True):
+        assert list(xml_paths) == [xml]  # only the tree xml drives rendering
+        for p in (pdf_out, png_out):
+            p.write_text("fig")
+        return [pdf_out, png_out], None, []
+
+    # The cli helper does `from .phylo.pdf import render_tree_pdfs` at call
+    # time, so patching the attribute on the module takes effect.
+    monkeypatch.setattr("repseq.phylo.pdf.render_tree_pdfs", _fake_render)
+
+    n = cli._render_tree_pdfs(out_files, {"phylo": {"pdf": True}})
+    assert n == 1  # one tree (one PDF)
+    assert pdf_out in out_files and png_out in out_files
+
+
+def test_render_tree_pdfs_soft_skips_without_matplotlib(tmp_path, monkeypatch):
+    """A missing renderer is reported once and renders nothing (returns 0)."""
+    import repseq.cli as cli
+
+    xml = tmp_path / "test_tree.xml"
+    xml.write_text("x")
+    out_files = [xml]
+
+    monkeypatch.setattr(
+        "repseq.phylo.pdf.render_tree_pdfs",
+        lambda xml_paths, want_png=True: ([], "matplotlib missing", []),
+    )
+    n = cli._render_tree_pdfs(out_files, {"phylo": {"pdf": True}})
+    assert n == 0
+    assert out_files == [xml]  # unchanged
+
+
+# ---------------------------------------------------------------------------
 # _drop_unwanted_newick — end-of-run Newick cleanup
 # ---------------------------------------------------------------------------
 

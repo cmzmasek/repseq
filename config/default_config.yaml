@@ -461,6 +461,15 @@ phylo:
   # from it; the incongruence RF table reads it), then deleted at the end
   # unless this is true. CLI override: --newick / --no-newick.
   newick: false
+  # Render a graphical PDF + PNG of every phyloXML tree built this run
+  # (whole-genome, per-protein / extra / segment, pre-cluster, partition).
+  # On by default. Each *_tree.xml gets a sibling *_tree.pdf and *_tree.png:
+  # a ladderized rectangular phylogram (matplotlib + Bio.Phylo) with
+  # taxonomy-coloured leaf labels, a genus/subfamily legend, and branch-support
+  # labels, reconstructed from the phyloXML. Soft-fails (one stderr line, no
+  # figures) when matplotlib is missing — same as --plot; matplotlib is the
+  # [viz] extra. CLI override: --pdf / --no-pdf.
+  pdf: true
   mafft:
     # Raw mafft flags appended to "mafft --auto --thread N <input>".
     # Examples: ["--maxiterate", "1000"] for accurate L-INS-i;

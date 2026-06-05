@@ -72,8 +72,10 @@ conda install -c bioconda cd-hit           # Linux (conda)
 `repseq` finds whichever binary it needs (`mmseqs`, or `cd-hit` /
 `cd-hit-est`) on your `PATH` automatically.
 
-**Plots** — if you want the optional diagnostic scatter plot of the clustering
-result (matplotlib only — installs cleanly everywhere):
+**Plots & tree figures** — the `[viz]` extra (matplotlib only — installs
+cleanly everywhere) powers both the optional diagnostic scatter plot of the
+clustering (`--plot`) **and** the graphical tree-figure PDFs/PNGs that
+`--phylo` renders by default (`phylo.pdf`):
 
 ```bash
 pip install -e '.[viz]'
@@ -294,6 +296,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_taxonomic_report.tsv`, `_protein_taxonomic_report.tsv`, `_nucleotide_taxonomic_report.tsv`, `_polyprotein_taxonomic_report.tsv` | parallel to the matching `.txt` reports | **Machine-readable tidy long-format TSV** companions (8-column schema: `report, rank, pool, taxon, taxon_count, spec, metric, value`). Excel-pivot / R-pandas friendly. v0.35.0. |
 | `{prefix}_clustering.png` | only with `--plot` | Diagnostic scatter of the clustering. |
 | `{prefix}_msa.fasta`, `_tree.xml`, `_tree_id_map.tsv` | only with `--phylo` | Alignment + annotated tree (phyloXML) + short-id↔accession map. |
+| `{prefix}_tree.pdf`, `_tree.png` | `--phylo` (default; `phylo.pdf: true`) | **Graphical tree figure** — a ladderized rectangular phylogram (matplotlib + Bio.Phylo) with taxonomy-coloured leaf labels, a genus/subfamily legend, and branch-support labels, rendered from the phyloXML. **On by default**; `--no-pdf` (or `phylo.pdf: false`) disables it. Emitted for *every* tree below (`*_tree.pdf` / `*_tree.png`). Needs matplotlib (`[viz]`); soft-fails if missing. v0.49.0. |
 | `{prefix}_tree.nwk` | `--phylo` **and** `phylo.newick: true` (or `--newick`) | Plain-text Newick. **Off by default** (`phylo.newick: false`) to cut clutter — the phyloXML is a topological superset. Same for every tree below (`*_tree.nwk`). |
 | `{prefix}_partition.nex`, `_msa_<family>.fasta` | `--phylo`, protein + IQ-TREE | NEXUS partition file + per-family alignments (partitioned-supermatrix tree). |
 | `{prefix}_msa_untrimmed.fasta` | `--phylo` + `phylo.trimal.enabled` | Raw MAFFT alignment retained when trimAl trimming ran (`_msa.fasta` is then the trimmed tree input). |
@@ -301,10 +304,10 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_representative_*_corrected.tsv`, `_representative_*_proteins_corrected.fasta` | above + `write_corrected` | Copies of the rep TSV + protein FASTA with **high-confidence imputed blanks filled** (clean values; originals kept). v0.39.0. |
 | `{prefix}_iqtree_summary.txt` | only with `--phylo` + IQ-TREE | IQ-TREE ModelFinder report. |
 | `{prefix}_iqtree_model.txt` | only with `--phylo` + IQ-TREE | Grep-friendly sidecar with the ModelFinder pick(s): one `<label>: <model>` line per partition (or a single `GENOME: <model>` line for the non-partitioned path). v0.28.0. |
-| `{prefix}_per_protein/` | only with `--per-protein-phylo` | One tree (MSA + phyloXML + id map; Newick opt-in via `phylo.newick`) per marker; plus `_incongruence.tsv` of pairwise Robinson-Foulds distances. |
-| `{prefix}_pre_cluster_tree.xml`, `_id_map.tsv` | only with `--pre-cluster-tree` (or `phylo.pre_cluster_tree.enabled`) | Rough overview tree of every post-QC sequence (one leaf per CONCAT isolate in segmented mode), with `[repr] ` prefix on representative leaves in the phyloXML `<name>`. The `.nwk` is opt-in (`phylo.newick`). v0.32.0. |
+| `{prefix}_per_protein/` | only with `--per-protein-phylo` | One tree (MSA + phyloXML + id map + PDF/PNG figure by default; Newick opt-in via `phylo.newick`) per marker; plus `_incongruence.tsv` of pairwise Robinson-Foulds distances. |
+| `{prefix}_pre_cluster_tree.xml`, `_id_map.tsv` (+ `.pdf` / `.png`) | only with `--pre-cluster-tree` (or `phylo.pre_cluster_tree.enabled`) | Rough overview tree of every post-QC sequence (one leaf per CONCAT isolate in segmented mode), with `[repr] ` prefix on representative leaves in the phyloXML `<name>`. A PDF/PNG figure is rendered by default (`phylo.pdf`); the `.nwk` is opt-in (`phylo.newick`). v0.32.0. |
 | `{prefix}_extra_protein/` | `--per-protein-phylo` + `extra_protein:` declared | Same shape, accessory-protein trees (kept out of the incongruence table by design). |
-| `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment, from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
+| `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment (each with a PDF/PNG figure by default), from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
 | `{prefix}_msa_conservation.tsv` | any phylo step that wrote an MSA (default on; `phylo.conservation.enabled`) | One conservation number per alignment written this run (genome, partition families + supermatrix, per-protein, extra-protein, polyprotein peptides, per-segment NT). Mean per-column **Jensen-Shannon divergence to a residue background** (Capra & Singh 2007), **Henikoff-weighted** + **gap-penalised**. Columns: `msa, role, label, alphabet, trimmed, n_seqs, n_sites, mean_conservation, mean_conservation_core`. v0.43.0. |
 | `{prefix}_hmm_diagnostic.tsv` | when the HMM tier ran AND a spec declares `hmms:` | One row per (representative, marker spec, declared HMM profile): `hit` T/F, `best_dom_evalue`, `best_dom_score`, `best_coverage`, `ga_cutoff`, `cutoff_used`, `passing`. Surfaces near-miss patterns the binary gate hides ("65 isolates barely missed the cutoff at E=2e-5"). v0.26.0. |
 | `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations). Leads with an **"Analysis at a glance"** table (v0.41.0) stating the run's actual decisions — dataset type, input→representative counts, clustering substrate + alphabet + tool, selection mode, whole-genome tree substrate, per-marker/per-segment tree presence, taxonomy review. The **Clustering substrate** and **Whole-genome tree** cells name the actual marker(s) — the canonical `name:`, not the aliases/synonyms — and, when the HMM tier ran, each marker's domain architecture (`name (HMM: tok OR tok)`); single-marker mode lists them in priority order, concat joins with `+`, segmented prefixes each with its segment. v0.42.0. |
@@ -1066,6 +1069,31 @@ the very end of the run; the `_tree_id_map.tsv` (short-id↔accession) and
 `_msa.fasta` are kept regardless, so the retained alignment stays
 decodable.
 
+##### Graphical tree figures: `phylo.pdf` / `--pdf` / `--no-pdf` (v0.49.0+)
+
+Every phyloXML tree is **also rendered as a graphical figure** — a
+`*_tree.pdf` (vector) and a `*_tree.png` (150 dpi raster) sibling next to
+each `*_tree.xml`. The figure is a ladderized rectangular phylogram drawn
+with **matplotlib + Bio.Phylo**: taxonomy-coloured leaf labels, a
+genus/subfamily colour legend, internal-node labels for the genus→family
+ranks, and branch-support labels for nodes with support ≥ 50. Everything in
+the figure (labels, colours, the legend, ranks, support) is reconstructed
+**from the phyloXML itself**, so the figure colours match the tree
+annotation exactly — and a single end-of-run sweep covers *every* tree type
+(whole-genome, per-protein, extra-protein, per-segment, pre-cluster,
+partition) with no per-tree configuration.
+
+Rendering is **on by default** (`phylo.pdf: true`). Pass **`--no-pdf`** (or
+set `phylo.pdf: false`) to suppress it — the annotated phyloXML is retained
+either way and can be opened later in a dedicated viewer (e.g.
+[Archaeopteryx](https://sites.google.com/view/archaeopteryx)). `--pdf`
+forces it on even if the YAML turned it off. Rendering needs **matplotlib**
+(the `[viz]` extra: `pip install 'repseq[viz]'`); if it is missing, the run
+prints a single note and skips the figures — the same soft-fail posture as
+`--plot`. (The approach is ported from the sister project
+[`vfam_trees`](https://github.com/cmzmasek), which renders viral-family
+reference trees the same way.)
+
 ##### Preliminary-run shortcut: `--fast` (v0.24.0+)
 
 When you are iterating on a config (tuning QC thresholds, HMM
@@ -1246,6 +1274,30 @@ Opens directly in [Archaeopteryx](https://sites.google.com/view/aptxjs)
 the rich annotation.
 The annotation is also visible in any other phyloXML-aware tool (Dendroscope, etc).
 
+#### `{prefix}_tree.pdf`, `{prefix}_tree.png` — **the figure you'll usually paste** (v0.49.0+)
+
+A ready-to-use graphical rendering of the tree above, so you don't have to
+open a viewer just to glance at the topology. The PDF is vector (clean at any
+zoom, drops straight into a figure panel); the PNG is a 150-dpi raster for
+quick previews and slide decks. Both are a **ladderized rectangular
+phylogram** drawn with matplotlib + Bio.Phylo, showing:
+
+- **Leaf labels coloured by taxonomy** (the same `style:font_color` the
+  phyloXML carries — so the figure matches what Archaeopteryx would show),
+  with a **genus/subfamily colour legend** when colours resolve. Unresolved
+  taxa (e.g. an offline `--no-resolve` run) fall back to grey, no legend.
+- **Internal-node labels** for the genus→family ranks (species-level and
+  unranked internals are suppressed to cut clutter).
+- **Branch-support labels** for nodes with support ≥ 50.
+- A title + a one-line provenance caption pulled from the phyloXML.
+
+Rendered by a single end-of-run sweep over every `*_tree.xml`, so the same
+figure is produced for *every* tree type (whole-genome, per-protein,
+extra-protein, per-segment, pre-cluster, partition). **On by default**
+(`phylo.pdf`); see **"Graphical tree figures"** under
+[Phylogeny outputs](#phylogeny-outputs) for the `--no-pdf` switch and the
+matplotlib requirement.
+
 #### `{prefix}_tree_id_map.tsv`
 
 Two-column mapping `short_id` ↔ `accession`. Use it when you need to
@@ -1312,6 +1364,8 @@ segmented mode (`M_Spike`, `S_Bunya_nucleocap`):
   Spike_msa.fasta
   Spike_tree.nwk
   Spike_tree.xml
+  Spike_tree.pdf
+  Spike_tree.png
   Spike_tree_id_map.tsv
   S_Bunya_nucleocap_msa.fasta
   …
@@ -1320,8 +1374,10 @@ segmented mode (`M_Spike`, `S_Bunya_nucleocap`):
 
 (The `*_tree.nwk` files shown above are written only when `phylo.newick`
 / `--newick` is on — off by default; see **"Plain-text Newick is opt-in"**
-under [Phylogeny outputs](#phylogeny-outputs). The phyloXML, MSA, id-map,
-and incongruence table are always written.)
+under [Phylogeny outputs](#phylogeny-outputs). The `*_tree.pdf` / `*_tree.png`
+figures are written by default — see **"Graphical tree figures"** in the same
+section; pass `--no-pdf` to skip them. The phyloXML, MSA, id-map, and
+incongruence table are always written.)
 
 **Extra-protein trees (v0.22.0+):** when you've also declared
 [`extra_protein:`](#accessory-proteins-extra_protein) accessory
@@ -1406,7 +1462,8 @@ representative isolate contributes its raw per-segment NT (from
 `concat_segments`) to one tree per segment. Outputs land in a
 `{prefix}_per_segment/` subdirectory with the same per-tree shape
 (`<segment>_msa.fasta`, `<segment>_tree.xml`,
-`<segment>_tree_id_map.tsv` per segment; the `<segment>_tree.nwk` only
+`<segment>_tree_id_map.tsv` per segment, plus a `<segment>_tree.pdf` /
+`<segment>_tree.png` figure by default; the `<segment>_tree.nwk` only
 when `phylo.newick` / `--newick` is on).
 
 Why a per-**segment** tree on top of the per-**marker** tree set:
@@ -1490,6 +1547,8 @@ Output files:
   (same palette as `--phylo` / `--per-protein-phylo`, so taxa stay
   the same colour across every tree of a run), and the `[repr] `
   prefix on representative leaves
+- `{prefix}_pre_cluster_tree.pdf` / `.png` — graphical figure of the
+  overview tree, rendered by default (`phylo.pdf`; `--no-pdf` to skip)
 - `{prefix}_pre_cluster_tree_id_map.tsv` — three columns
   (`short_id`, `accession`, `is_rep`), so a user grepping for
   reps without opening the XML can find them
@@ -2501,8 +2560,9 @@ alongside the peptide FASTAs in `{prefix}_polyprotein/` with the
 matching basename schema:
 
 * `{prefix}_<spec>_<peptide>_msa.fasta`
-* `{prefix}_<spec>_<peptide>_tree.nwk`
+* `{prefix}_<spec>_<peptide>_tree.nwk` (opt-in, `phylo.newick`)
 * `{prefix}_<spec>_<peptide>_tree.xml`
+* `{prefix}_<spec>_<peptide>_tree.pdf` / `.png` (figure, default-on `phylo.pdf`)
 * `{prefix}_<spec>_<peptide>_tree_id_map.tsv`
 
 Sparse peptides (fewer than `phylo.per_protein.min_taxa` reps with an
