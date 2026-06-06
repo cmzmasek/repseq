@@ -49,6 +49,55 @@ def _containment_distance(a: set, b: set) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Representation + k-mer size (shared by diversity selection and the 2G plot)
+# ---------------------------------------------------------------------------
+#
+# k=5 is well-resolved for PROTEIN markers (20^5 ≈ 3.2M possible 5-mers vs
+# ~1000 per marker) but SATURATES on nucleotide whole genomes: the 4^5 = 1024
+# 5-mer space is essentially fully present in any genome more than a few kb
+# long, so every pairwise containment ≈ 1 and all distances collapse to ~0 —
+# MaxMin then degenerates to near-random / length-ordered selection. So we
+# mirror the clustering alphabet: when alphabet_for_clustering=protein (the
+# default) and the reps carry the marker protein that drove clustering, k-mer
+# work runs on those amino-acid strings at k=5; otherwise on the nucleotide
+# sequence at a larger k. (For highly diverged genomes NO single nucleotide k
+# is ideal — small k saturates, large k shares no k-mers across genera — so
+# protein clustering is the recommended path for diverse viral families.)
+_PROTEIN_KMER = 5
+_NUCLEOTIDE_KMER = 11
+
+
+def kmer_basis(
+    sequences: list[Sequence], cfg: Optional[dict]
+) -> tuple[bool, int]:
+    """Return ``(use_protein, k)`` for k-mer work, from the clustering alphabet.
+
+    ``use_protein`` is True only when ``clustering.alphabet_for_clustering``
+    is ``protein`` AND every sequence carries a populated ``protein_sequence``
+    (the marker / concat that actually drove clustering) — so diversity
+    selection and the clustering plot see the same representation clustering
+    did. Otherwise falls back to the nucleotide sequence with the larger
+    nucleotide k.
+    """
+    alphabet = (cfg or {}).get("clustering", {}).get(
+        "alphabet_for_clustering", "protein"
+    )
+    use_protein = (
+        alphabet == "protein"
+        and bool(sequences)
+        and all(getattr(s, "protein_sequence", None) for s in sequences)
+    )
+    return use_protein, (_PROTEIN_KMER if use_protein else _NUCLEOTIDE_KMER)
+
+
+def basis_sequence(seq: Sequence, use_protein: bool) -> str:
+    """The string fed to k-mer extraction for ``seq`` under the chosen basis."""
+    if use_protein:
+        return seq.protein_sequence or ""
+    return seq.sequence or ""
+
+
+# ---------------------------------------------------------------------------
 # MaxMin diversity selection
 # ---------------------------------------------------------------------------
 
@@ -56,7 +105,8 @@ def select_diverse(
     sequences: list[Sequence],
     n: int,
     seed: Optional[int] = None,
-    k: int = 5,
+    k: Optional[int] = None,
+    cfg: Optional[dict] = None,
 ) -> list[Sequence]:
     """Select n sequences that maximally cover sequence space (MaxMin algorithm).
 
@@ -69,11 +119,18 @@ def select_diverse(
     (:func:`_containment_distance`), so the selection reflects sequence
     divergence rather than length differences.
 
+    Representation + k follow the clustering alphabet (see :func:`kmer_basis`):
+    when ``cfg`` is supplied, a protein-alphabet run selects on the marker
+    protein at k=5 and a nucleotide run on the genome at the larger nucleotide
+    k. Without ``cfg`` the historical nucleotide/k=5 behaviour is kept. An
+    explicit ``k`` always overrides the resolved default.
+
     Args:
         sequences: Pool of sequences to select from.
         n: Number of sequences to return.
         seed: Random seed for tie-breaking.
-        k: k-mer size for distance computation.
+        k: k-mer size; ``None`` resolves from the alphabet (see above).
+        cfg: full repseq config; enables alphabet-aware representation + k.
 
     Returns:
         List of n (or fewer if pool is smaller) selected Sequence objects.
@@ -86,8 +143,15 @@ def select_diverse(
 
     rng = random.Random(seed)
 
-    # Pre-compute k-mer sets
-    kmer_sets = [_kmer_set(s.sequence, k) for s in sequences]
+    if cfg is not None:
+        use_protein, basis_k = kmer_basis(sequences, cfg)
+    else:
+        use_protein, basis_k = False, _PROTEIN_KMER
+    if k is None:
+        k = basis_k
+
+    # Pre-compute k-mer sets on the chosen representation.
+    kmer_sets = [_kmer_set(basis_sequence(s, use_protein), k) for s in sequences]
 
     # Start with longest sequence
     first_idx = max(range(len(sequences)), key=lambda i: sequences[i].length)

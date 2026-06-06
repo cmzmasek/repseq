@@ -160,6 +160,16 @@ them are kept. If it's bigger, `repseq` clusters it down to about `-n`
 representatives. Add `--overflow trim` if you need *exactly* `-n` and not "about
 `-n`".
 
+The `-n` "maximally-different" selection (`global -n`, and the `--overflow trim`
+step in every mode) is an alignment-free **MaxMin** sampler over k-mer distance.
+It runs on the **same representation your clustering uses**: with
+`--alphabet-for-clustering protein` (the default) it compares each sequence's
+**marker protein**, and with `nucleotide` it compares the genome. Note that
+nucleotide k-mer diversity is inherently weak for highly diverged viral
+families (short k-mers saturate on whole genomes, long ones share nothing
+across genera), so **protein is the recommended alphabet** when you want `-n`
+to track real divergence.
+
 Every mode also accepts: `--input/-i`, `--output-dir/-o`, `--config/-c`,
 `--threads`, `--seed`, `--segmented`, `--dry-run`, `--no-resolve`,
 `--source {auto,uniprot,ncbi,ncbi_virus}`, `--overflow {keep,trim}`, `--plot`,

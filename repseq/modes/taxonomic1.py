@@ -167,7 +167,7 @@ def _binary_search_threshold(
     if overflow == "trim" and len(best_clusters) > n_target:
         seed = cfg.get("seed", 42)
         reps = [c.representative for c in best_clusters]
-        chosen = select_diverse(reps, n_target, seed=seed)
+        chosen = select_diverse(reps, n_target, seed=seed, cfg=cfg)
         chosen_ids = {s.id for s in chosen}
         best_clusters = [c for c in best_clusters if c.representative.id in chosen_ids]
 

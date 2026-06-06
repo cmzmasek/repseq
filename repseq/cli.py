@@ -1872,7 +1872,7 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
         try:
             from .viz.clustering_plot import write_clustering_plot
             written = write_clustering_plot(
-                result, plot_path, seed=cfg.get("seed", 42),
+                result, plot_path, seed=cfg.get("seed", 42), cfg=cfg,
             )
             if written:
                 out_files.append(written)

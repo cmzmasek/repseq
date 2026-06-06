@@ -242,10 +242,13 @@ def _mad_score_for_branch(
     if not leaves_below:
         return float("inf"), 0.0
 
-    # For a given x, d(i,r) = d(i,branch) - x for i below the branch,
-    # else d(i,branch) + x (the rest of the tree).
+    # For a given x measured from the branch's child (distal) endpoint:
+    #   i below the branch:  d(i,r) = d(i,branch) + x   (ascend i→child→r)
+    #   j above the branch:  d(j,r) = d(j,branch) - x   (d(j,branch) already
+    #     includes the full branch length L because the path j→child crosses
+    #     it, so descending the remaining L-x from the parent nets to -x)
     # ρ(i,j) for i below, j above:
-    #   ρ = ((d_i - x) - (d_j + x)) / d_ij = (d_i - d_j - 2x) / d_ij
+    #   ρ = ((d_i + x) - (d_j - x)) / d_ij = (d_i - d_j + 2x) / d_ij
     # For both below or both above, x drops out — those pairs add a
     # constant Σ((d_i - d_j) / d_ij)².
     leaves = list(leaf_dist_to_branch.keys())
@@ -274,10 +277,11 @@ def _mad_score_for_branch(
                     num0 = di - dj
                 else:
                     num0 = dj - di
-                # ρ = (num0 - 2x) / d_ij  (after fixing the sign).
-                # ρ² = (num0² - 4·num0·x + 4x²) / d_ij²
+                # num0 = d_below - d_above (sign fixed above), so
+                # ρ = (num0 + 2x) / d_ij
+                # ρ² = (num0² + 4·num0·x + 4x²) / d_ij²
                 c += (num0 / d_ij) ** 2
-                b += -4 * num0 / (d_ij ** 2)
+                b += 4 * num0 / (d_ij ** 2)
                 a += 4 / (d_ij ** 2)
     if a == 0:
         return sq_sum_const + c, 0.0

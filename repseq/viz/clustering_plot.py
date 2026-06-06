@@ -31,7 +31,12 @@ from collections import Counter
 from pathlib import Path
 from typing import Optional
 
-from ..clustering.diversity import _jaccard_distance, _kmer_set
+from ..clustering.diversity import (
+    _jaccard_distance,
+    _kmer_set,
+    basis_sequence,
+    kmer_basis,
+)
 from ..models import RunResult, Sequence
 
 logger = logging.getLogger(__name__)
@@ -161,7 +166,8 @@ def write_clustering_plot(
     result: RunResult,
     path: Path,
     *,
-    k: int = 5,
+    cfg: Optional[dict] = None,
+    k: Optional[int] = None,
     seed: int = 42,
     max_points: int = DEFAULT_MAX_POINTS,
     max_lines: int = DEFAULT_MAX_LINES,
@@ -170,6 +176,12 @@ def write_clustering_plot(
 
     Returns the written path, or ``None`` if the run had nothing to plot
     (no clusters, or fewer than 3 sequences).
+
+    The k-mer embedding uses the same representation clustering used: the
+    marker protein at k=5 for a protein-alphabet run, else the nucleotide
+    sequence at the larger nucleotide k (see ``clustering.diversity.kmer_basis``;
+    k=5 saturates on whole genomes). Pass ``cfg`` to enable this; without it
+    the historical nucleotide/k=5 embedding is kept.
     """
     _require_matplotlib()
 
@@ -212,7 +224,10 @@ def write_clustering_plot(
 
     import numpy as np
 
-    kmer_sets = [_kmer_set(s.sequence, k) for s in seqs]
+    use_protein, basis_k = kmer_basis(seqs, cfg) if cfg is not None else (False, 5)
+    if k is None:
+        k = basis_k
+    kmer_sets = [_kmer_set(basis_sequence(s, use_protein), k) for s in seqs]
     dist = np.zeros((n, n), dtype=np.float32)
     for i in range(n):
         for j in range(i + 1, n):

@@ -5,8 +5,14 @@ from repseq.clustering.diversity import (
     _containment_distance,
     _jaccard_distance,
     _kmer_set,
+    basis_sequence,
+    kmer_basis,
     select_diverse,
 )
+
+
+def _cfg(alphabet):
+    return {"clustering": {"alphabet_for_clustering": alphabet}}
 
 
 # ---------------------------------------------------------------------------
@@ -74,3 +80,70 @@ def test_select_diverse_prefers_dissimilar_sequences(make_seq):
 
 def test_select_diverse_empty_input():
     assert select_diverse([], n=5, seed=42) == []
+
+
+# ---------------------------------------------------------------------------
+# Alphabet-aware k-mer basis (rigour audit 2026-06-06): k=5 saturates on
+# whole-genome NT, so protein-alphabet runs select on the marker protein at
+# k=5 and NT runs use a larger k.
+# ---------------------------------------------------------------------------
+
+def test_kmer_basis_protein_when_alphabet_protein_and_markers_present(make_seq):
+    seqs = [make_seq("a", "ACGT" * 10), make_seq("b", "ACGT" * 10)]
+    for s in seqs:
+        s.protein_sequence = "MKVL" * 5
+    assert kmer_basis(seqs, _cfg("protein")) == (True, 5)
+
+
+def test_kmer_basis_nucleotide_alphabet_uses_larger_k(make_seq):
+    s = make_seq("a", "ACGT" * 10)
+    s.protein_sequence = "MKVL"  # present, but the alphabet is nucleotide
+    assert kmer_basis([s], _cfg("nucleotide")) == (False, 11)
+
+
+def test_kmer_basis_falls_back_to_nt_when_a_marker_is_missing(make_seq):
+    a = make_seq("a", "ACGT" * 10)
+    a.protein_sequence = "MKVL"
+    b = make_seq("b", "ACGT" * 10)  # no protein_sequence populated
+    assert kmer_basis([a, b], _cfg("protein")) == (False, 11)
+
+
+def test_kmer_basis_default_alphabet_is_protein(make_seq):
+    a = make_seq("a", "ACGT" * 10)
+    a.protein_sequence = "MKVL"
+    assert kmer_basis([a], {}) == (True, 5)  # missing key defaults to protein
+
+
+def test_basis_sequence_switches_representation(make_seq):
+    s = make_seq("a", "ACGTACGT")
+    s.protein_sequence = "MKVL"
+    assert basis_sequence(s, True) == "MKVL"
+    assert basis_sequence(s, False) == "ACGTACGT"
+
+
+def test_select_diverse_protein_basis_uses_marker(make_seq):
+    """With cfg=protein, divergence is judged on the marker protein, not NT.
+
+    NT says A==C and B differs; PROTEIN says A==B and C differs. A
+    protein-basis MaxMin must therefore pick the protein-distinct C plus
+    exactly one of the identical-protein pair {A, B}.
+    """
+    A = make_seq("A", "AAAAAAAAAAAAAAAA")
+    A.protein_sequence = "MKKKKKKKKKKK"
+    B = make_seq("B", "CCCCCCCCCCCCCCCC")
+    B.protein_sequence = "MKKKKKKKKKKK"        # same protein as A, different NT
+    C = make_seq("C", "AAAAAAAAAAAAAAAA")
+    C.protein_sequence = "WWWWWWWWWWWW"        # same NT as A, different protein
+    out = select_diverse([A, B, C], n=2, seed=42, cfg=_cfg("protein"))
+    ids = {s.id for s in out}
+    assert "C" in ids
+    assert len(ids & {"A", "B"}) == 1
+
+
+def test_select_diverse_cfgless_keeps_legacy_nt_behaviour(make_seq):
+    """No cfg → historical NT/k=5 selection (back-compat)."""
+    sim1 = make_seq("sim1", "AAAAAAAAAACCCCCCCCCC")
+    sim2 = make_seq("sim2", "AAAAAAAAAACCCCCCCCCG")
+    diff = make_seq("diff", "TTTTTTTTTTGGGGGGGGGG")
+    out = select_diverse([sim1, sim2, diff], n=2, seed=42)
+    assert "diff" in {s.id for s in out}

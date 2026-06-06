@@ -260,7 +260,9 @@ def _is_diversity_only(result: RunResult) -> bool:
     identity-clustering run — so NO clustering binary (MMseqs2 / cd-hit)
     executed. Used so the summary never names or cites a clustering program
     that did not actually run (the diversity path uses
-    ``clustering.diversity.select_diverse``, a k-mer Jaccard MaxMin sampler).
+    ``clustering.diversity.select_diverse``, a k-mer containment MaxMin
+    sampler on the same representation clustering uses — the marker protein
+    for a protein-alphabet run, else the nucleotide genome).
     """
     return getattr(result, "mode", "") == "global:count"
 

@@ -65,7 +65,9 @@ class GlobalMode(BaseMode):
         )
 
     def _run_count(self, sequences: list[Sequence]) -> RunResult:
-        selected = select_diverse(sequences, self.n_select, seed=self.seed)
+        selected = select_diverse(
+            sequences, self.n_select, seed=self.seed, cfg=self.cfg
+        )
         clusters = [
             Cluster(cluster_id=f"div_{i+1:06d}", representative=s)
             for i, s in enumerate(selected)
