@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import difflib
 import os
 import re
 from pathlib import Path
@@ -672,6 +673,123 @@ SEGMENTED_VIRUS_REQUIRED_FIELDS = ["expected_segments", "segments", "isolate_reg
 
 
 # ---------------------------------------------------------------------------
+# Unknown-key audit
+# ---------------------------------------------------------------------------
+#
+# repseq rejects config keys it doesn't recognise: a typo'd or misplaced key
+# is a HARD ERROR, not a silent no-op (a bench scientist who sets a key that's
+# quietly ignored has no way to discover the run didn't honour it). Two
+# cooperating mechanisms:
+#
+#   * ``_audit_unknown_keys`` walks the config against DEFAULTS, auditing the
+#     keys of every CLOSED-SCHEMA node — a node that is a NON-EMPTY dict in
+#     DEFAULTS. Empty dicts ({}) / None / lists in DEFAULTS mark user-keyed
+#     maps (``segmented.viruses``, ``phylo.partition.models``,
+#     ``phylo.rooting.outgroup_rank``) and spec collections
+#     (``cluster_protein``, ``polyprotein``, ...) whose contents are DATA, not
+#     schema — those are left to the spec validators.
+#   * the spec validators (``_validate_marker_entry``,
+#     ``_validate_segment_markers``, ``_validate_polyprotein_list``, and the
+#     segmented virus block) carry their own ``_ALLOWED_*_KEYS`` so a stray key
+#     INSIDE a list-entry / virus dict (e.g. ``whole_polyprotein_tree`` on a
+#     polyprotein spec — the bug this audit was built for) is caught too.
+#
+# Keys starting with ``_`` are always skipped: both pipeline-injected runtime
+# state (``_hmm_runtime``, ...) and the sanctioned channel for a user who
+# wants to stash an annotation key in their YAML.
+#
+# WHEN ADDING A CONFIG KEY: a key added to DEFAULTS is picked up by
+# ``_audit_unknown_keys`` automatically. A key added to a SPEC dict (marker /
+# segment-marker / polyprotein / peptide / virus) MUST also be added to the
+# matching ``_ALLOWED_*_KEYS`` set below, or valid configs using it are
+# rejected. ``tests/test_config.py`` asserts ``config/default_config.yaml``
+# still validates clean as a drift guard.
+
+# Top-level keys the CLI injects into ``cfg`` before validation that are not
+# in DEFAULTS (so the audit must not flag them as unknown).
+_AUDIT_IGNORE_KEYS: frozenset[str] = frozenset({"verbose"})
+
+# Renamed/removed keys that already carry a tailored migration message; the
+# generic audit skips them so the user sees the specific guidance rather than
+# a duplicate "unknown key" line.
+_RENAMED_CONFIG_PATHS: frozenset[str] = frozenset({"qc.length_filter"})
+
+_ALLOWED_MARKER_KEYS: frozenset[str] = frozenset({"name", "aliases", "hmms"})
+_ALLOWED_SEGMENT_MARKER_KEYS: frozenset[str] = frozenset({"aliases", "hmms"})
+_ALLOWED_POLYPROTEIN_SPEC_KEYS: frozenset[str] = frozenset(
+    {"name", "peptides", "cut_strategy", "motif_window_aa", "min_peptides_hit"}
+)
+_ALLOWED_PEPTIDE_KEYS: frozenset[str] = frozenset(
+    {"name", "hmm", "hmms", "cleavage_motif"}
+)
+_ALLOWED_VIRUS_KEYS: frozenset[str] = frozenset({
+    "expected_segments", "segments", "isolate_regex", "segment_regex",
+    "segment_aliases", "cluster_protein", "segment_markers", "extra_protein",
+    "expected_proteins_per_segment", "segment_lengths", "polyprotein",
+})
+
+
+def _did_you_mean(key: Any, allowed) -> str:
+    """Return a ``' — did you mean 'X'?'`` suffix for the nearest allowed key."""
+    hint = difflib.get_close_matches(
+        str(key), sorted(map(str, allowed)), n=1, cutoff=0.6
+    )
+    return f" — did you mean '{hint[0]}'?" if hint else ""
+
+
+def _spec_unknown_key_errors(
+    entry: Any, allowed: frozenset[str], path: str
+) -> list[str]:
+    """Flag keys on a spec dict that aren't in ``allowed`` (``_`` keys skipped).
+
+    Non-dict ``entry`` returns no errors — the caller's type check owns that.
+    """
+    if not isinstance(entry, dict):
+        return []
+    errs: list[str] = []
+    for key in entry:
+        if isinstance(key, str) and key.startswith("_"):
+            continue
+        if key not in allowed:
+            errs.append(
+                f"{path}: unknown key '{key}'{_did_you_mean(key, allowed)} "
+                f"(allowed: {', '.join(sorted(allowed))})"
+            )
+    return errs
+
+
+def _audit_unknown_keys(
+    node: Any, default_node: Any, path: str, errors: list[str]
+) -> None:
+    """Append an error for every key in ``node`` absent from ``default_node``.
+
+    Recurses only into sub-nodes that are NON-EMPTY dicts in DEFAULTS (closed
+    schemas); stops at empty dicts / None / lists (user-keyed maps + spec
+    collections, handled by the spec validators). ``_``-prefixed keys and the
+    CLI-injected ``_AUDIT_IGNORE_KEYS`` are skipped.
+    """
+    if not isinstance(node, dict) or not isinstance(default_node, dict):
+        return
+    allowed = set(default_node)
+    for key, value in node.items():
+        if isinstance(key, str) and (
+            key.startswith("_") or key in _AUDIT_IGNORE_KEYS
+        ):
+            continue
+        dotted = f"{path}.{key}" if path else str(key)
+        if key not in allowed:
+            if dotted in _RENAMED_CONFIG_PATHS:
+                continue
+            errors.append(
+                f"unknown config key '{dotted}'{_did_you_mean(key, allowed)}"
+            )
+            continue
+        dv = default_node[key]
+        if isinstance(dv, dict) and dv and isinstance(value, dict):
+            _audit_unknown_keys(value, dv, dotted, errors)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -886,6 +1004,7 @@ def _validate_marker_entry(entry: Any, path: str) -> list[str]:
             "{name, aliases?, hmms?}"
         )
         return errs
+    errs.extend(_spec_unknown_key_errors(entry, _ALLOWED_MARKER_KEYS, path))
     name = entry.get("name")
     if not isinstance(name, str) or not name.strip():
         errs.append(f"{path}: dict-form entry must include a non-empty 'name'")
@@ -934,6 +1053,9 @@ def _validate_segment_markers(
                 f"{prefix} must be a dict with 'aliases' and/or 'hmms' keys"
             )
             continue
+        errs.extend(
+            _spec_unknown_key_errors(spec, _ALLOWED_SEGMENT_MARKER_KEYS, prefix)
+        )
         aliases = spec.get("aliases", [])
         if not isinstance(aliases, list) or not all(
             isinstance(a, str) and a.strip() for a in aliases
@@ -987,6 +1109,9 @@ def _validate_polyprotein_list(entries: Any, path: str) -> list[str]:
                 f"{{name, peptides, cut_strategy?, ...}}"
             )
             continue
+        errs.extend(_spec_unknown_key_errors(
+            entry, _ALLOWED_POLYPROTEIN_SPEC_KEYS, ipath
+        ))
 
         name = entry.get("name")
         if not isinstance(name, str) or not name.strip():
@@ -1016,6 +1141,9 @@ def _validate_polyprotein_list(entries: Any, path: str) -> list[str]:
                         f"{{name, hmm, cleavage_motif?}}"
                     )
                     continue
+                errs.extend(_spec_unknown_key_errors(
+                    pep, _ALLOWED_PEPTIDE_KEYS, ppath
+                ))
                 pname = pep.get("name")
                 if not isinstance(pname, str) or not pname.strip():
                     errs.append(f"{ppath}.name must be a non-empty string")
@@ -1132,6 +1260,12 @@ def _validate_polyprotein_list(entries: Any, path: str) -> list[str]:
 def validate_config(cfg: dict[str, Any]) -> list[str]:
     """Return a list of validation error messages (empty = valid)."""
     errors: list[str] = []
+
+    # Reject unrecognised keys up front: a typo'd or misplaced key is a hard
+    # error, not a silent no-op. Closed-schema sections (non-empty dicts in
+    # DEFAULTS) are audited here; spec dicts (markers, peptides, polyprotein,
+    # the segmented virus block) are audited by the spec validators below.
+    _audit_unknown_keys(cfg, DEFAULTS, "", errors)
 
     # Genome length filter (non-segmented only). The old median-percent
     # filter (qc.length_filter) was removed in favour of explicit absolute
@@ -1252,6 +1386,10 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                 )
             else:
                 vdef = viruses[virus_name]
+                errors.extend(_spec_unknown_key_errors(
+                    vdef, _ALLOWED_VIRUS_KEYS,
+                    f"segmented.viruses.{virus_name}",
+                ))
                 for field in SEGMENTED_VIRUS_REQUIRED_FIELDS:
                     if field not in vdef:
                         errors.append(

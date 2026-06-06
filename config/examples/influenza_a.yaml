@@ -24,9 +24,9 @@ seed: 42
 
 qc:
   remove_duplicates: true
-  length_filter:
-    mode: median_percent
-    min_percent: 50
+  # For segmented viruses, per-segment nucleotide bounds go under
+  # segmented.viruses.<virus>.segment_lengths (see below); the whole-genome
+  # qc.genome_length_filter is non-segmented-only.
   ambiguous_threshold: 0.02
   annotation_filter:
     enabled: true

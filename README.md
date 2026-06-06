@@ -2027,10 +2027,9 @@ config for you. The most-changed settings:
 ```yaml
 qc:
   remove_duplicates: true
-  length_filter:
-    mode: median_percent
-    min_percent: 50
   ambiguous_threshold: 0.05
+  # genome_length_filter is non-segmented-only and opt-in (default off):
+  # genome_length_filter: {enabled: true, min: 1000, max: 50000}
 
 taxonomy:
   ncbi_email: you@institute.org   # NCBI asks for this; without it you'll be rate-limited
@@ -2047,6 +2046,21 @@ clustering:
 representative:
   priority: [refseq, reviewed_uniprot, longest]   # tie-break order for picking the "best"
 ```
+
+### Unknown keys are rejected
+
+repseq validates your config before doing any work and **aborts with a
+`[config error]`** if it finds a key it doesn't recognise — a typo
+(`ambiguous_threshhold`), a renamed/removed key, or a setting placed in the
+wrong section (for example a `phylo.per_protein` knob written onto a
+`clustering.polyprotein` spec). The message names the offending key, its full
+dotted path, and — when there's a close match — the key you probably meant.
+This is deliberate: a silently-ignored setting (the run quietly using the
+default for something you thought you'd changed) is worse than a loud stop.
+
+If you want to keep your own annotation/reminder key in the file, prefix it
+with an underscore (`_my_note: ...`) and repseq will leave it alone. To check a
+config without launching a run, use `repseq <mode> --dry-run -c your.yaml`.
 
 ### About `clustering.alphabet_for_clustering`
 

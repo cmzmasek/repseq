@@ -1,6 +1,12 @@
 # repseq default configuration
 # Copy and modify this file for your project.
 # Pass it to any command with: --config your_config.yaml
+#
+# Unknown keys are a HARD ERROR: repseq aborts before running if it finds a
+# key it doesn't recognise (a typo, a renamed key, or a setting in the wrong
+# section). The error names the key and suggests the one you likely meant.
+# Need a personal annotation key? Prefix it with "_" (e.g. _my_note:) and
+# repseq ignores it. Validate without running: repseq <mode> --dry-run -c ...
 
 cache_dir: ~/.repseq/cache
 temp_dir: /tmp/repseq

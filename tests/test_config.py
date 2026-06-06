@@ -914,3 +914,149 @@ def test_validate_config_rejects_unknown_extra_segments_action():
     cfg["segmented"]["extra_segments_action"] = "ignore"
     errs = validate_config(cfg)
     assert any("extra_segments_action" in e for e in errs)
+
+
+# ---------------------------------------------------------------------------
+# Unknown-key audit (a typo'd / misplaced key is a hard error)
+# ---------------------------------------------------------------------------
+
+def test_unknown_top_level_key_rejected():
+    cfg = load_config(None)
+    cfg["foo"] = [{"bar": True}]
+    errs = validate_config(cfg)
+    assert any("unknown config key 'foo'" in e for e in errs)
+
+
+def test_unknown_section_key_rejected_with_suggestion():
+    cfg = load_config(None)
+    cfg["phylo"]["per_protei"] = {}            # typo for per_protein
+    errs = validate_config(cfg)
+    assert any(
+        "unknown config key 'phylo.per_protei'" in e and "per_protein" in e
+        for e in errs
+    )
+
+
+def test_unknown_nested_closed_schema_key_rejected():
+    cfg = load_config(None)
+    cfg["hmm"]["default_eval"] = 1.0e-5        # typo for default_evalue
+    errs = validate_config(cfg)
+    assert any("unknown config key 'hmm.default_eval'" in e for e in errs)
+    assert any("default_evalue" in e for e in errs)
+
+
+def test_unknown_key_on_polyprotein_spec_rejected():
+    """The motivating bug: whole_polyprotein_tree belongs under
+    phylo.per_protein, not on a clustering.polyprotein spec."""
+    cfg = load_config(None)
+    cfg["clustering"]["polyprotein"] = [{
+        "name": "ORF1ab",
+        "whole_polyprotein_tree": True,        # silently ignored before
+        "peptides": [
+            {"name": "NSP1", "hmm": "A"},
+            {"name": "NSP2", "hmm": "B"},
+        ],
+    }]
+    errs = validate_config(cfg)
+    assert any(
+        "clustering.polyprotein[0]" in e
+        and "unknown key 'whole_polyprotein_tree'" in e
+        for e in errs
+    )
+
+
+def test_unknown_key_on_marker_spec_rejected():
+    cfg = load_config(None)
+    cfg["clustering"]["cluster_protein"] = [
+        {"name": "Spike", "hmms": ["CoV_S1"], "hmm": ["typo"]},  # 'hmm' singular
+    ]
+    errs = validate_config(cfg)
+    assert any(
+        "clustering.cluster_protein[0]" in e and "unknown key 'hmm'" in e
+        for e in errs
+    )
+
+
+def test_unknown_key_on_peptide_rejected():
+    cfg = load_config(None)
+    cfg["clustering"]["polyprotein"] = [{
+        "name": "ORF1ab",
+        "peptides": [
+            {"name": "NSP1", "hmm": "A", "motif": "GG"},  # typo for cleavage_motif
+            {"name": "NSP2", "hmm": "B"},
+        ],
+    }]
+    errs = validate_config(cfg)
+    assert any(
+        "peptides[0]" in e and "unknown key 'motif'" in e
+        and "cleavage_motif" in e
+        for e in errs
+    )
+
+
+def test_unknown_key_on_virus_block_rejected():
+    cfg = load_config(None)
+    cfg["segmented"] = {
+        "enabled": True, "virus": "fluA",
+        "viruses": {"fluA": {
+            "expected_segments": 1, "segments": ["HA"],
+            "isolate_regex": r"(?P<isolate>X)",
+            "segment_legnths": {},             # typo for segment_lengths
+        }},
+    }
+    errs = validate_config(cfg)
+    assert any(
+        "segmented.viruses.fluA" in e and "unknown key 'segment_legnths'" in e
+        for e in errs
+    )
+
+
+def test_underscore_prefixed_keys_skipped():
+    """The sanctioned annotation / runtime-state escape hatch."""
+    cfg = load_config(None)
+    cfg["_my_note"] = "anything"
+    cfg["qc"]["_reminder"] = "tighten later"
+    assert validate_config(cfg) == []
+
+
+def test_injected_verbose_key_not_flagged():
+    """cli.py sets cfg['verbose'] before validation; it is not in DEFAULTS."""
+    cfg = load_config(None)
+    cfg["verbose"] = True
+    assert validate_config(cfg) == []
+
+
+def test_user_keyed_maps_not_audited():
+    """Family labels / virus names / rank keys are DATA, not schema keys."""
+    cfg = load_config(None)
+    cfg["phylo"]["partition"]["models"] = {"L_RdRP": "LG+G4"}
+    cfg["phylo"]["rooting"]["method"] = "outgroup"
+    cfg["phylo"]["rooting"]["outgroup_rank"] = {"family": "Hantaviridae"}
+    cfg["segmented"] = {
+        "enabled": False,
+        "viruses": {"whatever_name_i_like": {
+            "expected_segments": 1, "segments": ["S"],
+            "isolate_regex": r"(?P<isolate>X)",
+        }},
+    }
+    assert validate_config(cfg) == []
+
+
+def test_renamed_length_filter_single_message_not_doubled():
+    """qc.length_filter gets its tailored migration message, NOT also a
+    generic 'unknown config key' line."""
+    cfg = load_config(None)
+    cfg["qc"]["length_filter"] = {"mode": "median_percent"}
+    errs = validate_config(cfg)
+    assert any("renamed to qc.genome_length_filter" in e for e in errs)
+    assert not any("unknown config key 'qc.length_filter'" in e for e in errs)
+
+
+def test_shipped_example_configs_validate_clean():
+    """Drift guard: the documented schema and the segmented HMM example must
+    pass the unknown-key audit. Add a key to DEFAULTS or a spec without
+    updating the matching _ALLOWED_*_KEYS set and this fails."""
+    config_dir = Path(__file__).resolve().parent.parent / "config"
+    for rel in ("default_config.yaml", "examples/alphainfluenzavirus_hmm.yaml"):
+        cfg = load_config(config_dir / rel)
+        assert validate_config(cfg) == [], f"{rel} did not validate clean"
