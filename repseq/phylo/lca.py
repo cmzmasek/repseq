@@ -229,30 +229,35 @@ def annotate_internal_nodes(
 # ---------------------------------------------------------------------------
 
 def keep_deepest_labels(tree: Tree) -> None:
-    """For each LCA name, keep it only on the deepest (largest) clade.
+    """Keep each LCA label on the crown of every maximal same-name run.
 
-    Walks internals by descending terminal count (the crown of each
-    monophyletic group is processed first); subsequent nested
-    duplicates have their ``_lca_name`` cleared so the label appears
-    once per monophyletic group instead of decorating every
-    intermediate node.
+    A labelled internal node's name is cleared only when an **ancestor**
+    already carries the same name — i.e. it is a nested repeat inside one
+    clade. Two *disjoint* clades that resolve to the same taxon (a
+    non-monophyletic taxon) therefore EACH keep their label, so the split is
+    visible on the tree rather than collapsed to a single occurrence. A
+    monophyletic taxon is still labelled exactly once, on its crown
+    (the topmost node of the run, which is also the largest — unchanged from
+    the previous size-based behaviour for that case).
+
+    Iterative depth-first walk carrying the set of label names seen on the
+    path from the root, so it is safe on deep / ladderized trees (no Python
+    recursion limit) and deterministic (the keep/clear decision depends only
+    on ancestry, never on visit order).
     """
-    internals = [
-        n for n in tree.get_nonterminals()
-        if getattr(n, "_lca_name", None)
-    ]
-    # Largest clade first; ties resolved by id() for determinism.
-    internals.sort(
-        key=lambda c: (-len(c.get_terminals()), id(c)),
-    )
-    seen: set[str] = set()
-    for node in internals:
-        name = node._lca_name
-        if name in seen:
-            node._lca_name = None
-            node._lca_rank = None
-        else:
-            seen.add(name)
+    stack: list[tuple[Clade, frozenset[str]]] = [(tree.root, frozenset())]
+    while stack:
+        clade, ancestor_names = stack.pop()
+        name = getattr(clade, "_lca_name", None)
+        child_ancestors = ancestor_names
+        if name:
+            if name in ancestor_names:
+                clade._lca_name = None
+                clade._lca_rank = None
+            else:
+                child_ancestors = ancestor_names | {name}
+        for child in clade.clades:
+            stack.append((child, child_ancestors))
 
 
 # ---------------------------------------------------------------------------

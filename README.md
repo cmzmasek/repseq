@@ -321,6 +321,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_extra_protein/` | `--per-protein-phylo` + `extra_protein:` declared | Same shape, accessory-protein trees (kept out of the incongruence table by design). |
 | `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment (each with a PDF/PNG figure by default), from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
 | `{prefix}_msa_conservation.tsv` | any phylo step that wrote an MSA (default on; `phylo.conservation.enabled`) | One conservation number per alignment written this run (genome, partition families + supermatrix, per-protein, extra-protein, polyprotein peptides, per-segment NT). Mean per-column **Jensen-Shannon divergence to a residue background** (Capra & Singh 2007), **Henikoff-weighted** + **gap-penalised**. Columns: `msa, role, label, alphabet, trimmed, n_seqs, n_sites, mean_conservation, mean_conservation_core`. v0.43.0. |
+| `{prefix}_monophyly.tsv` | any phylo step that built a tree (always on) | Per-taxon monophyly status, one row per (tree, rank, taxon): `monophyletic` / `paraphyletic` / `polyphyletic` plus the counts behind the call. Swept off every annotated `*_tree.xml` (genome + per-protein/extra/segment/polyprotein/pre-cluster). A taxon monophyletic on the genome tree but not on a marker tree is the per-marker reassortment/recombination signal — the taxon-resolved companion to `_incongruence.tsv`. Columns: `tree, rank, taxon, n_leaves, status, n_clusters, n_intruders, intruder_clusters, intruder_taxa`. v0.54.0. |
 | `{prefix}_hmm_diagnostic.tsv` | when the HMM tier ran AND a spec declares `hmms:` | One row per (representative, marker spec, declared HMM profile): `hit` T/F, `best_dom_evalue`, `best_dom_score`, `best_coverage`, `ga_cutoff`, `cutoff_used`, `passing`. Surfaces near-miss patterns the binary gate hides ("65 isolates barely missed the cutoff at E=2e-5"). v0.26.0. |
 | `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations). Leads with an **"Analysis at a glance"** table (v0.41.0) stating the run's actual decisions — dataset type, input→representative counts, clustering substrate + alphabet + tool, selection mode, whole-genome tree substrate, per-marker/per-segment tree presence, taxonomy review. The **Clustering substrate** and **Whole-genome tree** cells name the actual marker(s) — the canonical `name:`, not the aliases/synonyms — and, when the HMM tier ran, each marker's domain architecture (`name (HMM: tok OR tok)`); single-marker mode lists them in priority order, concat joins with `+`, segmented prefixes each with its segment. v0.42.0. |
 | `{prefix}_config_repseq<ver>.yaml` | every run | **Sanitized effective-config snapshot** (v0.42.0): the full run-time config — every setting resolved, defaults filled in — with all comments stripped and the NCBI credentials (`ncbi_email` / `ncbi_api_key`) blanked to `null`. Re-runnable as-is via `repseq <mode> -c <this-file>`. Filename embeds the repseq version (periods→underscores), e.g. `cov_config_repseq0_42_0.yaml`. |
@@ -1670,6 +1671,52 @@ ignores ragged ends).
   repseq reports the JSD score rather than Valdar's, but this is the
   reference for the broader method space if you need a substitution-
   similarity-aware measure.
+
+### Per-taxon monophyly — `{prefix}_monophyly.tsv` (v0.54.0+)
+
+For **every tree a run builds** (whole-genome, per-protein/extra/segment/
+polyprotein, pre-cluster), repseq classifies how each taxon at each rank sits
+on that rooted tree and collects the results into one table. Like the
+conservation and incongruence reports it's a decoupled, always-on sweep — it
+reads the annotated `*_tree.xml` files, so it needs no flag and simply writes
+nothing if no tree was built.
+
+**Status (per taxon, per rank, per tree):**
+
+- **monophyletic** — the taxon's members form exactly one clade (their MRCA
+  subtends only members).
+- **paraphyletic** — non-monophyletic, and the foreign leaves inside the
+  members' MRCA span form a **single** excluded clade (the taxon is an
+  ancestral grade with one derived group carved out).
+- **polyphyletic** — non-monophyletic, and the foreign leaves form **two or
+  more** separate clades (the taxon is interrupted in several places).
+
+Each rank is judged **only among leaves classified at that rank** — a leaf
+with no genus is neither a member nor an intruder when genus monophyly is
+assessed, so an annotation gap never masquerades as non-monophyly. Taxa with
+fewer than two classified leaves are omitted (a singleton has no meaningful
+status).
+
+**Why it's useful.** A taxon that's monophyletic on the whole-genome tree but
+**not** on a marker tree is the per-marker **reassortment / recombination**
+signal — this is the taxon-resolved companion to `_incongruence.tsv` (which
+gives whole-tree-vs-tree RF distances). It also operationalises the
+non-monophyly that the tree's internal labels now show (a split taxon is
+labelled on each of its clades).
+
+**The para/poly tag is a documented heuristic.** Monophyletic-vs-not is an
+exact MRCA test, but the para/poly split is definition-dependent; repseq keys
+it on `intruder_clusters` (1 → paraphyletic, ≥2 → polyphyletic), the standard
+topology-only convention. A taxon with several nested carve-outs can be
+paraphyletic under the strict cladistic definition yet flagged polyphyletic
+here, so the unambiguous counts are reported alongside the tag for you to
+judge.
+
+**Columns:** `tree` (path relative to the output dir), `rank`, `taxon`,
+`n_leaves` (classified members), `status`, `n_clusters` (separate in-group
+blocks), `n_intruders` (foreign classified leaves in the MRCA span),
+`intruder_clusters` (separate foreign clades — the para/poly key), and
+`intruder_taxa` (the intruding taxon names, `;`-joined).
 
 ---
 

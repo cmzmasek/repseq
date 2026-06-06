@@ -1977,6 +1977,22 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
             out_files.append(cons_tsv)
     except Exception as exc:
         click.echo(f"[MSA conservation report skipped] {exc}", err=True)
+    # Per-taxon monophyly report (2J) — a post-hoc sweep over every annotated
+    # *_tree.xml this run, classifying each taxon (per rank, per tree) as
+    # monophyletic / paraphyletic / polyphyletic. Reads the always-retained
+    # phyloXML (so it's independent of the Newick drop below). A taxon
+    # monophyletic on the whole-genome tree but not on a marker tree is the
+    # reassortment/recombination signal; pairs with _incongruence.tsv.
+    try:
+        from .phylo.monophyly import write_monophyly_report
+        out_dir = Path(cfg["output"]["dir"])
+        prefix = cfg["output"].get("prefix", "repseq")
+        mono_tsv = write_monophyly_report(out_dir, prefix)
+        if mono_tsv is not None:
+            out_files.append(mono_tsv)
+            click.echo(f"Wrote per-taxon monophyly report: {mono_tsv.name}")
+    except Exception as exc:
+        click.echo(f"[monophyly report skipped] {exc}", err=True)
     # Graphical tree figures (2H). Render a PDF + PNG of every phyloXML tree
     # built this run — done HERE, after every phylo step has written its
     # *_tree.xml, so one sweep covers all tree types. ON by default

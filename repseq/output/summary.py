@@ -1341,6 +1341,23 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             f"*not* use, see {_CITATIONS['valdar']}.\n"
         )
     if msa_ran:
+        paragraphs.append(
+            "**Per-taxon monophyly.** Every annotated tree this run was swept "
+            "into `{prefix}_monophyly.tsv`, classifying each taxon (per rank, "
+            "per tree) as **monophyletic**, **paraphyletic** (non-monophyletic "
+            "with the foreign leaves inside its span forming a single excluded "
+            "clade), or **polyphyletic** (foreign leaves in two or more "
+            "separate clades). Each rank is judged only among leaves "
+            "classified at that rank, so an annotation gap is never read as "
+            "non-monophyly. A taxon monophyletic on the whole-genome tree but "
+            "not on a marker tree is the per-marker reassortment / "
+            "recombination signal — the taxon-resolved companion to the "
+            "incongruence table. The para/poly split is a topology-only "
+            "heuristic (keyed on `intruder_clusters`); the supporting counts "
+            "(`n_clusters`, `n_intruders`, `intruder_clusters`) are reported "
+            "alongside so the call can be checked by hand.\n"
+        )
+    if msa_ran:
         if keep_newick:
             paragraphs.append(
                 "**Tree file formats.** Each tree was written both as "

@@ -521,6 +521,21 @@ def test_render_summary_msa_conservation_paragraph(make_seq, tmp_path):
     assert "MSA conservation scoring" not in md_off
 
 
+def test_render_summary_monophyly_paragraph(make_seq, tmp_path):
+    """A phylo step yields the per-taxon monophyly paragraph; no tree → none."""
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"tool": "fasttree"}
+    md_on = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True,
+    )
+    assert "Per-taxon monophyly" in md_on
+    assert "{prefix}_monophyly.tsv" in md_on
+    assert "polyphyletic" in md_on
+
+    md_off = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "Per-taxon monophyly" not in md_off
+
+
 def test_render_summary_tree_figures_paragraph_on_by_default(make_seq, tmp_path):
     """phylo.pdf defaults to true → the Tree figures paragraph names the
     PDF + PNG outputs and the knob."""

@@ -221,6 +221,49 @@ def test_keep_deepest_preserves_distinct_labels():
     assert names == {"Hantaviridae", "Orthohantavirus", "Hantaan virus"}
 
 
+def test_keep_deepest_preserves_disjoint_clades_of_same_taxon():
+    """A non-monophyletic taxon split across two separate clades keeps its
+    label on BOTH crowns (the old global dedup kept only the larger one)."""
+    tree = _tree("((A:0.1,B:0.1):0.2,(C:0.1,D:0.1):0.2):0.0;")
+    root = tree.root
+    root._lca_name = "Betacoronavirus"; root._lca_rank = "genus"
+    left, right = root.clades            # the two cherries
+    left._lca_name = "Sarbecovirus"; left._lca_rank = "subgenus"
+    right._lca_name = "Sarbecovirus"; right._lca_rank = "subgenus"
+    keep_deepest_labels(tree)
+    sarbeco = [
+        n for n in tree.get_nonterminals()
+        if getattr(n, "_lca_name", None) == "Sarbecovirus"
+    ]
+    assert len(sarbeco) == 2                       # both disjoint clades kept
+    assert getattr(root, "_lca_name", None) == "Betacoronavirus"
+
+
+def test_keep_deepest_clears_nested_repeat_inside_a_disjoint_clade():
+    """Within one of two disjoint same-taxon clades, a nested repeat of the
+    label is still cleared — only the crown of each clade survives."""
+    # Left clade has a nested ((A,B),C) all "Sarbecovirus"; right cherry (D,E)
+    # is a second, disjoint "Sarbecovirus"; root is the broader genus.
+    tree = _tree("(((A:0.1,B:0.1):0.1,C:0.2):0.2,(D:0.1,E:0.1):0.3):0.0;")
+    root = tree.root
+    root._lca_name = "Betacoronavirus"; root._lca_rank = "genus"
+    left = root.clades[0]                 # ((A,B),C)
+    left._lca_name = "Sarbecovirus"; left._lca_rank = "subgenus"
+    left_inner = left.clades[0]           # (A,B) nested inside left
+    left_inner._lca_name = "Sarbecovirus"; left_inner._lca_rank = "subgenus"
+    right = root.clades[1]                # (D,E) disjoint
+    right._lca_name = "Sarbecovirus"; right._lca_rank = "subgenus"
+    keep_deepest_labels(tree)
+    sarbeco = [
+        n for n in tree.get_nonterminals()
+        if getattr(n, "_lca_name", None) == "Sarbecovirus"
+    ]
+    # left crown + right crown kept; the nested (A,B) repeat cleared.
+    assert len(sarbeco) == 2
+    assert left in sarbeco and right in sarbeco
+    assert getattr(left_inner, "_lca_name", None) is None
+
+
 # ---------------------------------------------------------------------------
 # Same-species suppression
 # ---------------------------------------------------------------------------
