@@ -25,6 +25,16 @@ _INFLUENZA_RE = re.compile(
     r"(?P<year>\d{4})(?:\((?P<subtype>[^)]+)\))?"
 )
 
+# Strict influenza HA/NA subtype: "H" + 1-2 digits, optionally "N" + 1-2
+# digits (H5N1, H3N2, H5). The strain regex above captures EVERYTHING inside
+# the trailing parens (``[^)]+``), so the captured text is validated against
+# this with ``fullmatch`` before it is accepted — otherwise arbitrary
+# parenthetical notes after the year (e.g. "(mixed, partial sequence)") would
+# be mistaken for a subtype. Deliberately strict: variant tags like
+# "H1N1pdm09" are not accepted here (the authoritative subtype still comes
+# from the GenBank /serotype path); this fallback only fills the clean case.
+_SUBTYPE_RE = re.compile(r"H\d{1,2}(?:N\d{1,2})?", re.IGNORECASE)
+
 # Generic year extraction from strain or description
 _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 
@@ -49,6 +59,13 @@ def _parse_strain_label(seq: Sequence) -> dict[str, Any]:
             result["country"] = m.group("location").replace("_", " ")
         if not seq.collection_date:
             result["collection_date"] = m.group("year")
+        if not seq.subtype:
+            sub = (m.group("subtype") or "").strip()
+            # Accept only a strict HA/NA subtype — the capture group grabbed
+            # everything in the parens, so fullmatch ensures arbitrary text
+            # (e.g. "mixed, partial sequence") is never taken as a subtype.
+            if sub and _SUBTYPE_RE.fullmatch(sub):
+                result["subtype"] = sub.upper()
         return result
 
     # Generic year

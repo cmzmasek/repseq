@@ -47,6 +47,46 @@ def test_parse_strain_label_influenza_extracts_host_country_year(make_seq):
     assert out.get("host") == "duck"
     assert out.get("country") == "Hong Kong"
     assert out.get("collection_date") == "1997"
+    assert out.get("subtype") == "H5N1"
+
+
+def test_parse_strain_label_influenza_subtype_uppercased(make_seq):
+    s = make_seq("a", "ACGT", header="A/duck/Hong_Kong/1/1997(h5n1)")
+    s.description = s.header
+    assert _parse_strain_label(s).get("subtype") == "H5N1"
+
+
+def test_parse_strain_label_influenza_ha_only_subtype(make_seq):
+    s = make_seq("a", "ACGT", header="A/duck/Hong_Kong/1/1997(H5)")
+    s.description = s.header
+    assert _parse_strain_label(s).get("subtype") == "H5"
+
+
+def test_parse_strain_label_rejects_non_subtype_parenthetical(make_seq):
+    """Arbitrary text in the trailing parens must NOT be taken as a subtype —
+    host/country/year still parse, but `subtype` is absent."""
+    s = make_seq(
+        "a", "ACGT",
+        header="A/duck/Hong_Kong/1/1997(mixed, partial sequence)",
+    )
+    s.description = s.header
+    out = _parse_strain_label(s)
+    assert out.get("country") == "Hong Kong"
+    assert out.get("collection_date") == "1997"
+    assert "subtype" not in out
+
+
+def test_parse_strain_label_does_not_overwrite_existing_subtype(make_seq):
+    s = make_seq("a", "ACGT", header="A/duck/Hong_Kong/1/1997(H5N1)")
+    s.description = s.header
+    s.subtype = "H3N2"  # already set → fallback must not overwrite
+    assert "subtype" not in _parse_strain_label(s)
+
+
+def test_parse_strain_label_no_parens_no_subtype(make_seq):
+    s = make_seq("a", "ACGT", header="A/duck/Hong_Kong/1/1997")
+    s.description = s.header
+    assert "subtype" not in _parse_strain_label(s)
 
 
 def test_parse_strain_label_generic_year_only(make_seq):
