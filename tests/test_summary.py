@@ -708,6 +708,58 @@ def test_render_summary_incongruence_omitted_when_disabled(make_seq, tmp_path):
     assert "Robinson-Foulds" not in md
 
 
+def _poly_cfg(tmp_path, *, whole_tree=False, newick=False):
+    cfg = _base_cfg(tmp_path)
+    cfg["_hmm_runtime"] = {"active": True}
+    cfg["clustering"]["polyprotein"] = [{
+        "name": "ORF1ab",
+        "peptides": [
+            {"name": "nsp3", "hmm": "Macro"},
+            {"name": "nsp12", "hmm": "RdRP_1"},
+        ],
+    }]
+    cfg["phylo"] = {
+        "tool": "fasttree",
+        "newick": newick,
+        "per_protein": {"min_taxa": 3, "whole_polyprotein_tree": whole_tree},
+    }
+    return cfg
+
+
+def test_render_summary_polyprotein_section_renders(make_seq, tmp_path):
+    """Regression: the polyprotein section referenced an out-of-scope
+    keep_newick and NameError'd whenever per_protein_ran=True with a spec —
+    soft-failed, so the whole _summary.md silently went missing. It must
+    render, and name the always-on whole-polyprotein FASTA."""
+    cfg = _poly_cfg(tmp_path)
+    md = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], per_protein_ran=True,
+    )
+    assert "## Polyprotein cutting" in md
+    assert "tree was also built per peptide" in md
+    assert "whole-polyprotein FASTA" in md
+    assert "{prefix}_<spec>_polyprotein.fasta" in md
+
+
+def test_render_summary_whole_polyprotein_tree_prose_when_on(make_seq, tmp_path):
+    cfg = _poly_cfg(tmp_path, whole_tree=True)
+    md = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], per_protein_ran=True,
+    )
+    assert "whole-polyprotein tree" in md
+    assert "_polyprotein_tree.xml" in md
+    assert "across the whole polyprotein end-to-end" in md
+
+
+def test_render_summary_whole_polyprotein_tree_prose_absent_when_off(make_seq, tmp_path):
+    cfg = _poly_cfg(tmp_path, whole_tree=False)
+    md = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], per_protein_ran=True,
+    )
+    assert "## Polyprotein cutting" in md
+    assert "whole-polyprotein tree" not in md
+
+
 def test_render_summary_taxonomy_review_described_when_enabled(make_seq, tmp_path):
     cfg = _base_cfg(tmp_path)
     cfg["phylo"] = {

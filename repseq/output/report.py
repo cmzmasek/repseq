@@ -767,7 +767,10 @@ def write_polyprotein_outputs(
     written: list[Path] = []
 
     for spec in specs:
-        records: list[tuple[Sequence, Optional[str], list]] = []
+        # 4-tuple: (parent_seq, isolate_id, sliced_peptides, parent_cds). The
+        # parent CDS (whole polyprotein) is kept so we can emit the always-on
+        # whole-polyprotein FASTA below, parallel to the per-peptide FASTAs.
+        records: list[tuple[Sequence, Optional[str], list, Optional[dict]]] = []
         for rep in result.representatives:
             proteins = _polyprotein_proteins(rep, spec.segment)
             parent_seq = _polyprotein_parent_seq(rep, spec.segment)
@@ -776,10 +779,10 @@ def write_polyprotein_outputs(
                 parts = rep.id.split("|")
                 if len(parts) > 1:
                     isolate_id = parts[1]
-            _parent_cds, sliced = slice_polyprotein(
+            parent_cds, sliced = slice_polyprotein(
                 proteins, spec, overlap_tolerance=overlap_tol,
             )
-            records.append((parent_seq, isolate_id, sliced))
+            records.append((parent_seq, isolate_id, sliced, parent_cds))
 
         # The audit TSV is always written (even when zero sequences came
         # out) so the user sees the per-rep status decisions.
@@ -792,7 +795,7 @@ def write_polyprotein_outputs(
                 "length_aa\tcut_method_actual\tmatched_architecture\t"
                 "status\tnote\n"
             )
-            for parent_seq, iso_id, sliced_list in records:
+            for parent_seq, iso_id, sliced_list, _pcds in records:
                 effective_iso = iso_id or parent_seq.accession or parent_seq.id
                 for s in sliced_list:
                     fh.write(
@@ -818,7 +821,7 @@ def write_polyprotein_outputs(
         peptide_to_records: dict[str, list[tuple[Sequence, Optional[str], object]]] = {
             pep.name: [] for pep in spec.peptides
         }
-        for parent_seq, iso_id, sliced_list in records:
+        for parent_seq, iso_id, sliced_list, _pcds in records:
             for s in sliced_list:
                 if s.status in ("ok", "overlap") and s.sequence:
                     peptide_to_records[s.peptide_name].append((parent_seq, iso_id, s))
@@ -835,6 +838,29 @@ def write_polyprotein_outputs(
                         fh, sliced, spec.name, parent_seq, iso_id,
                     )
             written.append(path)
+
+        # Whole-polyprotein FASTA: one record per rep carrying the parent
+        # CDS (the entire polyprotein, e.g. all of ORF1ab), parallel to the
+        # per-peptide FASTAs above and using the same bracket-tag header
+        # writer. Always-on — the matching whole-polyprotein TREE (with the
+        # full-length domain architecture in its phyloXML) is the opt-in
+        # half (phylo.per_protein.whole_polyprotein_tree). Skipped when no
+        # rep yielded a usable parent CDS (every record was no_parent_cds).
+        whole_bucket = [
+            (parent_seq, iso_id, parent_cds)
+            for parent_seq, iso_id, _sl, parent_cds in records
+            if parent_cds is not None and parent_cds.get("sequence")
+        ]
+        if whole_bucket:
+            whole_path = (
+                sub_dir / f"{prefix}_{spec.file_basename}_polyprotein.fasta"
+            )
+            with open(whole_path, "w") as fh:
+                for parent_seq, iso_id, parent_cds in whole_bucket:
+                    _write_protein_fasta_record(
+                        fh, parent_cds, parent_seq, iso_id,
+                    )
+            written.append(whole_path)
 
     return written
 

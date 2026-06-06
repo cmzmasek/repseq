@@ -101,6 +101,65 @@ def _picornavirus_spec(strategy: str) -> PolyproteinSpec:
     )
 
 
+def _nsp_polyprotein_rep(rid: str, accent: str):
+    """A rep carrying a multidomain polyprotein: CoV_NSP8 (N-half) + CoV_NSP12
+    (C-half), separated by an LQ cleavage motif. Shared by the whole-polyprotein
+    FASTA + tree tests; mirrors the peptide-tree fixture."""
+    from repseq.models import Sequence, SequenceType
+    poly = (
+        "M" + ("A" + accent) * 60   # NSP8 region (~120 aa)
+        + "LQ" +
+        "G" + ("B" + accent) * 60   # NSP12 region (~120 aa)
+    )
+    n_len = len(poly)
+    return Sequence(
+        id=rid, header=rid, sequence="ACGT" * n_len,
+        seq_type=SequenceType.NUCLEOTIDE, accession=rid,
+        organism=f"Test virus {rid}",
+        proteins=[{
+            "protein_id": f"YP_{rid}.1",
+            "product": "polyprotein",
+            "length": n_len,
+            "sequence": poly,
+            "hmm_hits": [
+                _hit("CoV_NSP8", 1, 121),
+                _hit("CoV_NSP12", 124, n_len),
+            ],
+        }],
+    )
+
+
+def _nsp_poly_cfg(whole_tree: bool = False) -> dict:
+    """Config for the whole-polyprotein tests: one P1 spec with NSP8 + NSP12
+    peptides, FastTree, ``whole_polyprotein_tree`` toggleable."""
+    return {
+        "_hmm_runtime": {"active": True},
+        "clustering": {
+            "polyprotein": [{
+                "name": "P1",
+                "peptides": [
+                    {"name": "NSP8", "hmm": "CoV_NSP8"},
+                    {"name": "NSP12", "hmm": "CoV_NSP12", "cleavage_motif": "LQ"},
+                ],
+                "min_peptides_hit": 2,
+            }]
+        },
+        "segmented": {"enabled": False},
+        "hmm": {"enabled": True, "multidomain_overlap_tolerance": 30},
+        "phylo": {
+            "tool": "fasttree",
+            "per_protein": {
+                "min_taxa": 3,
+                "mafft": {"extra_args": []},
+                "whole_polyprotein_tree": whole_tree,
+            },
+            "coloring": {"enabled": False},
+            "lca": {"enabled": False},
+            "rooting": {"method": "midpoint"},
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # identify_parent_cds
 # ---------------------------------------------------------------------------
@@ -782,6 +841,76 @@ class TestMultidomainPeptideTokens:
         nwks = sorted(p.name for p in sub.glob("*.nwk"))
         assert nwks == ["P1_NSP12_tree.nwk", "P1_NSP8_tree.nwk"]
         assert any(p.name.endswith("_tree.xml") for p in written)
+
+    def test_whole_polyprotein_fasta_always_written(self, tmp_path):
+        """The unaligned whole-polyprotein FASTA is written by
+        write_polyprotein_outputs regardless of the tree knob — parallel to
+        the per-peptide FASTAs, no binaries needed."""
+        from repseq.models import RunResult
+        from repseq.output.report import write_polyprotein_outputs
+
+        reps = [_nsp_polyprotein_rep("R001", "X"),
+                _nsp_polyprotein_rep("R002", "Y")]
+        result = RunResult(mode="test", representatives=reps)
+        written = write_polyprotein_outputs(
+            result, _nsp_poly_cfg(), tmp_path, "test",
+        )
+
+        whole = tmp_path / "test_polyprotein" / "test_P1_polyprotein.fasta"
+        assert whole.exists()
+        assert whole in written
+        text = whole.read_text()
+        # One record per rep; body is the whole polyprotein (parent CDS).
+        assert text.count(">") == 2
+        assert "YP_R001.1" in text and "YP_R002.1" in text
+        # Per-peptide FASTAs are written alongside it (parallel outputs).
+        assert (tmp_path / "test_polyprotein" / "test_P1_NSP8.fasta").exists()
+
+    def test_whole_polyprotein_tree_off_by_default(self, tmp_path):
+        """Without the knob, no whole-polyprotein tree is built; the peptide
+        trees still are."""
+        import shutil as _shutil
+        if not _shutil.which("mafft"):
+            pytest.skip("mafft not on PATH")
+        if not (_shutil.which("FastTree") or _shutil.which("fasttree")):
+            pytest.skip("FastTree not on PATH")
+        from repseq.phylo.per_protein import run_polyprotein_phylogeny
+
+        reps = [_nsp_polyprotein_rep(r, a)
+                for r, a in (("R001", "X"), ("R002", "Y"), ("R003", "Z"))]
+        run_polyprotein_phylogeny(
+            reps, _nsp_poly_cfg(whole_tree=False), tmp_path, "test",
+        )
+        sub = tmp_path / "test_polyprotein"
+        assert not (sub / "P1_polyprotein_tree.xml").exists()
+        assert (sub / "P1_NSP8_tree.xml").exists()  # peptide trees still built
+
+    def test_whole_polyprotein_tree_on_emits_full_domain_architecture(self, tmp_path):
+        """With the knob on, the whole-polyprotein tree is built and its
+        phyloXML carries a <domain_architecture> spanning BOTH HMM domains
+        end-to-end (vs a single-peptide box on a peptide tree)."""
+        import shutil as _shutil
+        if not _shutil.which("mafft"):
+            pytest.skip("mafft not on PATH")
+        if not (_shutil.which("FastTree") or _shutil.which("fasttree")):
+            pytest.skip("FastTree not on PATH")
+        from repseq.phylo.per_protein import run_polyprotein_phylogeny
+
+        reps = [_nsp_polyprotein_rep(r, a)
+                for r, a in (("R001", "X"), ("R002", "Y"), ("R003", "Z"))]
+        written = run_polyprotein_phylogeny(
+            reps, _nsp_poly_cfg(whole_tree=True), tmp_path, "test",
+        )
+        sub = tmp_path / "test_polyprotein"
+        whole_xml = sub / "P1_polyprotein_tree.xml"
+        assert whole_xml.exists()
+        assert whole_xml in written
+        xml = whole_xml.read_text()
+        assert "<domain_architecture" in xml
+        # The whole-CDS diagram shows BOTH domains, not just one peptide.
+        assert "CoV_NSP8" in xml and "CoV_NSP12" in xml
+        # The peptide trees are still built too.
+        assert (sub / "P1_NSP8_tree.xml").exists()
 
     def test_slice_multidomain_peptide_emits_full_footprint(self):
         from repseq.polyprotein.slicer import slice_polyprotein

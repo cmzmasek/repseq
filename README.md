@@ -226,7 +226,7 @@ your FASTA file(s)
     • all proteins of each representative (one big AA FASTA + per-CDS TSV)
     • one AA FASTA per declared marker        →  {prefix}_per_protein_fasta/
     • one AA FASTA per declared extra_protein →  {prefix}_extra_protein_fasta/
-    • mature peptides for declared polyproteins →  {prefix}_polyprotein/        (peptide FASTAs + audit TSV)
+    • mature peptides for declared polyproteins →  {prefix}_polyprotein/        (peptide + whole-polyprotein FASTAs + audit TSV)
     • per-rep metadata spreadsheet
     • per-stratum + per-cluster + per-drop TSVs
     • taxonomic diversity report              →  {prefix}_taxonomic_report.txt
@@ -288,6 +288,8 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_per_protein_fasta/{prefix}_<family>.fasta` | any run with `cluster_protein` / `segment_markers` declared | Unaligned per-marker protein FASTA, one CDS per rep carrying that marker (always-on since v0.22.0). |
 | `{prefix}_extra_protein_fasta/{prefix}_<name>.fasta` | any run with `extra_protein:` declared | Same shape, for accessory proteins that aren't required everywhere (v0.22.0). |
 | `{prefix}_polyprotein/{prefix}_<spec>_<peptide>.fasta` + `{prefix}_<spec>_peptides.tsv` | any run with `polyprotein:` declared and HMM tier active | Mature peptides sliced from each representative's polyprotein CDS, one FASTA per peptide of each spec, plus an audit TSV recording every (rep × peptide) attempt with status (`ok` / `missing` / `out_of_order` / `overlap` / `no_parent_cds`). v0.33.0. |
+| `{prefix}_polyprotein/{prefix}_<spec>_polyprotein.fasta` | any run with `polyprotein:` declared and HMM tier active | Unaligned **whole-polyprotein** FASTA — the entire parent CDS per representative, parallel to the per-peptide FASTAs. v0.50.0. |
+| `{prefix}_polyprotein/{prefix}_<spec>_polyprotein_tree.{xml,pdf,png}` (+ `_msa.fasta`, `_tree_id_map.tsv`) | `--per-protein-phylo` + `phylo.per_protein.whole_polyprotein_tree` | **Whole-polyprotein tree** — one tree per spec on the entire polyprotein CDS; its phyloXML `<domain_architecture>` shows every HMM domain across the whole polyprotein end-to-end. Off by default. v0.50.0. |
 | `{prefix}_representatives_protein.fasta` | when `alphabet_for_clustering: protein` (default) | The AA strings actually fed into the clusterer. |
 | `{prefix}_taxonomic_report.txt` | every run | Per-rank diversity table: distinct taxa before vs after clustering. |
 | `{prefix}_protein_taxonomic_report.txt` | any run with `cluster_protein` / `segment_markers` / `extra_protein` declared | Per-rank protein coverage + AA length statistics (v0.22.0). |
@@ -2542,6 +2544,13 @@ date, length, parent) plus polyprotein-specific tags:
 `[peptide_range_aa=<from>-<to>]`, `[cut_method=<actual>]`,
 `[matched_arch=<token>]`.
 
+`{prefix}_polyprotein/{prefix}_<spec>_polyprotein.fasta` — the **whole
+polyprotein** FASTA: the entire parent CDS (amino acids) for every
+representative carrying it, one record each, with the same bracket-tag
+headers as the per-peptide FASTAs. Always written (parallel to the
+per-peptide FASTAs) so you can re-align / re-tree the whole-polyprotein
+set yourself; independent of the `whole_polyprotein_tree` knob below.
+
 `{prefix}_polyprotein/{prefix}_<spec>_peptides.tsv` — audit TSV, one row
 per (representative × peptide) attempt: `isolate_id`, `peptide_name`,
 `parent_accession`, `parent_protein_id`, `range_aa_from`, `range_aa_to`,
@@ -2575,6 +2584,32 @@ polyprotein is a different scientific question. The phyloXML
 on the peptide's 1..length coordinate space, not on the parent
 polyprotein), so multidomain peptides like NSP12 (`CoV_RPol_N--RdRP_1`)
 show both subdomain boxes properly scoped to the cut peptide.
+
+**Whole-polyprotein tree** (v0.50.0+, opt-in via
+`phylo.per_protein.whole_polyprotein_tree`, default off). In addition to
+the per-peptide trees, build **one tree per spec on the entire
+polyprotein CDS** — not the sliced peptides. Each rep's parent CDS feeds
+the same `_build_tree` engine (MAFFT / IQ-TREE-or-FastTree / rooting /
+LCA / colour palette / `min_taxa` / the v0.49.0 PDF+PNG figure), so the
+files mirror the peptide-tree schema with a `_polyprotein` basename:
+
+* `{prefix}_<spec>_polyprotein_msa.fasta`
+* `{prefix}_<spec>_polyprotein_tree.xml`
+* `{prefix}_<spec>_polyprotein_tree.pdf` / `.png`
+* `{prefix}_<spec>_polyprotein_tree_id_map.tsv`
+* `{prefix}_<spec>_polyprotein_tree.nwk` (opt-in, `phylo.newick`)
+
+The point is the phyloXML `<domain_architecture>`: where a peptide tree
+shows one peptide-local box, the whole-polyprotein tree's leaf shows
+**every HMM domain across the entire polyprotein, end-to-end** (the full
+nsp / peptide layout), so Archaeopteryx draws the complete domain diagram
+on each leaf. It's the natural companion to the peptide trees — the
+peptide trees zoom in on one cleavage product's phylogeny; the
+whole-polyprotein tree gives the full-length view with the whole domain
+architecture. Off by default because it's one extra (large) alignment +
+tree per spec; only fires under `--per-protein-phylo` with the HMM tier
+active. Like the peptide trees, it is **not** added to the
+`_incongruence.tsv` table.
 
 ### Soft-fail posture
 

@@ -81,16 +81,25 @@ def test_writes_one_fasta_per_peptide(tmp_path):
     cfg = _cfg_with_polyprotein()
     written = write_polyprotein_outputs(result, cfg, tmp_path, "test")
 
-    # Expect 3 peptide FASTAs + 1 audit TSV.
-    fasta_paths = [p for p in written if p.suffix == ".fasta"]
+    # Expect 3 peptide FASTAs + 1 whole-polyprotein FASTA + 1 audit TSV.
+    peptide_fastas = [
+        p for p in written
+        if p.suffix == ".fasta" and not p.name.endswith("_polyprotein.fasta")
+    ]
+    whole_fastas = [
+        p for p in written if p.name.endswith("_polyprotein.fasta")
+    ]
     tsv_paths = [p for p in written if p.suffix == ".tsv"]
-    assert len(fasta_paths) == 3
+    assert len(peptide_fastas) == 3
+    assert len(whole_fastas) == 1
     assert len(tsv_paths) == 1
     sub = tmp_path / "test_polyprotein"
     assert sub.exists()
     assert (sub / "test_P1_VP4.fasta").exists()
     assert (sub / "test_P1_VP2.fasta").exists()
     assert (sub / "test_P1_VP3.fasta").exists()
+    # Whole-polyprotein FASTA (always-on, parallel to the peptide FASTAs).
+    assert (sub / "test_P1_polyprotein.fasta").exists()
     assert (sub / "test_P1_peptides.tsv").exists()
 
 

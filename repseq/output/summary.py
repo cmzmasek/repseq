@@ -1484,6 +1484,11 @@ def _render_polyprotein(cfg: dict, per_protein_ran: bool = False) -> str:
     if not hmm_active:
         return ""
 
+    phylo_cfg = cfg.get("phylo", {}) or {}
+    pp_cfg = phylo_cfg.get("per_protein", {}) or {}
+    keep_newick = bool(phylo_cfg.get("newick", False))
+    whole_poly_tree = bool(pp_cfg.get("whole_polyprotein_tree", False))
+
     strategies_used = sorted({s["cut_strategy"] for s in specs})
     strat_phrases = {
         "boundary": (
@@ -1539,6 +1544,17 @@ def _render_polyprotein(cfg: dict, per_protein_ran: bool = False) -> str:
             "comparison within a polyprotein answers a different "
             "scientific question."
         )
+        if whole_poly_tree:
+            peptide_trees_clause += (
+                " A **whole-polyprotein tree** was also built per spec "
+                "(`phylo.per_protein.whole_polyprotein_tree`) on the entire "
+                "polyprotein CDS — `{prefix}_<spec>_polyprotein_tree.xml` "
+                "(+ PDF/PNG). Its phyloXML `<domain_architecture>` shows "
+                "every HMM domain across the whole polyprotein end-to-end, so "
+                "a viewer (Archaeopteryx) draws the full nsp/peptide layout on "
+                "each leaf — the complement to the single-peptide boxes on the "
+                "peptide trees."
+            )
     return (
         "## Polyprotein cutting\n\n"
         f"For each declared polyprotein spec, the elected representatives' "
@@ -1550,7 +1566,9 @@ def _render_polyprotein(cfg: dict, per_protein_ran: bool = False) -> str:
         f"Declared specs:\n\n"
         f"{bullets}\n\n"
         f"Outputs are written under `{{prefix}}_polyprotein/` — one FASTA "
-        f"per peptide of each spec, plus a `{{prefix}}_<spec>_peptides.tsv` "
+        f"per peptide of each spec, an unaligned **whole-polyprotein FASTA** "
+        f"(`{{prefix}}_<spec>_polyprotein.fasta`, the entire parent CDS per "
+        f"representative), plus a `{{prefix}}_<spec>_peptides.tsv` "
         f"audit table recording every (representative × peptide) attempt "
         f"with status (`ok`, `missing`, `out_of_order`, `overlap`, "
         f"`no_parent_cds`) so the bench scientist can see which cuts are "

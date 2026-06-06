@@ -856,6 +856,17 @@ def run_polyprotein_phylogeny(
     * ``{prefix}_<spec>_<peptide>_tree.xml`` (phyloXML)
     * ``{prefix}_<spec>_<peptide>_tree_id_map.tsv`` (id map)
 
+    When ``phylo.per_protein.whole_polyprotein_tree`` is true, ALSO build
+    one tree per spec on the **whole polyprotein CDS** (not the sliced
+    peptides) — each rep's parent CDS is fed directly through the same
+    engine, so the phyloXML ``<domain_architecture>`` shows every HMM hit
+    across the entire polyprotein (the full nsp/peptide layout end-to-end).
+    Outputs as ``{prefix}_<spec>_polyprotein_tree.{xml,pdf,png}`` etc. in
+    the same directory; OFF by default (one extra large alignment + tree
+    per spec). The unaligned ``{prefix}_<spec>_polyprotein.fasta`` is
+    written independently by :func:`output.report.write_polyprotein_outputs`
+    (always-on, parallel to the per-peptide FASTAs).
+
     Sparse peptides (fewer than ``phylo.per_protein.min_taxa`` ``ok``
     slices) are skipped with a log note; per-peptide build failures log
     and continue (the whole step never aborts a run).
@@ -890,6 +901,7 @@ def run_polyprotein_phylogeny(
     pp_mafft_args, pp_mafft_auto = _per_protein_mafft(cfg)
     pp_cfg = ((cfg or {}).get("phylo", {}) or {}).get("per_protein", {}) or {}
     emit_domains = bool(pp_cfg.get("domain_architecture", True))
+    build_whole = bool(pp_cfg.get("whole_polyprotein_tree", False))
     tol = overlap_tolerance_from_cfg(cfg)
 
     sub_dir = out_dir / f"{prefix}_polyprotein"
@@ -1000,11 +1012,84 @@ def run_polyprotein_phylogeny(
             written.extend(files)
             built.append(family_label)
 
+        # Whole-polyprotein tree (opt-in, phylo.per_protein.whole_polyprotein_tree):
+        # one tree per spec on the ENTIRE polyprotein CDS, not the sliced
+        # peptides. Same per-spec loop minus the slicing — feed each rep's
+        # parent CDS directly, so the phyloXML <domain_architecture> shows
+        # every HMM hit across the whole polyprotein (the full nsp/peptide
+        # layout end-to-end). Reuses the same _build_tree engine, colour
+        # palette, MAFFT/trimAl settings, and min_taxa floor as the peptide
+        # trees above.
+        if build_whole:
+            family_label = f"{_sanitize(spec.name)}_polyprotein"
+            leaf_reps = []
+            bodies = {}
+            leaf_protein_ids = {}
+            for rep in representatives:
+                parent_cds = per_rep_parent.get(rep.id)
+                if parent_cds is None:
+                    continue
+                seq_str = parent_cds.get("sequence")
+                if not seq_str:
+                    continue
+                parent_pid = parent_cds.get("protein_id") or "polyprotein"
+                # Shallow-copy the rep with the parent CDS as its only
+                # protein, so the leaf shows the whole-polyprotein name +
+                # full-length domain architecture. Originals untouched.
+                synth_rep = _dc_replace(
+                    rep,
+                    proteins=[parent_cds],
+                    concat_segments=None,
+                    marker_protein_ids=[parent_pid],
+                )
+                leaf_reps.append(synth_rep)
+                bodies[rep.id] = seq_str
+                leaf_protein_ids[rep.id] = {parent_pid}
+
+            if len(leaf_reps) < min_taxa:
+                sparse.append(f"{family_label} ({len(leaf_reps)})")
+                logger.info(
+                    "[polyprotein] whole-polyprotein %s: %d rep(s) with a "
+                    "parent CDS (< %d) — skipped",
+                    family_label, len(leaf_reps), min_taxa,
+                )
+            else:
+                logger.info(
+                    "[polyprotein] building whole-polyprotein %s tree from "
+                    "%d rep(s)…", family_label, len(leaf_reps),
+                )
+                try:
+                    files = _build_tree(
+                        leaf_reps,
+                        bodies,
+                        is_protein=True,
+                        cfg=cfg,
+                        out_dir=sub_dir,
+                        file_prefix=family_label,
+                        xml_name_prefix=f"{prefix}_{family_label}",
+                        color_scheme=color_scheme,
+                        leaf_protein_ids=leaf_protein_ids,
+                        mafft_extra_args=pp_mafft_args,
+                        mafft_use_auto=pp_mafft_auto,
+                        domain_architecture=emit_domains,
+                        trimal_settings=pp_cfg.get("trimal"),
+                        basis_role="polyprotein",
+                        basis_family=spec.name,
+                        basis_segment=spec.segment,
+                    )
+                    written.extend(files)
+                    built.append(family_label)
+                except PhyloError as exc:
+                    logger.warning(
+                        "[polyprotein] whole-polyprotein %s failed: %s",
+                        family_label, exc,
+                    )
+
     if not built:
         detail = f" ({'; '.join(sparse)})" if sparse else ""
         raise PhyloError(
-            f"no polyprotein peptide had >= {min_taxa} ok-sliced "
-            f"representatives — nothing built{detail}"
+            f"no polyprotein peptide or whole-polyprotein CDS had >= "
+            f"{min_taxa} representatives — nothing built{detail}"
         )
     return written
 

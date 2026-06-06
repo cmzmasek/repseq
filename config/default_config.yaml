@@ -748,6 +748,17 @@ phylo:
     # boxes and filter them with its interactive E-value slider. Default
     # on; set false to omit the domain blocks.
     domain_architecture: true
+    # In addition to the per-mature-peptide trees, build ONE tree per declared
+    # polyprotein spec on the WHOLE polyprotein CDS (e.g. all of ORF1ab), one
+    # leaf per representative carrying it. The point is the phyloXML
+    # <domain_architecture>: every HMM hit across the whole polyprotein is
+    # drawn as a domain box, so a leaf shows the full nsp/peptide layout
+    # end-to-end. OFF by default (one extra large alignment + tree per spec);
+    # only fires when --per-protein-phylo runs with a polyprotein spec and the
+    # HMM tier is active. Outputs {prefix}_<spec>_polyprotein_tree.{xml,pdf,png}
+    # in {prefix}_polyprotein/. (The unaligned {prefix}_<spec>_polyprotein.fasta
+    # is written regardless of this knob, parallel to the per-peptide FASTAs.)
+    whole_polyprotein_tree: false
     # Optional trimAl trimming for the per-protein (single-gene) alignments,
     # independent of the whole-genome phylo.trimal. OFF by default; same
     # shape and same soft-fail behaviour.

@@ -580,6 +580,21 @@ DEFAULTS: dict[str, Any] = {
             # its E-value as the domain confidence — so Archaeopteryx's
             # interactive E-value slider can filter them). Default on.
             "domain_architecture": True,
+            # In addition to the per-mature-peptide trees, build ONE tree
+            # per declared polyprotein spec on the WHOLE polyprotein CDS
+            # (e.g. the entire ORF1ab), one leaf per representative carrying
+            # it. The headline benefit is the phyloXML <domain_architecture>:
+            # every HMM hit across the whole polyprotein is drawn as a domain
+            # box, so a leaf shows the full nsp/peptide layout end-to-end (vs
+            # the single-peptide box on a peptide tree). OFF by default —
+            # it's one extra (large) alignment + tree per spec. Only fires
+            # when --per-protein-phylo runs with a polyprotein spec and the
+            # HMM tier is active. Outputs to {prefix}_polyprotein/ as
+            # {prefix}_<spec>_polyprotein_tree.{xml,pdf,png}. The unaligned
+            # whole-polyprotein FASTA ({prefix}_<spec>_polyprotein.fasta) is
+            # written independently of this knob (always-on, parallel to the
+            # per-peptide FASTAs).
+            "whole_polyprotein_tree": False,
             # Optional trimAl trimming for the per-protein (single-gene)
             # alignments — independent of the whole-genome phylo.trimal.
             # OFF by default; same shape (mode → -<mode>, default
@@ -1728,6 +1743,12 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         pp_cfg["domain_architecture"], bool
     ):
         errors.append("phylo.per_protein.domain_architecture must be a boolean")
+    if "whole_polyprotein_tree" in pp_cfg and not isinstance(
+        pp_cfg["whole_polyprotein_tree"], bool
+    ):
+        errors.append(
+            "phylo.per_protein.whole_polyprotein_tree must be a boolean"
+        )
 
     # trimAl blocks (whole-genome phylo.trimal + per-protein
     # phylo.per_protein.trimal share the same shape).

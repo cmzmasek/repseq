@@ -135,6 +135,19 @@ def test_validate_config_rejects_bad_per_protein_domain_architecture():
     assert any("per_protein.domain_architecture" in e for e in errors)
 
 
+def test_validate_config_whole_polyprotein_tree_default_off():
+    cfg = load_config(None)
+    assert cfg["phylo"]["per_protein"]["whole_polyprotein_tree"] is False
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_bad_whole_polyprotein_tree():
+    cfg = load_config(None)
+    cfg["phylo"]["per_protein"]["whole_polyprotein_tree"] = "yes"
+    errors = validate_config(cfg)
+    assert any("per_protein.whole_polyprotein_tree" in e for e in errors)
+
+
 def test_validate_config_trimal_default_off_and_valid():
     cfg = load_config(None)
     assert cfg["phylo"]["trimal"]["enabled"] is False
