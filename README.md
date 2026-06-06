@@ -2054,7 +2054,12 @@ clustering:
   # `clustering.cdhit:` — see default_config.yaml for the full block.
 
 representative:
-  priority: [refseq, reviewed_uniprot, longest]   # tie-break order for picking the "best"
+  # Ordered preference for picking each cluster's "best" sequence: the first
+  # criterion wins, later ones break ties, sequence length is the final
+  # tiebreaker. The order is honoured — [reviewed_uniprot, refseq, longest]
+  # prefers a Swiss-Prot-reviewed entry over a RefSeq one. Drop a criterion
+  # to deactivate that preference. (`longest` is required.)
+  priority: [refseq, reviewed_uniprot, longest]
 ```
 
 ### Unknown keys are rejected

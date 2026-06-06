@@ -363,8 +363,12 @@ clustering:
     extra_args: []
 
 representative:
-  # Priority order for selecting cluster representatives.
-  # refseq > reviewed_uniprot > longest (length is always the final tiebreaker)
+  # Ordered preference for selecting each cluster's representative. The order
+  # is honoured: the first criterion wins, later ones break ties, and sequence
+  # length is always the final tiebreaker. So [refseq, reviewed_uniprot,
+  # longest] prefers a RefSeq, then a Swiss-Prot-reviewed entry, then the
+  # longest; swapping the first two would prefer reviewed over RefSeq. Drop a
+  # criterion to deactivate that preference. `longest` must be present.
   priority:
     - refseq
     - reviewed_uniprot
