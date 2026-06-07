@@ -533,6 +533,8 @@ def test_render_summary_monophyly_paragraph(make_seq, tmp_path):
     assert "polyphyletic" in md_on
     assert "{prefix}_flags.txt" in md_on
     assert "{prefix}_report.html" in md_on
+    assert "support-aware" in md_on
+    assert "phylo.monophyly.min_support" in md_on
 
     md_off = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
     assert "Per-taxon monophyly" not in md_off

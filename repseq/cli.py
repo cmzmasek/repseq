@@ -1987,7 +1987,10 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
         from .phylo.monophyly import write_monophyly_report
         out_dir = Path(cfg["output"]["dir"])
         prefix = cfg["output"].get("prefix", "repseq")
-        mono_tsv = write_monophyly_report(out_dir, prefix)
+        min_support = (
+            (cfg.get("phylo", {}) or {}).get("monophyly", {}) or {}
+        ).get("min_support", 70)
+        mono_tsv = write_monophyly_report(out_dir, prefix, min_support=min_support)
         if mono_tsv is not None:
             out_files.append(mono_tsv)
             click.echo(f"Wrote per-taxon monophyly report: {mono_tsv.name}")

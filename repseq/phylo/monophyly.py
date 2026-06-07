@@ -27,6 +27,16 @@ The unambiguous supporting numbers — ``n_clusters`` (separate in-group
 blocks), ``n_intruders``, ``intruder_clusters`` — are reported alongside the
 tag so the reader can always judge for themselves.
 
+**Support-aware mode** (``phylo.monophyly.min_support``, 0 = off): with a
+threshold > 0, internal branches whose support is below it are collapsed into
+polytomies before assessing, and the monophyletic call becomes the
+*compatibility* test — a taxon is monophyletic when no *well-supported* node
+forces it to be otherwise (i.e. it could be a clade under some resolution of
+the collapsed polytomies). This flags only **confident** non-monophyly: a taxon
+broken solely by weakly-supported branches reads as monophyletic, while a
+well-supported intrusion still reads as para/poly. The threshold used is
+recorded in the ``min_support`` column.
+
 Computed by sweeping the retained ``*_tree.xml`` files at end of run (every
 tree repseq builds — whole-genome 2E, per-protein / extra / segment /
 polyprotein 2F, pre-cluster — ends in ``_tree.xml``), reading each leaf's
@@ -64,11 +74,12 @@ _RANK_INDEX = {r: i for i, r in enumerate(_RANKS)}
 
 
 class _Node:
-    __slots__ = ("children", "leaves")
+    __slots__ = ("children", "leaves", "support")
 
     def __init__(self) -> None:
         self.children: list["_Node"] = []
         self.leaves: frozenset[int] = frozenset()
+        self.support: Optional[float] = None  # internal-node branch support
 
 
 def _parse_tree(path: Path) -> Optional[tuple[_Node, list[dict[str, str]]]]:
@@ -94,6 +105,12 @@ def _parse_tree(path: Path) -> Optional[tuple[_Node, list[dict[str, str]]]]:
 
     def build(elem: ET.Element) -> _Node:
         node = _Node()
+        conf = elem.find(f"{_PXNS}confidence")
+        if conf is not None and conf.text:
+            try:
+                node.support = float(conf.text.strip())
+            except ValueError:
+                pass
         child_els = elem.findall(f"{_PXNS}clade")
         if child_els:
             for ce in child_els:
@@ -113,17 +130,68 @@ def _parse_tree(path: Path) -> Optional[tuple[_Node, list[dict[str, str]]]]:
         return node
 
     root = build(root_clade)
-
-    def fill(node: _Node) -> None:
-        if node.children:
-            acc: set[int] = set()
-            for child in node.children:
-                fill(child)
-                acc |= child.leaves
-            node.leaves = frozenset(acc)
-
-    fill(root)
+    _fill_leaves(root)
     return root, leaf_taxa
+
+
+def _fill_leaves(node: _Node) -> None:
+    """Recompute each internal node's leaf-index set bottom-up (leaves keep
+    their singleton sets)."""
+    if node.children:
+        acc: set[int] = set()
+        for child in node.children:
+            _fill_leaves(child)
+            acc |= child.leaves
+        node.leaves = frozenset(acc)
+
+
+def _collapse_weak_branches(root: _Node, min_support: float) -> None:
+    """Collapse internal nodes with support < ``min_support`` into polytomies.
+
+    Bottom-up: a weak internal node is spliced out and its (already-collapsed)
+    children promoted to its parent, so a chain of weak branches fully
+    dissolves. Leaves (no children, no support) are always kept; the root is
+    never promoted. Mutates ``root`` in place; leaf sets are recomputed after.
+    """
+    def visit(node: _Node) -> None:
+        for child in node.children:
+            visit(child)
+        promoted: list[_Node] = []
+        for child in node.children:
+            if (
+                child.children
+                and child.support is not None
+                and child.support < min_support
+            ):
+                promoted.extend(child.children)   # weak internal → promote kids
+            else:
+                promoted.append(child)
+        node.children = promoted
+
+    visit(root)
+    _fill_leaves(root)
+
+
+def _violates_monophyly(
+    nodes: list[_Node], members: frozenset[int], labeled: frozenset[int]
+) -> bool:
+    """True if some node is *incompatible* with ``members`` being a clade.
+
+    A node's labelled leaf set ``C`` conflicts with ``members`` iff it overlaps
+    them yet is neither a subset nor a superset — i.e. it groups some members
+    with a non-member while another member lies outside. On a tree whose weak
+    branches have been collapsed (so every surviving node is well-supported),
+    the absence of any such conflict means the members *could* form a clade
+    under some resolution of the remaining polytomies — the support-aware
+    "compatible with monophyly" reading.
+    """
+    for node in nodes:
+        induced = node.leaves & labeled
+        if (induced & members) and not (induced <= members) and not (
+            members <= induced
+        ):
+            return True
+    return False
 
 
 def _all_nodes(root: _Node) -> list[_Node]:
@@ -157,8 +225,20 @@ def _count_clusters(
     return count
 
 
-def assess_tree(root: _Node, leaf_taxa: list[dict[str, str]]) -> list[dict]:
-    """Return one status row per taxon (n_leaves ≥ 2) per assessed rank."""
+def assess_tree(
+    root: _Node, leaf_taxa: list[dict[str, str]], min_support: float = 0
+) -> list[dict]:
+    """Return one status row per taxon (n_leaves ≥ 2) per assessed rank.
+
+    When ``min_support`` > 0, internal nodes with support below it are
+    collapsed into polytomies first, and the monophyletic call uses the
+    support-aware *compatibility* test (a taxon counts as monophyletic when no
+    well-supported node forces it to be otherwise, i.e. it could be a clade
+    under some resolution of the collapsed polytomies). When ``min_support`` is
+    0 (the default) the original exact MRCA-intruder test is used, unchanged.
+    """
+    if min_support > 0:
+        _collapse_weak_branches(root, float(min_support))
     nodes = _all_nodes(root)
     rows: list[dict] = []
     for rank in _RANKS:
@@ -187,9 +267,20 @@ def assess_tree(root: _Node, leaf_taxa: list[dict[str, str]]) -> list[dict]:
             # members' MRCA span but belong to another taxon (unlabeled leaves
             # excluded).
             intruders = (mrca_leaves & labeled) - members
+            # Monophyletic call: compatibility (support-aware) when collapsing,
+            # else the exact "no intruders in the MRCA span" test.
+            if min_support > 0:
+                monophyletic = not _violates_monophyly(nodes, members, labeled)
+            else:
+                monophyletic = not intruders
             n_clusters = _count_clusters(root, members, labeled)
-            if not intruders:
+            if monophyletic:
+                # Report a clean clade — the (possibly soft, weakly-supported)
+                # intrusions are explicitly disregarded under min_support, so
+                # "monophyletic" keeps its plain meaning of zero intruders.
                 status = "monophyletic"
+                n_clusters = 1
+                intruders = frozenset()
                 intruder_clusters = 0
                 intruder_taxa: list[str] = []
             else:
@@ -216,12 +307,19 @@ def assess_tree(root: _Node, leaf_taxa: list[dict[str, str]]) -> list[dict]:
                 "n_intruders": len(intruders),
                 "intruder_clusters": intruder_clusters,
                 "intruder_taxa": ";".join(intruder_taxa),
+                "min_support": int(min_support),
             })
     return rows
 
 
-def write_monophyly_report(out_dir: Path, prefix: str) -> Optional[Path]:
+def write_monophyly_report(
+    out_dir: Path, prefix: str, min_support: float = 0
+) -> Optional[Path]:
     """Sweep every ``*_tree.xml`` under *out_dir* into ``{prefix}_monophyly.tsv``.
+
+    ``min_support`` (``phylo.monophyly.min_support``, 0 = off) makes the
+    assessment support-aware: branches below it are collapsed and the
+    monophyletic call becomes the compatibility test (see :func:`assess_tree`).
 
     Returns the written path, or None when there are no trees / nothing to
     report. Soft by construction — the caller wraps it so a parse failure
@@ -238,7 +336,7 @@ def write_monophyly_report(out_dir: Path, prefix: str) -> Optional[Path]:
         if parsed is None:
             continue
         root, leaf_taxa = parsed
-        for row in assess_tree(root, leaf_taxa):
+        for row in assess_tree(root, leaf_taxa, min_support=min_support):
             row["tree"] = str(rel)
             rows_out.append(row)
 
@@ -252,12 +350,14 @@ def write_monophyly_report(out_dir: Path, prefix: str) -> Optional[Path]:
     with open(path, "w") as fh:
         fh.write(
             "tree\trank\ttaxon\tn_leaves\tstatus\t"
-            "n_clusters\tn_intruders\tintruder_clusters\tintruder_taxa\n"
+            "n_clusters\tn_intruders\tintruder_clusters\tintruder_taxa\t"
+            "min_support\n"
         )
         for r in rows_out:
             fh.write(
                 f"{r['tree']}\t{r['rank']}\t{r['taxon']}\t{r['n_leaves']}\t"
                 f"{r['status']}\t{r['n_clusters']}\t{r['n_intruders']}\t"
-                f"{r['intruder_clusters']}\t{r['intruder_taxa']}\n"
+                f"{r['intruder_clusters']}\t{r['intruder_taxa']}\t"
+                f"{r['min_support']}\n"
             )
     return path

@@ -137,3 +137,45 @@ def test_multiple_trees_each_assessed(tmp_path):
 
 def test_no_trees_returns_none(tmp_path):
     assert write_monophyly_report(tmp_path, "test") is None
+
+
+def _genus_rows(tmp_path, min_support):
+    return {
+        r["taxon"]: r
+        for r in _rows(write_monophyly_report(tmp_path, "test",
+                                              min_support=min_support))
+        if r["rank"] == "genus"
+    }
+
+
+def test_support_aware_collapses_weak_intrusion(tmp_path):
+    """(A,(F,B)) with the (F,B) node WEAKLY supported: topology-only calls
+    Alphacoronavirus paraphyletic, but at min_support=70 the weak branch
+    collapses and it reads as monophyletic (compatibility test)."""
+    reps = [
+        _seq("A", "Alphacoronavirus"),
+        _seq("F", "Betacoronavirus"),
+        _seq("B", "Alphacoronavirus"),
+    ]
+    # FastTree sh_like support 0.30 → 30 in the phyloXML (< 70).
+    _write_xml(tmp_path, "test",
+               "(S0001:0.1,(S0002:0.1,S0003:0.1)0.30:0.1);", reps)
+    assert _genus_rows(tmp_path, 0)["Alphacoronavirus"]["status"] == "paraphyletic"
+    aware = _genus_rows(tmp_path, 70)["Alphacoronavirus"]
+    assert aware["status"] == "monophyletic"
+    assert aware["min_support"] == "70"
+    assert aware["n_intruders"] == "0"
+
+
+def test_support_aware_keeps_strong_intrusion(tmp_path):
+    """Same topology but the (F,B) node is STRONGLY supported (0.95 → 95):
+    even at min_support=70 it survives the collapse, so the intrusion stands
+    and Alphacoronavirus stays non-monophyletic."""
+    reps = [
+        _seq("A", "Alphacoronavirus"),
+        _seq("F", "Betacoronavirus"),
+        _seq("B", "Alphacoronavirus"),
+    ]
+    _write_xml(tmp_path, "test",
+               "(S0001:0.1,(S0002:0.1,S0003:0.1)0.95:0.1);", reps)
+    assert _genus_rows(tmp_path, 70)["Alphacoronavirus"]["status"] == "paraphyletic"

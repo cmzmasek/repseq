@@ -321,7 +321,7 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_extra_protein/` | `--per-protein-phylo` + `extra_protein:` declared | Same shape, accessory-protein trees (kept out of the incongruence table by design). |
 | `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment (each with a PDF/PNG figure by default), from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
 | `{prefix}_msa_conservation.tsv` | any phylo step that wrote an MSA (default on; `phylo.conservation.enabled`) | One conservation number per alignment written this run (genome, partition families + supermatrix, per-protein, extra-protein, polyprotein peptides, per-segment NT). Mean per-column **Jensen-Shannon divergence to a residue background** (Capra & Singh 2007), **Henikoff-weighted** + **gap-penalised**. Columns: `msa, role, label, alphabet, trimmed, n_seqs, n_sites, mean_conservation, mean_conservation_core`. v0.43.0. |
-| `{prefix}_monophyly.tsv` | any phylo step that built a tree (always on) | Per-taxon monophyly status, one row per (tree, rank, taxon): `monophyletic` / `paraphyletic` / `polyphyletic` plus the counts behind the call. Swept off every annotated `*_tree.xml` (genome + per-protein/extra/segment/polyprotein/pre-cluster). A taxon monophyletic on the genome tree but not on a marker tree is the per-marker reassortment/recombination signal — the taxon-resolved companion to `_incongruence.tsv`. Columns: `tree, rank, taxon, n_leaves, status, n_clusters, n_intruders, intruder_clusters, intruder_taxa`. v0.54.0. |
+| `{prefix}_monophyly.tsv` | any phylo step that built a tree (always on) | Per-taxon monophyly status, one row per (tree, rank, taxon): `monophyletic` / `paraphyletic` / `polyphyletic` plus the counts behind the call. Swept off every annotated `*_tree.xml` (genome + per-protein/extra/segment/polyprotein/pre-cluster). A taxon monophyletic on the genome tree but not on a marker tree is the per-marker reassortment/recombination signal — the taxon-resolved companion to `_incongruence.tsv`. Support-aware by default (`phylo.monophyly.min_support`, default 70 — collapses weak branches so only confident non-monophyly is flagged). Columns: `tree, rank, taxon, n_leaves, status, n_clusters, n_intruders, intruder_clusters, intruder_taxa, min_support`. v0.54.0 (support-aware v0.56.0). |
 | `{prefix}_flags.txt` | when any conflict table exists (a tree was built) | **Plain-English synthesis** of the conflict tables (`_monophyly.tsv`, `_incongruence.tsv`, `_taxonomy_review.tsv`) into one skimmable list of reassortment/recombination signals, non-monophyletic taxa, and per-isolate taxonomy conflicts. A clean run gets a "No flags raised ✓" file. v0.55.0. |
 | `{prefix}_report.html` | any run with figures or a conflict table | **Single-file HTML report** bundling the flags, a gallery of every tree figure (embedded), and an index of all output files — one page to open in a browser or send to a collaborator. v0.55.0. |
 | `{prefix}_hmm_diagnostic.tsv` | when the HMM tier ran AND a spec declares `hmms:` | One row per (representative, marker spec, declared HMM profile): `hit` T/F, `best_dom_evalue`, `best_dom_score`, `best_coverage`, `ga_cutoff`, `cutoff_used`, `passing`. Surfaces near-miss patterns the binary gate hides ("65 isolates barely missed the cutoff at E=2e-5"). v0.26.0. |
@@ -1714,11 +1714,24 @@ paraphyletic under the strict cladistic definition yet flagged polyphyletic
 here, so the unambiguous counts are reported alongside the tag for you to
 judge.
 
+**Support-aware by default.** A single weakly-supported branch can make a
+taxon look non-monophyletic when the tree doesn't actually resolve it that way.
+So the assessment is **support-aware**: branches with support below
+`phylo.monophyly.min_support` (**default 70**) are collapsed into polytomies
+first, and a taxon is called monophyletic when no *well-supported* node
+contradicts it (it could be a clade once the weak branches are resolved). Only
+**confident** non-monophyly is flagged — a taxon broken solely by weak branches
+reads as monophyletic. Set `min_support: 0` to trust every branch
+(topology-only). On a real coronavirus tree this correctly turns an
+apparently-paraphyletic *Alphacoronavirus* (split by a weak branch) back into a
+clean monophyletic genus. The threshold used is recorded in the report.
+
 **Columns:** `tree` (path relative to the output dir), `rank`, `taxon`,
 `n_leaves` (classified members), `status`, `n_clusters` (separate in-group
 blocks), `n_intruders` (foreign classified leaves in the MRCA span),
-`intruder_clusters` (separate foreign clades — the para/poly key), and
-`intruder_taxa` (the intruding taxon names, `;`-joined).
+`intruder_clusters` (separate foreign clades — the para/poly key),
+`intruder_taxa` (the intruding taxon names, `;`-joined), and `min_support`
+(the support threshold applied).
 
 ### Plain-English flags — `{prefix}_flags.txt` (v0.55.0+)
 

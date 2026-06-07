@@ -1060,3 +1060,21 @@ def test_shipped_example_configs_validate_clean():
     for rel in ("default_config.yaml", "examples/alphainfluenzavirus_hmm.yaml"):
         cfg = load_config(config_dir / rel)
         assert validate_config(cfg) == [], f"{rel} did not validate clean"
+
+
+def test_phylo_monophyly_min_support_default_is_70():
+    cfg = load_config(None)
+    assert cfg["phylo"]["monophyly"]["min_support"] == 70
+    assert validate_config(cfg) == []
+
+
+def test_phylo_monophyly_min_support_rejects_out_of_range():
+    cfg = load_config(None)
+    cfg["phylo"]["monophyly"]["min_support"] = 150
+    assert any("phylo.monophyly.min_support" in e for e in validate_config(cfg))
+
+
+def test_phylo_monophyly_min_support_zero_ok():
+    cfg = load_config(None)
+    cfg["phylo"]["monophyly"]["min_support"] = 0
+    assert validate_config(cfg) == []

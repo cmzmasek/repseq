@@ -684,6 +684,18 @@ phylo:
     # within an alphabet. A post-hoc sweep, so it never affects a tree;
     # writes nothing when no MSA was produced.
     enabled: true
+  monophyly:
+    # Per-taxon monophyly report ({prefix}_monophyly.tsv): every tree built
+    # this run is classified per taxon per rank as monophyletic / paraphyletic
+    # / polyphyletic. `min_support` makes it SUPPORT-AWARE: internal branches
+    # with support below this value are collapsed into polytomies first, and a
+    # taxon is called monophyletic when no *well-supported* node contradicts it
+    # (i.e. it could be a clade once the weak branches are resolved). So only
+    # confident non-monophyly is flagged — a taxon broken solely by
+    # weakly-supported branches reads as monophyletic. Set 0 to trust every
+    # branch (topology-only). Range [0, 100]; the value used is recorded in the
+    # report's `min_support` column.
+    min_support: 70
   phyloxml:
     # <confidence> element's type= attribute. "auto" picks "sh_like" for
     # FastTree and "ufboot" for IQ-TREE (which matches the default tree

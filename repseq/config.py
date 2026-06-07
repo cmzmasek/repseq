@@ -515,6 +515,18 @@ DEFAULTS: dict[str, Any] = {
         "conservation": {
             "enabled": True,
         },
+        # Per-taxon monophyly report ({prefix}_monophyly.tsv), an always-on
+        # sweep over every tree built this run. ``min_support`` makes it
+        # support-aware: internal branches with support below this value are
+        # collapsed into polytomies before assessing, and a taxon is called
+        # monophyletic when no *well-supported* node contradicts it (it could
+        # be a clade under some resolution of the collapsed polytomies). So
+        # only confident non-monophyly is flagged — a taxon broken solely by
+        # weakly-supported branches reads as monophyletic. 0 disables the
+        # collapse (topology-only, every branch trusted). Range [0, 100].
+        "monophyly": {
+            "min_support": 70,
+        },
         # PhyloXML writer knobs.
         "phyloxml": {
             # Override the <confidence type="..."> attribute. ``auto``
@@ -1988,6 +2000,14 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     if not isinstance(ctv, (int, float)) or isinstance(ctv, bool) or not (0 <= ctv <= 1):
         errors.append(
             "phylo.lca.coverage_threshold must be a number between 0 and 1"
+        )
+
+    mono_cfg = phylo_cfg.get("monophyly", {}) or {}
+    ms = mono_cfg.get("min_support", 70)
+    if not isinstance(ms, (int, float)) or isinstance(ms, bool) or not (0 <= ms <= 100):
+        errors.append(
+            "phylo.monophyly.min_support must be a number in [0, 100] "
+            "(0 disables the support-aware collapse)"
         )
 
     # HMM block
