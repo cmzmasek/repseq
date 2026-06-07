@@ -322,6 +322,8 @@ which optional flags you passed (`--plot`, `--phylo`). At a glance:
 | `{prefix}_per_segment/` | only with `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment (each with a PDF/PNG figure by default), from the representative isolates' raw per-segment NT. Complement to the per-marker AA trees: reassortment may show up here even when no single marker tree captures it. v0.26.0. |
 | `{prefix}_msa_conservation.tsv` | any phylo step that wrote an MSA (default on; `phylo.conservation.enabled`) | One conservation number per alignment written this run (genome, partition families + supermatrix, per-protein, extra-protein, polyprotein peptides, per-segment NT). Mean per-column **Jensen-Shannon divergence to a residue background** (Capra & Singh 2007), **Henikoff-weighted** + **gap-penalised**. Columns: `msa, role, label, alphabet, trimmed, n_seqs, n_sites, mean_conservation, mean_conservation_core`. v0.43.0. |
 | `{prefix}_monophyly.tsv` | any phylo step that built a tree (always on) | Per-taxon monophyly status, one row per (tree, rank, taxon): `monophyletic` / `paraphyletic` / `polyphyletic` plus the counts behind the call. Swept off every annotated `*_tree.xml` (genome + per-protein/extra/segment/polyprotein/pre-cluster). A taxon monophyletic on the genome tree but not on a marker tree is the per-marker reassortment/recombination signal — the taxon-resolved companion to `_incongruence.tsv`. Columns: `tree, rank, taxon, n_leaves, status, n_clusters, n_intruders, intruder_clusters, intruder_taxa`. v0.54.0. |
+| `{prefix}_flags.txt` | when any conflict table exists (a tree was built) | **Plain-English synthesis** of the conflict tables (`_monophyly.tsv`, `_incongruence.tsv`, `_taxonomy_review.tsv`) into one skimmable list of reassortment/recombination signals, non-monophyletic taxa, and per-isolate taxonomy conflicts. A clean run gets a "No flags raised ✓" file. v0.55.0. |
+| `{prefix}_report.html` | any run with figures or a conflict table | **Single-file HTML report** bundling the flags, a gallery of every tree figure (embedded), and an index of all output files — one page to open in a browser or send to a collaborator. v0.55.0. |
 | `{prefix}_hmm_diagnostic.tsv` | when the HMM tier ran AND a spec declares `hmms:` | One row per (representative, marker spec, declared HMM profile): `hit` T/F, `best_dom_evalue`, `best_dom_score`, `best_coverage`, `ga_cutoff`, `cutoff_used`, `passing`. Surfaces near-miss patterns the binary gate hides ("65 isolates barely missed the cutoff at E=2e-5"). v0.26.0. |
 | `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations). Leads with an **"Analysis at a glance"** table (v0.41.0) stating the run's actual decisions — dataset type, input→representative counts, clustering substrate + alphabet + tool, selection mode, whole-genome tree substrate, per-marker/per-segment tree presence, taxonomy review. The **Clustering substrate** and **Whole-genome tree** cells name the actual marker(s) — the canonical `name:`, not the aliases/synonyms — and, when the HMM tier ran, each marker's domain architecture (`name (HMM: tok OR tok)`); single-marker mode lists them in priority order, concat joins with `+`, segmented prefixes each with its segment. v0.42.0. |
 | `{prefix}_config_repseq<ver>.yaml` | every run | **Sanitized effective-config snapshot** (v0.42.0): the full run-time config — every setting resolved, defaults filled in — with all comments stripped and the NCBI credentials (`ncbi_email` / `ncbi_api_key`) blanked to `null`. Re-runnable as-is via `repseq <mode> -c <this-file>`. Filename embeds the repseq version (periods→underscores), e.g. `cov_config_repseq0_42_0.yaml`. |
@@ -1717,6 +1719,35 @@ judge.
 blocks), `n_intruders` (foreign classified leaves in the MRCA span),
 `intruder_clusters` (separate foreign clades — the para/poly key), and
 `intruder_taxa` (the intruding taxon names, `;`-joined).
+
+### Plain-English flags — `{prefix}_flags.txt` (v0.55.0+)
+
+The interesting anomalies a run can find are spread across several tables
+(`_monophyly.tsv`, `_incongruence.tsv`, and — when the opt-in review ran —
+`_taxonomy_review.tsv`). `{prefix}_flags.txt` distils them into one skimmable,
+plain-English list so you don't have to join four TSVs by hand:
+
+- **Reassortment / recombination signals** — taxa monophyletic on the
+  whole-genome tree but broken on a marker tree, and marker-tree pairs with a
+  high normalised Robinson-Foulds distance (≥ 0.2).
+- **Taxonomy ↔ tree conflicts** — taxa that are para- or polyphyletic on the
+  whole-genome tree.
+- **Per-isolate taxonomy conflicts** — isolates whose label the tree
+  neighbourhood disagrees with (from the taxonomy review).
+
+It's a pure synthesis (no new computation), written whenever any source table
+exists; a clean run gets a `No flags raised ✓` file so you can tell "nothing
+flagged" from "report not produced". The flags are heuristics — the source
+tables remain authoritative.
+
+### One-page HTML report — `{prefix}_report.html` (v0.55.0+)
+
+A single self-contained HTML file you can open in any browser or e-mail to a
+collaborator. It bundles the run's **analysis flags**, a **gallery of every
+tree figure** (the `*_tree.png` images embedded directly so the visuals travel
+with the file), and an **index of all output files** (with sizes and relative
+links to the full machine-readable detail). Pure-Python, no extra dependency;
+written last so its file index captures the whole run.
 
 ---
 

@@ -1355,7 +1355,11 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             "incongruence table. The para/poly split is a topology-only "
             "heuristic (keyed on `intruder_clusters`); the supporting counts "
             "(`n_clusters`, `n_intruders`, `intruder_clusters`) are reported "
-            "alongside so the call can be checked by hand.\n"
+            "alongside so the call can be checked by hand. These conflict "
+            "signals (with the incongruence table and any taxonomy review) are "
+            "distilled into a plain-English `{prefix}_flags.txt`, and the whole "
+            "run is bundled into a shareable single-file `{prefix}_report.html` "
+            "(flags + tree-figure gallery + output index).\n"
         )
     if msa_ran:
         if keep_newick:

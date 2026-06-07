@@ -1993,6 +1993,18 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
             click.echo(f"Wrote per-taxon monophyly report: {mono_tsv.name}")
     except Exception as exc:
         click.echo(f"[monophyly report skipped] {exc}", err=True)
+    # Plain-English analysis flags — synthesises the conflict tables
+    # (_monophyly.tsv, _incongruence.tsv, _taxonomy_review.tsv) into one
+    # {prefix}_flags.txt. Pure post-hoc synthesis; soft-fails to nothing.
+    try:
+        from .output.flags import write_flags_report
+        out_dir = Path(cfg["output"]["dir"])
+        prefix = cfg["output"].get("prefix", "repseq")
+        flags_path = write_flags_report(out_dir, prefix)
+        if flags_path is not None:
+            out_files.append(flags_path)
+    except Exception as exc:
+        click.echo(f"[flags report skipped] {exc}", err=True)
     # Graphical tree figures (2H). Render a PDF + PNG of every phyloXML tree
     # built this run — done HERE, after every phylo step has written its
     # *_tree.xml, so one sweep covers all tree types. ON by default
@@ -2215,6 +2227,20 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
         out_files.append(cfg_path)
     except Exception as exc:
         click.echo(f"[config snapshot skipped] {exc}", err=True)
+    # Single-file HTML run report — bundles the flags, the tree-figure
+    # gallery, and an index of every output file into one shareable
+    # {prefix}_report.html. Written LAST so its file index sees everything.
+    # Decoupled + soft like the other report sweeps.
+    try:
+        from .output.html_report import write_html_report
+        out_dir = Path(cfg["output"]["dir"])
+        prefix = cfg["output"].get("prefix", "repseq")
+        html_path = write_html_report(out_dir, prefix, cfg)
+        if html_path is not None:
+            out_files.append(html_path)
+            click.echo(f"Wrote HTML report: {html_path.name}")
+    except Exception as exc:
+        click.echo(f"[HTML report skipped] {exc}", err=True)
     click.echo(f"\nOutput written to: {cfg['output']['dir']}")
     for f in out_files:
         click.echo(f"  {f.name}")

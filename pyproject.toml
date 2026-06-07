@@ -47,3 +47,12 @@ include = ["repseq*"]
 # Bundled HMM sets: the top-level viral-core database plus any
 # family-specific subdirectory of .hmm files (e.g. data/hmms/Filoviridae/).
 repseq = ["data/hmms/*.hmm", "data/hmms/*/*.hmm", "data/hmms/*/README.md"]
+
+[tool.pytest.ini_options]
+# The `integration` tests invoke the real external tools (mafft, FastTree,
+# mmseqs) end-to-end. They are OPT-IN: skipped by default via the addopts
+# filter below, run explicitly with `pytest -m integration`.
+markers = [
+    "integration: end-to-end test using the real external binaries (opt-in).",
+]
+addopts = "-m 'not integration'"
