@@ -673,6 +673,21 @@ DEFAULTS: dict[str, Any] = {
         # "present no matter what" guarantee. Audit in
         # {prefix}_force_selected.tsv.
         "force_select": False,
+        # exclude: a blocklist. Named sequences are dropped from the input
+        # the moment it is read — before metadata resolution, QC, or
+        # clustering — exactly as if the records had been deleted from the
+        # FASTA. For sequences known to be "bad" (chimeric, mislabelled,
+        # contaminated). Matching is by accession / id only, case- and
+        # version-insensitive (isolate_id is not yet populated this early).
+        # Has its own dedicated id list (NOT the shared `ids` above); a
+        # config that lists the same id under both exclude and a keep/pin
+        # capability is a hard error. Dropped records are audited in
+        # {prefix}_excluded.tsv and the run summary. Default off.
+        "exclude": {
+            "enabled": False,
+            "ids": [],
+            "ids_file": None,
+        },
     },
 }
 
@@ -2104,6 +2119,48 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                     f"{', '.join(map(str, bad))}. Valid tokens: "
                     f"{', '.join(QC_PROTECT_STAGES)} (or \"all\")."
                 )
+
+    # Exclude blocklist (overrides.exclude): own dedicated id list.
+    ex = ov.get("exclude", {}) or {}
+    if "enabled" in ex and not isinstance(ex.get("enabled"), bool):
+        errors.append("overrides.exclude.enabled must be a boolean")
+    ex_ids = ex.get("ids", [])
+    if ex_ids is not None and not isinstance(ex_ids, list):
+        errors.append(
+            "overrides.exclude.ids must be a list of accession/id strings"
+        )
+    ex_file = ex.get("ids_file")
+    if ex_file is not None and not isinstance(ex_file, str):
+        errors.append("overrides.exclude.ids_file must be a path string (or null)")
+    # Contradiction guard: the same id cannot be both blocklisted and
+    # force-kept / force-selected. Only meaningful when a keep/pin capability
+    # is actually active (the shared `ids` list is inert otherwise), and only
+    # attempted once the id fields have valid types (else the type errors
+    # above already explain the problem).
+    types_ok = isinstance(ex_ids, list) and (ex_file is None or isinstance(ex_file, str))
+    if (ov.get("protect_qc") or ov.get("force_select")) and types_ok:
+        from .overrides import _norm_id, _strip_version, resolve_ids, resolve_raw_ids
+
+        keep_set = resolve_ids(ov)
+        exclude_set = resolve_ids({"ids": ex_ids, "ids_file": ex_file})
+        clash = keep_set & exclude_set
+        if clash:
+            # Echo the ids as the user typed them (original case), not the
+            # normalised forms, so the message is actionable.
+            raw = resolve_raw_ids({"ids": ex_ids, "ids_file": ex_file})
+            shown = [
+                r for r in raw
+                if (_norm_id(r) in clash
+                    or _strip_version(_norm_id(r) or "") in clash)
+            ] or sorted(clash)
+            errors.append(
+                "overrides.exclude lists id(s) that are also force-kept "
+                "(overrides.protect_qc) or force-selected "
+                "(overrides.force_select): "
+                f"{', '.join(shown[:10])}"
+                f"{' …' if len(shown) > 10 else ''}. An id cannot be both "
+                "removed and guaranteed — remove it from one list."
+            )
 
     return errors
 

@@ -843,3 +843,18 @@ overrides:
   # pin that didn't survive QC is reported as `unavailable`. Per-sequence
   # actions are written to {prefix}_force_selected.tsv. CLI: --pin-ids FILE.
   force_select: false
+  # exclude: an input blocklist. Listed sequences are dropped the moment the
+  # FASTA is read — before metadata resolution, QC, and clustering — exactly
+  # as if you had deleted those records from the input file. For sequences
+  # known to be bad (chimeric, mislabelled, contaminated). This has its OWN
+  # dedicated id list (NOT the shared `ids` above); listing the same id here
+  # and under protect_qc/force_select is a hard error. Matching is by
+  # accession / id only, case- and version-insensitive (isolate_id is not yet
+  # populated this early). Dropped records are written to
+  # {prefix}_excluded.tsv. CLI: --exclude-ids FILE.
+  exclude:
+    enabled: false
+    ids: []
+    # ids_file: path to a file with one accession/id per line ('#' comments
+    # and blank lines ignored), unioned with the inline `ids` above.
+    ids_file: null

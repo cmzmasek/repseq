@@ -449,3 +449,145 @@ def test_write_overrides_tsv_writes_rows(tmp_path):
     assert lines[0] == "id\tstage\twould_be_reason"
     assert lines[1] == "B\tambiguous\tambiguous_fraction:1.000>0.05"
     assert lines[2] == "B\thmm\thmm_failed:S:Foo"
+
+
+# ---------------------------------------------------------------------------
+# exclude (input blocklist: apply_exclusions / validation / CLI flag)
+# ---------------------------------------------------------------------------
+
+from repseq.overrides import apply_exclusions, resolve_raw_ids
+from repseq.output.report import write_excluded_tsv
+
+
+def _excl_cfg(ids):
+    """A cfg with the exclude runtime populated, as _resolve_overrides would."""
+    ov = {"exclude": {"enabled": True, "ids": ids}}
+    return {
+        "_overrides_runtime": {
+            "exclude_ids": resolve_ids(ov["exclude"]),
+            "exclude_raw_ids": resolve_raw_ids(ov["exclude"]),
+        }
+    }
+
+
+def test_exclude_drops_by_accession_version_insensitive():
+    keep = _S("A", accession="NC_111.1")
+    drop = _S("B", accession="NC_222.3")
+    # List the unversioned form; must still match NC_222.3.
+    kept, audit = apply_exclusions([keep, drop], _excl_cfg(["NC_222"]))
+    assert kept == [keep]
+    assert [(e["id"], e["action"]) for e in audit] == [("NC_222.3", "excluded")]
+    assert audit[0]["detail"] == "matched on accession"
+
+
+def test_exclude_matches_by_id_when_no_accession():
+    s = _seq("WEIRD_ID", "ACGT")  # accession None
+    kept, audit = apply_exclusions([s], _excl_cfg(["weird_id"]))
+    assert kept == []
+    assert audit[0]["action"] == "excluded"
+    assert audit[0]["detail"] == "matched on id"
+
+
+def test_exclude_does_not_match_isolate_id():
+    # Deliberate: isolate_id isn't populated this early, so the blocklist is
+    # header-id-only. An isolate_id-only match must NOT drop the sequence.
+    s = _seq("X", "ACGT", accession="ACC1", isolate_id="isoZ")
+    kept, audit = apply_exclusions([s], _excl_cfg(["isoZ"]))
+    assert kept == [s]
+    assert [e["action"] for e in audit] == ["unavailable"]
+
+
+def test_exclude_reports_unavailable_id():
+    s = _S("A", accession="ACC1")
+    kept, audit = apply_exclusions([s], _excl_cfg(["GHOST"]))
+    assert kept == [s]
+    assert audit == [{
+        "id": "GHOST", "action": "unavailable",
+        "detail": "no input sequence matched (typo, or already absent)",
+    }]
+
+
+def test_exclude_noop_when_empty():
+    s = _S("A", accession="ACC1")
+    cfg = {"_overrides_runtime": {"exclude_ids": frozenset()}}
+    kept, audit = apply_exclusions([s], cfg)
+    assert kept == [s] and audit == []
+
+
+def test_write_excluded_tsv_writes_and_skips(tmp_path):
+    path = tmp_path / "x_excluded.tsv"
+    assert write_excluded_tsv({}, path) is False
+    assert not path.exists()
+    cfg = {"_excluded_runtime": {"audit": [
+        {"id": "NC_1.1", "action": "excluded", "detail": "matched on accession"},
+        {"id": "GHOST", "action": "unavailable", "detail": "no input sequence matched"},
+    ]}}
+    assert write_excluded_tsv(cfg, path) is True
+    lines = path.read_text().splitlines()
+    assert lines[0] == "id\taction\tdetail"
+    assert lines[1] == "NC_1.1\texcluded\tmatched on accession"
+    assert lines[2] == "GHOST\tunavailable\tno input sequence matched"
+
+
+# ---- validation: exclude block + contradiction guard ----
+
+def test_validate_rejects_exclude_bad_types():
+    cfg = copy.deepcopy(DEFAULTS)
+    cfg["overrides"]["exclude"] = {"enabled": "yes", "ids": "NC_1", "ids_file": 3}
+    errs = validate_config(cfg)
+    assert any("overrides.exclude.enabled must be a boolean" in e for e in errs)
+    assert any("overrides.exclude.ids must be a list" in e for e in errs)
+    assert any("overrides.exclude.ids_file must be a path string" in e for e in errs)
+
+
+def test_validate_rejects_exclude_protect_conflict():
+    cfg = copy.deepcopy(DEFAULTS)
+    cfg["overrides"]["ids"] = ["NC_045512.2"]
+    cfg["overrides"]["protect_qc"] = True
+    cfg["overrides"]["exclude"] = {"enabled": True, "ids": ["NC_045512"]}
+    errs = validate_config(cfg)
+    assert any("cannot be both" in e and "NC_045512" in e for e in errs)
+
+
+def test_validate_no_conflict_when_keep_pin_off():
+    # Same id in both lists is harmless when neither keep nor pin is active.
+    cfg = copy.deepcopy(DEFAULTS)
+    cfg["overrides"]["ids"] = ["NC_045512.2"]  # inert: flags off
+    cfg["overrides"]["exclude"] = {"enabled": True, "ids": ["NC_045512.2"]}
+    errs = validate_config(cfg)
+    assert not any("cannot be both" in e for e in errs)
+
+
+def test_validate_default_config_has_exclude_block():
+    cfg = copy.deepcopy(DEFAULTS)
+    assert cfg["overrides"]["exclude"] == {
+        "enabled": False, "ids": [], "ids_file": None
+    }
+    assert validate_config(cfg) == []
+
+
+# ---- --exclude-ids CLI flag (via _load_and_validate) ----
+
+def test_exclude_ids_flag_merges_file_and_enables(tmp_path):
+    from repseq.cli import _load_and_validate
+
+    bad = tmp_path / "bad.txt"
+    bad.write_text("# chimeric\nNC_9.1\n\nKJ642623\n")
+    out = tmp_path / "out"
+    cfg = _load_and_validate(
+        config_path=None, output_dir=str(out), prefix="t",
+        threads=None, seed=None, exclude_ids=str(bad),
+    )
+    assert cfg["overrides"]["exclude"]["enabled"] is True
+    rt = cfg["_overrides_runtime"]
+    assert "nc_9.1" in rt["exclude_ids"] and "kj642623" in rt["exclude_ids"]
+    assert "NC_9.1" in rt["exclude_raw_ids"]
+
+
+def test_resolve_overrides_skips_exclude_when_disabled():
+    from repseq.cli import _resolve_overrides
+
+    cfg = {"overrides": {"exclude": {"enabled": False, "ids": ["NC_1"]}}}
+    _resolve_overrides(cfg)
+    # Disabled => no ids resolved, so the blocklist is a no-op.
+    assert cfg["_overrides_runtime"]["exclude_ids"] == frozenset()

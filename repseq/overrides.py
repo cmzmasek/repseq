@@ -15,6 +15,14 @@ Two capabilities over one id list, independently toggled:
   appear among the representatives, regardless of how clustering would have
   collapsed them (:func:`apply_force_select`).
 
+A third capability, **exclude** (:func:`apply_exclusions`), is the mirror
+image: named sequences are dropped from the input the moment it is read —
+before metadata resolution, QC, or clustering — exactly as if they had been
+deleted from the FASTA. It carries its own dedicated id list
+(``overrides.exclude.ids`` / ``ids_file``), kept separate from the shared
+keep/pin list above; ``validate_config`` rejects a config that lists the
+same id under both (an id cannot be both removed and guaranteed).
+
 Config (``overrides:`` block)::
 
     overrides:
@@ -363,3 +371,64 @@ def apply_force_select(result, pool, cfg) -> None:
                           "detail": "diversity-deselected; added as singleton"})
 
     result.force_selected = audit
+
+
+# ---------------------------------------------------------------------------
+# Exclude (input blocklist)
+# ---------------------------------------------------------------------------
+
+def apply_exclusions(sequences, cfg) -> tuple[list, list[dict]]:
+    """Drop blocklisted sequences before any processing.
+
+    Reads the resolved exclude id set from ``cfg["_overrides_runtime"]``
+    (``exclude_ids`` / ``exclude_raw_ids``, populated by the CLI's
+    ``_resolve_overrides``) and removes every input sequence whose
+    ``accession`` or ``id`` matches — case- and version-insensitively, the
+    same normalisation the keep/pin path uses. ``isolate_id`` is **not**
+    consulted: this runs before the GenBank lookup that populates it, so it
+    would always be empty here; matching is deliberately header-id-only,
+    mirroring "delete this record from the FASTA".
+
+    Returns ``(kept_sequences, audit)``. ``audit`` is a list of
+    ``{id, action, detail}`` entries (parallel to the force-select audit):
+    one ``action="excluded"`` row per dropped sequence, plus one
+    ``action="unavailable"`` row per configured id that matched nothing (a
+    typo-catcher). No-op (returns the input list and an empty audit) when no
+    exclude id is configured.
+    """
+    rt = cfg.get("_overrides_runtime") or {}
+    exclude_ids: frozenset[str] = rt.get("exclude_ids", frozenset())
+    if not exclude_ids:
+        return sequences, []
+
+    kept: list = []
+    audit: list[dict] = []
+    matched_forms: set[str] = set()
+    for seq in sequences:
+        hit_on: Optional[str] = None
+        for field in ("accession", "id"):
+            n = _norm_id(getattr(seq, field, None))
+            if n is not None and (n in exclude_ids or _strip_version(n) in exclude_ids):
+                hit_on = field
+                matched_forms.add(n)
+                matched_forms.add(_strip_version(n))
+                break
+        if hit_on is not None:
+            audit.append({
+                "id": getattr(seq, "accession", None) or getattr(seq, "id", "") or "",
+                "action": "excluded",
+                "detail": f"matched on {hit_on}",
+            })
+        else:
+            kept.append(seq)
+
+    # Unavailable: configured ids that matched no input sequence.
+    for raw in rt.get("exclude_raw_ids", ()):
+        n = _norm_id(raw)
+        if n is not None and n not in matched_forms and _strip_version(n) not in matched_forms:
+            audit.append({
+                "id": raw, "action": "unavailable",
+                "detail": "no input sequence matched (typo, or already absent)",
+            })
+
+    return kept, audit

@@ -167,6 +167,30 @@ def write_force_selected_tsv(result: RunResult, path: Path) -> bool:
     return True
 
 
+def write_excluded_tsv(cfg: dict[str, Any], path: Path) -> bool:
+    """Write the input-blocklist audit TSV (overrides.exclude).
+
+    One row per audit entry from ``cfg["_excluded_runtime"]``: ``id``, the
+    ``action`` taken (``excluded`` for a dropped input record,
+    ``unavailable`` for a configured id that matched nothing), and a
+    ``detail`` string. Same schema as ``{prefix}_force_selected.tsv``.
+    Returns ``False`` (writing nothing) when nothing was excluded, so a run
+    without the override leaves no empty file behind.
+    """
+    audit = ((cfg.get("_excluded_runtime") or {}).get("audit")) or []
+    if not audit:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("id\taction\tdetail\n")
+        for entry in audit:
+            fh.write(
+                f"{_tsv_safe(entry['id'])}\t{_tsv_safe(entry['action'])}\t"
+                f"{_tsv_safe(entry.get('detail', ''))}\n"
+            )
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Representative metadata TSV
 # ---------------------------------------------------------------------------
@@ -2684,6 +2708,11 @@ def write_all_reports(
     force_selected_path = out_dir / f"{prefix}_force_selected.tsv"
     if write_force_selected_tsv(result, force_selected_path):
         output_files.append(force_selected_path)
+    # Input-blocklist audit (overrides.exclude): only written when at least
+    # one input record was excluded.
+    excluded_path = out_dir / f"{prefix}_excluded.tsv"
+    if write_excluded_tsv(cfg, excluded_path):
+        output_files.append(excluded_path)
     # Mode-aware: segmented runs produce one row per representative
     # isolate (CONCAT|<isolate_id> Sequence with concat_segments
     # populated); non-segmented runs produce one row per representative

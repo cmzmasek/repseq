@@ -159,7 +159,8 @@ Every mode also accepts: `--input/-i`, `--output-dir/-o`, `--config/-c`,
 `--verbose`, `--alphabet-for-clustering {protein,nucleotide}`,
 `--concatenate-markers/--no-concatenate-markers`,
 `--protect-ids FILE` (force-keep a list through QC), `--pin-ids FILE`
-(force-select a list as representatives) — see
+(force-select a list as representatives), `--exclude-ids FILE` (blocklist a list
+out of the input) — see
 [Sequences of special importance](#sequences-of-special-importance--overrides).
 
 Two diagnostic/utility subcommands:
@@ -241,6 +242,7 @@ flags you passed. At a glance:
 | `{prefix}_qc_removed.tsv` | yes | Every dropped sequence and the reason. |
 | `{prefix}_overrides.tsv` | when any sequence was force-kept | Force-keep audit: each sequence `overrides.protect_qc` rescued from a QC stage, with the reason it would otherwise have been dropped. |
 | `{prefix}_force_selected.tsv` | when any sequence was force-selected | Force-select audit: each `overrides.force_select` / `--pin-ids` pin and the action taken. |
+| `{prefix}_excluded.tsv` | when any sequence was blocklisted | Input-blocklist audit: each `overrides.exclude` / `--exclude-ids` record dropped on load, plus any exclude id that matched nothing. |
 | `{prefix}_group_counts.tsv` | yes | One row per stratum: in / out / clustered / cutoff. |
 | `{prefix}_clusters.tsv` | yes | Which sequences ended up grouped, who represents whom. |
 | `{prefix}_representatives.fasta` | non-segmented | Selected representative sequences. |
@@ -517,6 +519,15 @@ The selection-side audit for `overrides.force_select` / `--pin-ids`. Columns:
 `added_representative` (clustering had deselected it), `already_representative`,
 or `unavailable` (no surviving sequence matched). Only written when at least one
 sequence was pinned.
+
+#### `{prefix}_excluded.tsv` — when a sequence was blocklisted
+
+The input-blocklist audit for `overrides.exclude` / `--exclude-ids`. Columns:
+`id`, `action`, `detail`. `action` ∈ `excluded` (a record dropped on load, with
+`detail` naming the field it matched on) or `unavailable` (an exclude id that
+matched no input sequence — a typo-catcher). Only written when at least one
+record was excluded. See
+[Excluding bad sequences](#excluding-bad-sequences).
 
 #### `{prefix}_hmm_diagnostic.tsv` — when the HMM tier ran
 
@@ -1275,6 +1286,11 @@ capabilities** over that one list:
   appear among the representatives, regardless of how clustering would have
   collapsed them.
 
+A third capability, **`exclude`**, is the mirror image — a blocklist that
+*removes* named sequences from the input before anything runs (see
+[Excluding bad sequences](#excluding-bad-sequences) below). It carries its own
+separate id list, not the shared one above.
+
 ```yaml
 overrides:
   ids: ["NC_045512.2", "MN908947"]   # accessions (or isolate_ids, segmented)
@@ -1339,6 +1355,43 @@ the representatives by the rule that disturbs the rest of the selection least:
   any pins were added — they can sum to fewer than the final representative count.
   The pinned additions show up in the representative files,
   `{prefix}_force_selected.tsv`, and the final counts in `{prefix}_summary.md`.
+
+### Excluding bad sequences
+
+The inverse of force-keep: a **blocklist** for records you know are bad
+(chimeric, mislabelled, contaminated). Listed sequences are dropped the moment
+the FASTA is read — **before** metadata resolution, QC, and clustering — exactly
+as if you had deleted them from the input file. They cost no network lookups and
+appear in no QC counter.
+
+```yaml
+overrides:
+  exclude:
+    enabled: true
+    ids: ["KJ642623.1"]    # accessions/ids; OR a file below
+    ids_file: bad.txt      # one id per line; unioned with `ids`
+```
+
+Or on the command line — `--exclude-ids FILE` reads one id per line (`#` comments
+and blanks ignored), unions with any `overrides.exclude.ids` /
+`overrides.exclude.ids_file`, and turns the blocklist on for that run:
+
+```bash
+repseq global -c my_config.yaml -i seqs.fasta -T 0.9 --exclude-ids bad.txt
+```
+
+- **Matching** is by `accession` or `id` only, **case- and version-insensitive**
+  (`NC_222` matches `NC_222.3`). Unlike force-keep/force-select it does *not* match
+  `isolate_id` — exclusion runs before the GenBank lookup that populates it, so the
+  rule is deliberately header-id-only.
+- **Its own id list.** The `exclude` block has a dedicated `ids` / `ids_file`,
+  separate from the shared keep/pin list. Listing the same id under both `exclude`
+  and `protect_qc`/`force_select` is a **hard error** — an id cannot be both
+  removed and guaranteed.
+- **Audited, never silent.** Every dropped record goes to `{prefix}_excluded.tsv`
+  (`id`, `action`, `detail`); an exclude id that matched nothing is reported there
+  as `unavailable` plus a stderr warning (a typo-catcher). The count is summarised
+  in `{prefix}_summary.md`.
 
 ---
 
@@ -2168,7 +2221,7 @@ that license; it comes with **no warranty**. The full license text is in the
 
 ## Status
 
-Current: **`v0.56.0`**. All 8 selection modes; protein-alphabet clustering by
+Current: **`v0.57.0`**. All 8 selection modes; protein-alphabet clustering by
 default (`alphabet_for_clustering: protein`); MMseqs2 and cd-hit backends;
 optional protein-annotation and protein-quality QC; per-isolate
 taxonomy-consistency QC and strain-as-isolate provenance + collision detection for
@@ -2181,11 +2234,12 @@ domain-architecture trees with a pairwise Robinson-Foulds incongruence table,
 per-segment NT trees, a pre-cluster overview tree, an opt-in phylogeny-based
 taxonomy review, per-MSA conservation scoring, and an always-on per-taxon
 monophyly report; **`extra_protein`** accessory-protein and **`polyprotein`**
-mature-peptide channels (FASTAs, trees, reports); a force-keep / force-select
-`overrides` system; an optional UMAP/MDS clustering plot; plain-English flags and
-a single-file HTML report; an auto-generated Methods-section starter
-(`_summary.md`), a reproducibility lockfile (`repseq replay`), and a sanitized
-config snapshot on every run. **1,393 offline regression tests pass**; the
+mature-peptide channels (FASTAs, trees, reports); a force-keep / force-select /
+input-blocklist `overrides` system; an optional UMAP/MDS clustering plot;
+plain-English flags and a single-file HTML report; an auto-generated
+Methods-section starter (`_summary.md`), a reproducibility lockfile
+(`repseq replay`), and a sanitized config snapshot on every run. **1,407 offline
+regression tests pass**; the
 NCBI-backed paths have been validated end-to-end against live influenza-A,
 peribunyaviridae, hantaviridae, and coronaviridae datasets. See `git log` for the
 full release history.

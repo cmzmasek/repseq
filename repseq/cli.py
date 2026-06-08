@@ -286,13 +286,31 @@ def _shared_options(fn):
             "isolate_id, case- and version-insensitive."
         ),
     )(fn)
+    fn = click.option(
+        "--exclude-ids", "exclude_ids", default=None,
+        help=(
+            "Path to a file of accessions / ids to EXCLUDE from the input "
+            "(one per line; '#' comments and blank lines ignored). Listed "
+            "sequences are dropped the moment the FASTA is read — before "
+            "metadata resolution, QC, and clustering — exactly as if you had "
+            "deleted those records from the input file. Use this for "
+            "sequences known to be bad (chimeric, mislabelled, contaminated). "
+            "The file is unioned with any overrides.exclude.ids / "
+            "overrides.exclude.ids_file in the config and turns "
+            "overrides.exclude ON for the run. Matching is by accession / id, "
+            "case- and version-insensitive (NC_045512 matches NC_045512.2). "
+            "Dropped records are listed in {prefix}_excluded.tsv. An id listed "
+            "here may not also be force-kept (--protect-ids) or force-selected "
+            "(--pin-ids) — that contradiction is a hard error."
+        ),
+    )(fn)
     return fn
 
 
 def _load_and_validate(config_path, output_dir, prefix, threads, seed,
                        alphabet_for_clustering=None, concatenate_markers=None,
                        fast=False, verbose=False, protect_ids=None,
-                       pin_ids=None, newick=None, pdf=None) -> dict:
+                       pin_ids=None, exclude_ids=None, newick=None, pdf=None) -> dict:
     cfg = load_config(config_path)
     if output_dir:
         cfg["output"]["dir"] = output_dir
@@ -321,6 +339,9 @@ def _load_and_validate(config_path, output_dir, prefix, threads, seed,
     # the "one list, two independent flags" model.
     _merge_override_id_file(cfg, protect_ids, "--protect-ids", "protect_qc")
     _merge_override_id_file(cfg, pin_ids, "--pin-ids", "force_select")
+    # --exclude-ids merges into the dedicated overrides.exclude block (not
+    # the shared keep/pin id list) and flips overrides.exclude.enabled on.
+    _merge_exclude_id_file(cfg, exclude_ids)
     errors = validate_config(cfg)
     if errors:
         for e in errors:
@@ -360,6 +381,35 @@ def _merge_override_id_file(cfg: dict, path, flag_name: str, enable_key: str) ->
     ov[enable_key] = True
 
 
+def _merge_exclude_id_file(cfg: dict, path) -> None:
+    """Union an id file from ``--exclude-ids`` into overrides.exclude.ids.
+
+    Mirrors :func:`_merge_override_id_file` but targets the dedicated
+    ``overrides.exclude`` block (its own id list, kept separate from the
+    shared keep/pin list) and flips ``overrides.exclude.enabled`` on.
+    No-op when ``path`` is falsy; friendly exit on a missing file.
+    """
+    if not path:
+        return
+    from pathlib import Path as _Path
+
+    if not _Path(path).expanduser().is_file():
+        click.echo(
+            f"[error] --exclude-ids file not found: {path}. Provide a "
+            f"readable file with one accession/id per line.",
+            err=True,
+        )
+        sys.exit(1)
+    from .overrides import load_ids_file
+
+    ov = cfg.setdefault("overrides", {})
+    ex = ov.setdefault("exclude", {})
+    ex["ids"] = list(ex.get("ids") or []) + load_ids_file(
+        str(_Path(path).expanduser())
+    )
+    ex["enabled"] = True
+
+
 def _resolve_overrides(cfg: dict) -> None:
     """Resolve the overrides id list once and cache it on the cfg.
 
@@ -390,13 +440,47 @@ def _resolve_overrides(cfg: dict) -> None:
         ov = {**ov, "ids_file": str(_Path(path).expanduser())}
     ids = resolve_ids(ov)
     stages = resolve_stages(ov.get("protect_stages", "all"))
+    # Exclude blocklist — own dedicated id list + file (friendly error on a
+    # missing file, mirroring the keep/pin block above).
+    ex = dict(ov.get("exclude") or {})
+    exclude_enabled = bool(ex.get("enabled", False))
+    ex_path = ex.get("ids_file")
+    if ex_path:
+        from pathlib import Path as _Path
+
+        if not _Path(ex_path).expanduser().is_file():
+            click.echo(
+                f"[config error] overrides.exclude.ids_file not found: "
+                f"{ex_path}. Provide a readable file (one accession/id per "
+                f"line) or remove the key.",
+                err=True,
+            )
+            sys.exit(1)
+        ex = {**ex, "ids_file": str(_Path(ex_path).expanduser())}
+    exclude_ids = resolve_ids(ex) if exclude_enabled else frozenset()
+    exclude_raw_ids = resolve_raw_ids(ex) if exclude_enabled else ()
     cfg["_overrides_runtime"] = {
         "ids": ids,
         "stages": stages,
         "protect_qc": protect_qc,
         "force_select": force_select,
         "raw_ids": resolve_raw_ids(ov),
+        "exclude_ids": exclude_ids,
+        "exclude_raw_ids": exclude_raw_ids,
     }
+    if exclude_enabled and not exclude_ids:
+        click.echo(
+            "[overrides] overrides.exclude is enabled but no "
+            "overrides.exclude.ids / overrides.exclude.ids_file were "
+            "provided — nothing will be excluded.",
+            err=True,
+        )
+    elif exclude_ids:
+        click.echo(
+            f"[overrides] input blocklist active: {len(exclude_ids)} "
+            f"id-form(s) will be excluded before QC.",
+            err=True,
+        )
     if (protect_qc or force_select) and not ids:
         which = " / ".join(
             w for w, on in (("protect_qc", protect_qc),
@@ -553,6 +637,42 @@ def _load_sequences(input_paths: tuple[str, ...], source_override: str = "auto")
     if override:
         click.echo(f"Source override: {source_override}")
     return sequences
+
+
+def _apply_exclusions(sequences, cfg):
+    """Drop user-blocklisted sequences (overrides.exclude) before anything else.
+
+    Runs immediately after loading and before metadata resolution, so an
+    excluded record costs no network lookup, no QC, no clustering — exactly
+    as if it had been deleted from the input FASTA. Stashes the audit on
+    ``cfg["_excluded_runtime"]`` for ``{prefix}_excluded.tsv`` and the run
+    summary, prints a one-line stderr report, and warns about configured
+    ids that matched nothing. No-op when the blocklist is empty.
+    """
+    from .overrides import apply_exclusions
+
+    kept, audit = apply_exclusions(sequences, cfg)
+    if not audit:
+        return sequences
+    cfg["_excluded_runtime"] = {"audit": audit}
+    n_excluded = sum(1 for e in audit if e["action"] == "excluded")
+    unavailable = [e["id"] for e in audit if e["action"] == "unavailable"]
+    prefix = cfg.get("output", {}).get("prefix", "repseq")
+    if n_excluded:
+        click.echo(
+            f"  Excluded {n_excluded} sequence(s) via the input blocklist "
+            f"(overrides.exclude); see {prefix}_excluded.tsv.",
+            err=True,
+        )
+    if unavailable:
+        click.echo(
+            f"  [overrides] WARNING: {len(unavailable)} exclude id(s) matched "
+            f"no input sequence (typo, or already absent): "
+            f"{', '.join(unavailable[:10])}"
+            f"{' …' if len(unavailable) > 10 else ''}.",
+            err=True,
+        )
+    return kept
 
 
 def _resolve_metadata(sequences, cfg, no_resolve):
@@ -2427,14 +2547,14 @@ def run_doctor_cmd(config_path, no_network):
 @click.option("--n-select", "-n", default=None, type=int,
               help="Number of representative sequences to select.")
 def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick, pdf,threshold, n_select):
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,threshold, n_select):
     """Global mode: cluster at a threshold or select N diverse sequences."""
     if threshold is None and n_select is None:
         raise click.UsageError("Provide --threshold or --n-select.")
 
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
     if segmented:
         cfg["segmented"]["enabled"] = True
 
@@ -2443,6 +2563,7 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
+    sequences = _apply_exclusions(sequences, cfg)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
@@ -2473,11 +2594,11 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-group", "-n", required=True, type=int,
               help="Target representatives per taxonomic group.")
 def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick, pdf,rank, n_per_group):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,rank, n_per_group):
     """Taxonomic mode 1: N representatives per taxonomic rank group."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2485,6 +2606,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
+    sequences = _apply_exclusions(sequences, cfg)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
@@ -2513,7 +2635,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--rank-levels", "-r", required=True,
               help='JSON list of {rank, n_per_group} dicts. E.g. \'[{"rank":"family","n_per_group":20},{"rank":"genus","n_per_group":5}]\'')
 def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick, pdf,rank_levels):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,rank_levels):
     """Taxonomic mode 2: hierarchical multi-rank nested clustering."""
     import json as _json
     try:
@@ -2523,7 +2645,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
 
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2531,6 +2653,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
+    sequences = _apply_exclusions(sequences, cfg)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
@@ -2559,11 +2682,11 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-host", "-n", required=True, type=int,
               help="Target representatives per host organism.")
 def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick, pdf,n_per_host):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,n_per_host):
     """Host-stratified mode: N representatives per host organism."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2571,6 +2694,7 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
+    sequences = _apply_exclusions(sequences, cfg)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
@@ -2601,11 +2725,11 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--window", default="year",
               help='Time window: "year", "decade", or a number (e.g. "5" for 5-year bins).')
 def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick, pdf,n_per_window, window):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,n_per_window, window):
     """Time-stratified mode: N representatives per time window."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2613,6 +2737,7 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
+    sequences = _apply_exclusions(sequences, cfg)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
@@ -2641,11 +2766,11 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-country", "-n", required=True, type=int,
               help="Target representatives per country.")
 def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick, pdf,n_per_country):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,n_per_country):
     """Geographic mode: N representatives per country."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2653,6 +2778,7 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
+    sequences = _apply_exclusions(sequences, cfg)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
@@ -2687,12 +2813,12 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--field-regex", default=None,
               help="Regex to extract the field value from FASTA headers.")
 def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick, pdf,field, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,field, n_per_group,
                metadata_table, field_regex):
     """Custom metadata mode: group by any field or metadata table column."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2700,6 +2826,7 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
+    sequences = _apply_exclusions(sequences, cfg)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
@@ -2737,13 +2864,13 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--metadata-table", default=None,
               help="Path to TSV/CSV metadata table with accession column.")
 def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, newick, pdf,fields, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,fields, n_per_group,
                metadata_table):
     """Hybrid mode: multi-dimensional stratification (e.g. genus × host × year)."""
     field_list = [f.strip() for f in fields.split(",")]
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -2751,6 +2878,7 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
         return
 
     sequences = _load_sequences(input_paths, source_override)
+    sequences = _apply_exclusions(sequences, cfg)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
     sequences, qc_report = _run_qc(sequences, cfg)
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)

@@ -495,6 +495,19 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
     )
 
     extra_lines: list[str] = []
+    # Input blocklist (overrides.exclude) runs before any QC, so describe it
+    # first. Reads the pre-QC exclusion audit stashed on the cfg.
+    excl_audit = ((cfg.get("_excluded_runtime") or {}).get("audit")) or []
+    n_excluded = sum(1 for e in excl_audit if e.get("action") == "excluded")
+    if n_excluded:
+        extra_lines.append(
+            f"Before quality control, **{_fmt_int(n_excluded)}** sequence(s) "
+            f"were removed by the user-supplied input blocklist "
+            f"(`overrides.exclude`) — these were dropped on load, exactly as "
+            f"if deleted from the input FASTA, and never reached metadata "
+            f"resolution, QC, or clustering. The dropped records are listed "
+            f"in `{{prefix}}_excluded.tsv`."
+        )
     # The protein-annotation check is sequence-level QC but is segmented-aware:
     # in segmented mode it compares each record's GenBank CDS count against the
     # per-segment expected count (and so depends on seq.segment being populated

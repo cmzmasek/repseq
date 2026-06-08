@@ -205,6 +205,24 @@ def test_render_summary_qc_numbers_pulled_from_report(make_seq, tmp_path):
     assert "*1,200* passed basic QC" in md
 
 
+def test_render_summary_describes_input_blocklist(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["_excluded_runtime"] = {"audit": [
+        {"id": "NC_1.1", "action": "excluded", "detail": "matched on accession"},
+        {"id": "GHOST", "action": "unavailable", "detail": "no input sequence matched"},
+    ]}
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    # Only the 'excluded' action is counted (not 'unavailable').
+    assert "**1** sequence(s) were removed by the user-supplied input blocklist" in md
+    assert "`overrides.exclude`" in md
+    assert "{prefix}_excluded.tsv" in md
+
+
+def test_render_summary_omits_blocklist_when_nothing_excluded(make_seq, tmp_path):
+    md = render_summary(_base_cfg(tmp_path), _qc(), _result(make_seq), ["a.fasta"])
+    assert "input blocklist" not in md
+
+
 def test_render_summary_diversity_mode_does_not_name_a_clustering_binary(make_seq, tmp_path):
     """global -n (global:count) runs alignment-free MaxMin selection — NO
     clustering binary executes. The summary must not claim/cite that a
