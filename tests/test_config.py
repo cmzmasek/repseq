@@ -71,6 +71,71 @@ def test_write_effective_config_no_comments_no_secrets_reloadable(tmp_path: Path
     assert reloaded["taxonomy"]["ncbi_api_key"] is None
 
 
+def _leaf_paths(node, prefix=()):
+    """Every key path in a config dict down to a scalar / empty-container
+    leaf (recurses only into non-empty dicts, exactly like the schema)."""
+    if isinstance(node, dict) and node:
+        out: set = set()
+        for k, v in node.items():
+            out |= _leaf_paths(v, prefix + (k,))
+        return out
+    return {prefix}
+
+
+def _has_path(d, path):
+    cur = d
+    for k in path:
+        if not isinstance(cur, dict) or k not in cur:
+            return False
+        cur = cur[k]
+    return True
+
+
+def test_write_effective_config_is_complete_every_defaults_path(tmp_path: Path):
+    """The per-run snapshot must capture EVERY setting at its runtime value,
+    not just the top-level sections. Guards against a nested DEFAULTS leaf
+    silently dropping out of the written file (regression guard for the
+    'output config must be complete' contract). Top-level-only checks miss
+    this — assert every nested leaf path survives."""
+    cfg = load_config(None)
+    path = tmp_path / effective_config_filename("complete")
+    write_effective_config(cfg, path)
+    written = yaml.safe_load(path.read_text())
+
+    missing = sorted(
+        ".".join(p) for p in _leaf_paths(DEFAULTS) if not _has_path(written, p)
+    )
+    assert missing == [], f"snapshot is missing settings: {missing}"
+    # And it must re-load as a valid config (round-trippable for replay).
+    assert validate_config(load_config(path)) == []
+
+
+def test_write_effective_config_preserves_user_keyed_blocks(tmp_path: Path):
+    """User-keyed open structures (segmented viruses, marker specs) are data,
+    not schema — they must survive into the snapshot verbatim so the run is
+    reproducible."""
+    cfg = load_config(None)
+    cfg["segmented"]["enabled"] = True
+    cfg["segmented"]["virus"] = "flu"
+    cfg["segmented"]["viruses"] = {
+        "flu": {
+            "expected_segments": 2,
+            "segments": ["L", "S"],
+            "isolate_regex": r"(?P<isolate>\w+)",
+        }
+    }
+    cfg["clustering"]["cluster_protein"] = [
+        {"name": "RdRp", "hmms": ["RdRp_1"]}
+    ]
+    path = tmp_path / effective_config_filename("user")
+    write_effective_config(cfg, path)
+    written = yaml.safe_load(path.read_text())
+    assert written["segmented"]["viruses"]["flu"]["segments"] == ["L", "S"]
+    assert written["clustering"]["cluster_protein"] == [
+        {"name": "RdRp", "hmms": ["RdRp_1"]}
+    ]
+
+
 def test_load_config_returns_defaults_when_no_file():
     cfg = load_config(None)
     assert cfg["threads"] == DEFAULTS["threads"]
