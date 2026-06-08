@@ -91,7 +91,9 @@ conda install -c bioconda mafft iqtree fasttree # Linux (conda)
 ## Quickstart
 
 **Step 1 — make a config file** (cleaning thresholds, your NCBI email, etc.). A
-wizard asks you the questions:
+short wizard asks a few questions, then writes a **complete, fully-commented**
+config — every setting present at its default with an inline explanation, your
+answers pre-filled:
 
 ```bash
 repseq init-config -o my_config.yaml
@@ -1570,9 +1572,11 @@ it's drawn from a subsample (representatives always included); skipped for
 
 ## The config file
 
-`config/default_config.yaml` is fully commented and documents every option — read
-that file as the reference. The `repseq init-config` wizard writes a starter
-config. The most-changed settings:
+`repseq init-config` writes a **complete, fully-commented** config: every
+option present at its default with an inline explanation, so the generated file
+*is* the reference — read the comments in place and edit what you need. (The
+same canonical content is bundled at `repseq/data/default_config.yaml`.) The
+most-changed settings:
 
 ```yaml
 qc:
@@ -1591,7 +1595,8 @@ clustering:
   mmseqs2_mode: easy-linclust     # fast; use easy-cluster for tighter, slower clustering
   coverage: 0.8
   # cd-hit options (only used when backend == cdhit) live under
-  # `clustering.cdhit:` — see default_config.yaml for the full block.
+  # `clustering.cdhit:` — see that block in your generated config (it's
+  # there with comments) for the full set.
 
 representative:
   # Ordered preference for picking each cluster's "best" sequence: the first
@@ -2221,7 +2226,7 @@ that license; it comes with **no warranty**. The full license text is in the
 
 ## Status
 
-Current: **`v0.57.0`**. All 8 selection modes; protein-alphabet clustering by
+Current: **`v0.58.0`**. All 8 selection modes; protein-alphabet clustering by
 default (`alphabet_for_clustering: protein`); MMseqs2 and cd-hit backends;
 optional protein-annotation and protein-quality QC; per-isolate
 taxonomy-consistency QC and strain-as-isolate provenance + collision detection for
@@ -2238,7 +2243,7 @@ mature-peptide channels (FASTAs, trees, reports); a force-keep / force-select /
 input-blocklist `overrides` system; an optional UMAP/MDS clustering plot;
 plain-English flags and a single-file HTML report; an auto-generated
 Methods-section starter (`_summary.md`), a reproducibility lockfile
-(`repseq replay`), and a sanitized config snapshot on every run. **1,407 offline
+(`repseq replay`), and a sanitized config snapshot on every run. **1,419 offline
 regression tests pass**; the
 NCBI-backed paths have been validated end-to-end against live influenza-A,
 peribunyaviridae, hantaviridae, and coronaviridae datasets. See `git log` for the

@@ -1055,11 +1055,20 @@ def test_renamed_length_filter_single_message_not_doubled():
 def test_shipped_example_configs_validate_clean():
     """Drift guard: the documented schema and the segmented HMM example must
     pass the unknown-key audit. Add a key to DEFAULTS or a spec without
-    updating the matching _ALLOWED_*_KEYS set and this fails."""
-    config_dir = Path(__file__).resolve().parent.parent / "config"
-    for rel in ("default_config.yaml", "examples/alphainfluenzavirus_hmm.yaml"):
-        cfg = load_config(config_dir / rel)
-        assert validate_config(cfg) == [], f"{rel} did not validate clean"
+    updating the matching _ALLOWED_*_KEYS set and this fails.
+
+    The canonical reference config is bundled inside the package
+    (``repseq/data/default_config.yaml``) so ``repseq init-config`` can read
+    and emit it even from an installed wheel; the worked examples stay under
+    ``config/examples/``."""
+    repo_root = Path(__file__).resolve().parent.parent
+    paths = [
+        repo_root / "repseq" / "data" / "default_config.yaml",
+        repo_root / "config" / "examples" / "alphainfluenzavirus_hmm.yaml",
+    ]
+    for path in paths:
+        cfg = load_config(path)
+        assert validate_config(cfg) == [], f"{path.name} did not validate clean"
 
 
 def test_phylo_monophyly_min_support_default_is_70():

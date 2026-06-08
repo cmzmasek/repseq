@@ -729,8 +729,9 @@ SEGMENTED_VIRUS_REQUIRED_FIELDS = ["expected_segments", "segments", "isolate_reg
 # ``_audit_unknown_keys`` automatically. A key added to a SPEC dict (marker /
 # segment-marker / polyprotein / peptide / virus) MUST also be added to the
 # matching ``_ALLOWED_*_KEYS`` set below, or valid configs using it are
-# rejected. ``tests/test_config.py`` asserts ``config/default_config.yaml``
-# still validates clean as a drift guard.
+# rejected. ``tests/test_config.py`` asserts ``repseq/data/default_config.yaml``
+# (the bundled reference config that ``repseq init-config`` emits) still
+# validates clean as a drift guard.
 
 # Top-level keys the CLI injects into ``cfg`` before validation that are not
 # in DEFAULTS (so the audit must not flag them as unknown).

@@ -46,7 +46,14 @@ include = ["repseq*"]
 [tool.setuptools.package-data]
 # Bundled HMM sets: the top-level viral-core database plus any
 # family-specific subdirectory of .hmm files (e.g. data/hmms/Filoviridae/).
-repseq = ["data/hmms/*.hmm", "data/hmms/*/*.hmm", "data/hmms/*/README.md"]
+# Plus the canonical fully-commented reference config that `repseq
+# init-config` reads and emits (single source of truth for the schema docs).
+repseq = [
+    "data/hmms/*.hmm",
+    "data/hmms/*/*.hmm",
+    "data/hmms/*/README.md",
+    "data/default_config.yaml",
+]
 
 [tool.pytest.ini_options]
 # The `integration` tests invoke the real external tools (mafft, FastTree,

@@ -220,7 +220,7 @@ def pick_format_string(cfg: Optional[dict], segmented: bool) -> str:
 def labeling_options(cfg: Optional[dict]) -> dict:
     """Return ``replace_whitespace`` and ``keep_separator_on_empty`` for
     a run, falling back to the defaults documented in
-    ``config/default_config.yaml``."""
+    ``repseq/data/default_config.yaml``."""
     labeling = ((cfg or {}).get("phylo", {}) or {}).get("labeling", {}) or {}
     return {
         "replace_whitespace": labeling.get("replace_whitespace", True),

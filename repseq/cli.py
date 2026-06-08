@@ -3099,72 +3099,108 @@ def _print_input_stats(sequences, *, top_n: int = 10) -> None:
 # Config wizard
 # ---------------------------------------------------------------------------
 
+def _reference_config_text() -> str:
+    """Return the bundled, fully-commented reference config as text.
+
+    This is the single source of truth for the documented schema
+    (``repseq/data/default_config.yaml``), shipped as package data so it is
+    available even from an installed wheel. ``init-config`` emits it verbatim
+    (with the wizard's answers overlaid), so the generated file always
+    reflects *every* current setting with its inline explanation."""
+    ref = Path(__file__).resolve().parent / "data" / "default_config.yaml"
+    return ref.read_text()
+
+
+def _overlay_value(text: str, anchor: str, new_line: str) -> str:
+    """Replace the unique default line ``anchor`` with ``new_line``.
+
+    Comment-preserving: the reference template is ours and stable (the
+    ``test_shipped_example_configs_validate_clean`` drift guard keeps these
+    anchors honest), so a literal one-shot replacement is safe. If the anchor
+    is absent (template changed) the text is returned untouched so the
+    user still gets a complete, valid file with the default in place."""
+    if text.count(anchor) == 1:
+        return text.replace(anchor, new_line)
+    return text
+
+
+def _render_segmented_virus(virus_name: str, virus_def: dict) -> str:
+    """Render one virus entry as the indented body of the ``viruses:`` map.
+
+    ``viruses:`` sits at 2-space indent in the template, so its value (the
+    virus map) is indented 4 spaces; ``yaml.safe_dump`` of ``{name: def}``
+    is emitted at column 0 and shifted right by 4."""
+    dumped = yaml.safe_dump(
+        {virus_name: virus_def}, sort_keys=False, default_flow_style=False,
+    )
+    body = "\n".join(
+        ("    " + line) if line else line for line in dumped.splitlines()
+    )
+    return "  viruses:\n" + body
+
+
 @main.command("init-config")
 @click.option("--output", "-o", default="repseq_config.yaml",
               help="Path to write the generated config file.")
 def init_config(output):
-    """Interactive wizard to generate a repseq YAML config file."""
-    click.echo("repseq config wizard\n")
+    """Generate a complete, fully-commented repseq config file.
 
-    cfg = {}
-
-    cfg["cache_dir"] = click.prompt("Cache directory", default="~/.repseq/cache")
-    cfg["temp_dir"] = click.prompt("Temp directory", default="/tmp/repseq")
-    cfg["threads"] = click.prompt("Number of threads", default=4, type=int)
-    cfg["seed"] = click.prompt("Random seed", default=42, type=int)
-
-    # QC
-    cfg["qc"] = {}
-    cfg["qc"]["remove_duplicates"] = click.confirm("Remove exact duplicates?", default=True)
-
-    # Whole-genome length filter — non-segmented only, absolute nt bounds.
-    glf: dict = {"enabled": False, "min": None, "max": None}
-    if not cfg.get("segmented", {}).get("enabled") and click.confirm(
-        "Enable whole-genome length filter (non-segmented only)?", default=False
-    ):
-        glf["enabled"] = True
-        glf["min"] = click.prompt(
-            "Minimum genome length in nt (blank for none)", default=None, type=int,
-        )
-        glf["max"] = click.prompt(
-            "Maximum genome length in nt (blank for none)", default=None, type=int,
-        )
-    cfg["qc"]["genome_length_filter"] = glf
-
-    cfg["qc"]["ambiguous_threshold"] = click.prompt(
-        "Max ambiguous character fraction (0-1)", default=0.05, type=float
+    A short wizard asks a handful of common questions (output location,
+    threads, your NCBI email, clustering backend, and whether your virus is
+    segmented). It then writes the COMPLETE configuration — every current
+    setting present at its default, each documented with an inline comment —
+    and pre-fills your answers. Edit the file afterward to tune the advanced
+    sections (hmm:, phylo:, clustering markers, overrides:); each is
+    explained where it sits.
+    """
+    click.echo(
+        "repseq config wizard — a few quick questions, then a complete,\n"
+        "fully-commented config you can edit further.\n"
     )
 
-    cfg["qc"]["annotation_filter"] = {
-        "enabled": click.confirm("Enable annotation keyword filter?", default=True),
-        "keywords": [
-            "MAG:", "metagenome-assembled", "synthetic", "artificial",
-            "fragment", "partial", "environmental sample",
-            "uncultured", "unclassified", "unidentified", "hypothetical",
-        ],
-    }
+    text = _reference_config_text()
 
-    if click.confirm("Enable protein-annotation QC (fetches CDS counts from NCBI)?", default=False):
-        cfg["qc"]["protein_annotation"] = {
-            "enabled": True,
-            "min_proteins": click.prompt(
-                "Minimum number of annotated proteins per sequence", default=1, type=int
-            ),
-        }
-    else:
-        cfg["qc"]["protein_annotation"] = {"enabled": False}
+    # --- short Q&A: the handful a novice will want set up front ---
+    out_dir = click.prompt("Output directory", default="./repseq_output")
+    prefix = click.prompt("Output file prefix", default="repseq")
+    threads = click.prompt("Number of threads", default=4, type=int)
+    ncbi_email = click.prompt(
+        "NCBI email (for Entrez lookups; blank to skip)", default=""
+    )
+    ncbi_key = click.prompt(
+        "NCBI API key (optional, for faster lookups; blank to skip)", default=""
+    )
+    backend = click.prompt(
+        "Clustering backend",
+        type=click.Choice(["mmseqs2", "cdhit"]),
+        default="mmseqs2",
+    )
 
-    # Segmented
-    if click.confirm("\nConfigure segmented virus mode?", default=False):
+    text = _overlay_value(text, "threads: 4", f"threads: {threads}")
+    text = _overlay_value(text, "  dir: ./repseq_output", f"  dir: {out_dir}")
+    text = _overlay_value(text, "  prefix: repseq", f"  prefix: {prefix}")
+    if ncbi_email:
+        text = _overlay_value(
+            text, "  ncbi_email: null", f"  ncbi_email: {ncbi_email}"
+        )
+    if ncbi_key:
+        text = _overlay_value(
+            text, "  ncbi_api_key: null", f"  ncbi_api_key: {ncbi_key}"
+        )
+    if backend != "mmseqs2":
+        text = _overlay_value(text, "  backend: mmseqs2", f"  backend: {backend}")
+
+    # --- optional segmented virus definition ---
+    if click.confirm("\nConfigure a segmented virus now?", default=False):
         virus_name = click.prompt("Virus name (e.g. influenza_a)")
         n_seg = click.prompt("Number of expected segments", type=int)
         segment_list = click.prompt(
             f"Segment names in order (comma-separated, {n_seg} expected)"
         )
-        segments = [s.strip() for s in segment_list.split(",")]
+        segments = [s.strip() for s in segment_list.split(",") if s.strip()]
         isolate_regex = click.prompt(
             "Regex to extract isolate ID from header",
-            default=r"(?P<isolate>[A-Za-z]+/[^/]+/[^/]+/[^/]+/\d{4})"
+            default=r"(?P<isolate>[A-Za-z]+/[^/]+/[^/]+/[^/]+/\d{4})",
         )
         virus_def: dict = {
             "expected_segments": n_seg,
@@ -3211,87 +3247,29 @@ def init_config(output):
             if segment_lengths:
                 virus_def["segment_lengths"] = segment_lengths
 
-        cfg["segmented"] = {
-            "enabled": False,
-            "virus": virus_name,
-            "viruses": {virus_name: virus_def},
-        }
-    else:
-        cfg["segmented"] = {"enabled": False}
-
-    # Taxonomy
-    cfg["taxonomy"] = {}
-    ncbi_email = click.prompt("NCBI email (for Entrez API, leave blank to skip)", default="")
-    if ncbi_email:
-        cfg["taxonomy"]["ncbi_email"] = ncbi_email
-    ncbi_key = click.prompt("NCBI API key (optional, leave blank to skip)", default="")
-    if ncbi_key:
-        cfg["taxonomy"]["ncbi_api_key"] = ncbi_key
-    cfg["taxonomy"]["cache_ttl_days"] = click.prompt("Cache TTL (days)", default=30, type=int)
-
-    # Clustering
-    backend = click.prompt(
-        "Clustering backend",
-        type=click.Choice(["mmseqs2", "cdhit"]),
-        default="mmseqs2",
-    )
-    cfg["clustering"] = {"backend": backend}
-    if backend == "mmseqs2":
-        cfg["clustering"]["mmseqs2_mode"] = click.prompt(
-            "MMseqs2 mode", type=click.Choice(["easy-linclust", "easy-cluster"]),
-            default="easy-linclust",
+        enable_now = click.confirm(
+            "Enable segmented mode now? (No = keep the definition but activate "
+            "it per-run with --segmented)",
+            default=True,
         )
-        cfg["clustering"]["coverage"] = click.prompt(
-            "Coverage threshold", default=0.8, type=float,
+        if enable_now:
+            text = _overlay_value(
+                text, "segmented:\n  enabled: false", "segmented:\n  enabled: true"
+            )
+        text = _overlay_value(text, "  virus: null", f"  virus: {virus_name}")
+        text = _overlay_value(
+            text, "  viruses: {}", _render_segmented_virus(virus_name, virus_def)
         )
-        cfg["clustering"]["coverage_mode"] = click.prompt(
-            "Coverage mode (0-4)", default=0, type=int,
-        )
-    else:
-        # cd-hit: defaults are reasonable; leave word_size on auto-pick.
-        cfg["clustering"]["cdhit"] = {
-            "binary": None,
-            "word_size": None,
-            "coverage": click.prompt(
-                "cd-hit coverage (-aS, used only when global_alignment=false)",
-                default=0.8, type=float,
-            ),
-            "global_alignment": click.confirm(
-                "Use global identity (-G 1)?", default=True,
-            ),
-            "accurate": click.confirm(
-                "Use accurate mode (-g 1, slower)?", default=False,
-            ),
-            "memory_mb": click.prompt(
-                "Memory cap MB (0 = unlimited)", default=0, type=int,
-            ),
-            "extra_args": [],
-        }
-
-    # Output
-    cfg["output"] = {
-        "dir": click.prompt("Output directory", default="./repseq_output"),
-        "prefix": click.prompt("Output file prefix", default="repseq"),
-    }
 
     out_path = Path(output)
-    with open(out_path, "w") as fh:
-        yaml.dump(cfg, fh, default_flow_style=False, sort_keys=False)
-
-    # Insert an explanatory comment before `enabled: false` in the segmented
-    # block — yaml.dump cannot emit comments, so we post-process the file.
-    text = out_path.read_text()
-    text = text.replace(
-        "segmented:\n  enabled: false\n",
-        "segmented:\n"
-        "  # Set enabled to true here, or pass --segmented on the command line.\n"
-        "  # The virus definition below is stored so you can activate it per-run\n"
-        "  # without re-editing this file.\n"
-        "  enabled: false\n",
-    )
     out_path.write_text(text)
 
-    click.echo(f"\nConfig written to: {out_path}")
+    click.echo(f"\nWrote a complete, fully-commented config to: {out_path}")
+    click.echo(
+        "Every setting is present at its default with an inline explanation. "
+        "Edit the advanced\nsections (hmm:, phylo:, clustering markers, "
+        "overrides:) as needed before your run."
+    )
 
 
 if __name__ == "__main__":
