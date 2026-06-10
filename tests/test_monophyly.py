@@ -21,6 +21,15 @@ def _seq(sid: str, genus: str) -> Sequence:
     )
 
 
+def _seq_sp(sid: str, genus: str, species: str) -> Sequence:
+    return Sequence(
+        id=sid, header=sid, sequence="ACGT" * 10,
+        seq_type=SequenceType.NUCLEOTIDE, source=SequenceSource.NCBI,
+        accession=sid, organism=species,
+        taxonomy=TaxonomyInfo(genus=genus, species=species),
+    )
+
+
 def _write_xml(tmp_path, name, newick, reps):
     nwk = tmp_path / f"{name}.nwk"
     nwk.write_text(newick)
@@ -179,3 +188,66 @@ def test_support_aware_keeps_strong_intrusion(tmp_path):
     _write_xml(tmp_path, "test",
                "(S0001:0.1,(S0002:0.1,S0003:0.1)0.95:0.1);", reps)
     assert _genus_rows(tmp_path, 70)["Alphacoronavirus"]["status"] == "paraphyletic"
+
+
+# --- species rank (opt-in, phylo.monophyly.include_species) ---------------
+
+def test_species_rank_off_by_default(tmp_path):
+    """Species rows are emitted only when include_species is set; the default
+    sweep stays at subgenus→class (annotation-noise guard)."""
+    reps = [
+        _seq_sp("A", "Orthobunyavirus", "Orthobunyavirus bunyamweraense"),
+        _seq_sp("B", "Orthobunyavirus", "Orthobunyavirus bunyamweraense"),
+        _seq_sp("C", "Orthobunyavirus", "Orthobunyavirus cacheense"),
+        _seq_sp("D", "Orthobunyavirus", "Orthobunyavirus cacheense"),
+    ]
+    _write_xml(tmp_path, "test",
+               "((S0001:1,S0002:1):1,(S0003:1,S0004:1):1);", reps)
+    rows = _rows(write_monophyly_report(tmp_path, "test"))
+    assert not any(r["rank"] == "species" for r in rows)
+    # genus is still assessed and monophyletic
+    assert any(r["rank"] == "genus" and r["status"] == "monophyletic"
+               for r in rows)
+
+
+def test_species_rank_included_when_opted_in(tmp_path):
+    reps = [
+        _seq_sp("A", "Orthobunyavirus", "Orthobunyavirus bunyamweraense"),
+        _seq_sp("B", "Orthobunyavirus", "Orthobunyavirus bunyamweraense"),
+        _seq_sp("C", "Orthobunyavirus", "Orthobunyavirus cacheense"),
+        _seq_sp("D", "Orthobunyavirus", "Orthobunyavirus cacheense"),
+    ]
+    _write_xml(tmp_path, "test",
+               "((S0001:1,S0002:1):1,(S0003:1,S0004:1):1);", reps)
+    sp = {
+        r["taxon"]: r
+        for r in _rows(write_monophyly_report(
+            tmp_path, "test", include_species=True))
+        if r["rank"] == "species"
+    }
+    assert sp["Orthobunyavirus bunyamweraense"]["status"] == "monophyletic"
+    assert sp["Orthobunyavirus cacheense"]["status"] == "monophyletic"
+
+
+def test_species_polyphyly_is_the_reassortment_signal(tmp_path):
+    """A species split across two clades (its segments grouping with a
+    different species) is the species-level reassortment signal that the
+    coarser ranks cannot see — this is the whole point of include_species."""
+    reps = [
+        _seq_sp("A", "G", "Species X"),
+        _seq_sp("B", "G", "Species Y"),
+        _seq_sp("C", "G", "Species X"),
+        _seq_sp("D", "G", "Species Y"),
+    ]
+    # ((X,Y),(X,Y)) — each species' two leaves land in different clades.
+    _write_xml(tmp_path, "test",
+               "((S0001:1,S0002:1):1,(S0003:1,S0004:1):1);", reps)
+    sp = {
+        r["taxon"]: r
+        for r in _rows(write_monophyly_report(
+            tmp_path, "test", include_species=True))
+        if r["rank"] == "species"
+    }
+    assert sp["Species X"]["status"] == "polyphyletic"
+    assert sp["Species X"]["intruder_clusters"] == "2"
+    assert sp["Species Y"]["status"] == "polyphyletic"

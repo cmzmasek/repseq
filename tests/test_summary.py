@@ -553,9 +553,24 @@ def test_render_summary_monophyly_paragraph(make_seq, tmp_path):
     assert "{prefix}_report.html" in md_on
     assert "support-aware" in md_on
     assert "phylo.monophyly.min_support" in md_on
+    # species rank is opt-in: default prose says so and names the knob
+    assert "phylo.monophyly.include_species" in md_on
+    assert "Species rank is excluded by default" in md_on
 
     md_off = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
     assert "Per-taxon monophyly" not in md_off
+
+
+def test_render_summary_monophyly_species_on(make_seq, tmp_path):
+    """With include_species set, the monophyly prose flips to the included
+    wording so a Methods paste reflects what actually ran."""
+    cfg = _base_cfg(tmp_path)
+    cfg["phylo"] = {"tool": "fasttree", "monophyly": {"include_species": True}}
+    md = render_summary(
+        cfg, _qc(), _result(make_seq), ["a.fasta"], phylo_ran=True,
+    )
+    assert "Species-rank rows are included" in md
+    assert "pinpoints a reassortant" in md
 
 
 def test_render_summary_tree_figures_paragraph_on_by_default(make_seq, tmp_path):

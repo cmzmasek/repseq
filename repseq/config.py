@@ -524,8 +524,15 @@ DEFAULTS: dict[str, Any] = {
         # only confident non-monophyly is flagged — a taxon broken solely by
         # weakly-supported branches reads as monophyletic. 0 disables the
         # collapse (topology-only, every branch trusted). Range [0, 100].
+        # ``include_species`` adds species-rank rows to the report. Off by
+        # default because viral species labels are annotation-noisy (the same
+        # reason the taxonomic reports skip species); turn it on for
+        # reassortment / misannotation analysis, where species is the rank at
+        # which a taxon broken on a marker tree but clean on the genome tree
+        # localises the signal.
         "monophyly": {
             "min_support": 70,
+            "include_species": False,
         },
         # PhyloXML writer knobs.
         "phyloxml": {
@@ -2025,6 +2032,10 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             "phylo.monophyly.min_support must be a number in [0, 100] "
             "(0 disables the support-aware collapse)"
         )
+    if "include_species" in mono_cfg and not isinstance(
+        mono_cfg["include_species"], bool
+    ):
+        errors.append("phylo.monophyly.include_species must be a boolean")
 
     # HMM block
     hmm = cfg.get("hmm", {}) or {}

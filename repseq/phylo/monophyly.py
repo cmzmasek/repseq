@@ -62,15 +62,23 @@ logger = logging.getLogger(__name__)
 
 _PXNS = "{http://www.phyloxml.org}"
 
-# Ranks assessed, fine→coarse. Species is deliberately skipped — viral species
-# monophyly is too often violated to be a useful signal (same rationale as the
-# taxonomic reports).
+# Ranks assessed by default, fine→coarse. Species is OFF by default — viral
+# species monophyly is often violated by annotation noise, the same rationale
+# the taxonomic reports use. It is opt-in via ``phylo.monophyly.include_species``
+# (threaded as ``include_species`` → the active ``ranks`` tuple below), because
+# turning it on is exactly what surfaces species-level reassortment and
+# misannotation that the coarser ranks cannot see.
 _RANKS: tuple[str, ...] = (
     "subgenus", "genus", "subfamily", "family",
     "suborder", "order", "subclass", "class",
 )
-_RANK_SET = frozenset(_RANKS)
-_RANK_INDEX = {r: i for i, r in enumerate(_RANKS)}
+# Species prepended for the opt-in assessment path. This is also the full set
+# of ranks READ off each leaf: parsing species is always cheap, so a leaf's
+# species label is captured unconditionally and only *assessed* when the active
+# rank tuple includes it.
+_RANKS_WITH_SPECIES: tuple[str, ...] = ("species",) + _RANKS
+_RANK_SET = frozenset(_RANKS_WITH_SPECIES)
+_RANK_INDEX = {r: i for i, r in enumerate(_RANKS_WITH_SPECIES)}
 
 
 class _Node:
@@ -226,11 +234,16 @@ def _count_clusters(
 
 
 def assess_tree(
-    root: _Node, leaf_taxa: list[dict[str, str]], min_support: float = 0
+    root: _Node,
+    leaf_taxa: list[dict[str, str]],
+    min_support: float = 0,
+    ranks: tuple[str, ...] = _RANKS,
 ) -> list[dict]:
     """Return one status row per taxon (n_leaves ≥ 2) per assessed rank.
 
-    When ``min_support`` > 0, internal nodes with support below it are
+    ``ranks`` is the tuple of ranks to assess (default ``_RANKS``, i.e. species
+    excluded); pass ``_RANKS_WITH_SPECIES`` to also assess species-level
+    monophyly. When ``min_support`` > 0, internal nodes with support below it are
     collapsed into polytomies first, and the monophyletic call uses the
     support-aware *compatibility* test (a taxon counts as monophyletic when no
     well-supported node forces it to be otherwise, i.e. it could be a clade
@@ -241,7 +254,7 @@ def assess_tree(
         _collapse_weak_branches(root, float(min_support))
     nodes = _all_nodes(root)
     rows: list[dict] = []
-    for rank in _RANKS:
+    for rank in ranks:
         members_by_taxon: dict[str, set[int]] = {}
         leaf_taxon: list[Optional[str]] = []
         for taxa in leaf_taxa:
@@ -313,13 +326,19 @@ def assess_tree(
 
 
 def write_monophyly_report(
-    out_dir: Path, prefix: str, min_support: float = 0
+    out_dir: Path,
+    prefix: str,
+    min_support: float = 0,
+    include_species: bool = False,
 ) -> Optional[Path]:
     """Sweep every ``*_tree.xml`` under *out_dir* into ``{prefix}_monophyly.tsv``.
 
     ``min_support`` (``phylo.monophyly.min_support``, 0 = off) makes the
     assessment support-aware: branches below it are collapsed and the
     monophyletic call becomes the compatibility test (see :func:`assess_tree`).
+    ``include_species`` (``phylo.monophyly.include_species``, default off) adds
+    species-rank rows — the rank where intra-genus reassortment and most
+    misannotation live, but also the noisiest, hence opt-in.
 
     Returns the written path, or None when there are no trees / nothing to
     report. Soft by construction — the caller wraps it so a parse failure
@@ -329,6 +348,7 @@ def write_monophyly_report(
     if not xmls:
         return None
 
+    ranks = _RANKS_WITH_SPECIES if include_species else _RANKS
     rows_out: list[dict] = []
     for path in xmls:
         rel = path.relative_to(out_dir)
@@ -336,7 +356,9 @@ def write_monophyly_report(
         if parsed is None:
             continue
         root, leaf_taxa = parsed
-        for row in assess_tree(root, leaf_taxa, min_support=min_support):
+        for row in assess_tree(
+            root, leaf_taxa, min_support=min_support, ranks=ranks
+        ):
             row["tree"] = str(rel)
             rows_out.append(row)
 

@@ -1167,6 +1167,14 @@ genus is neither member nor intruder when genus monophyly is assessed, so an
 annotation gap never masquerades as non-monophyly. Taxa with fewer than two
 classified leaves are omitted.
 
+**Ranks assessed: subgenus → class by default; species is opt-in.** Viral
+species labels are annotation-noisy (the same reason the taxonomic reports skip
+species), so species rows are off by default. Set
+`phylo.monophyly.include_species: true` to add them — species is the rank at
+which **intra-genus reassortment** and most **misannotation** live: a species
+monophyletic on the whole-genome tree but broken on a single marker tree is the
+localised reassortant call that the coarser ranks cannot see.
+
 **Why it's useful.** A taxon monophyletic on the whole-genome tree but **not** on
 a marker tree is the per-marker **reassortment / recombination** signal — the
 taxon-resolved companion to `_incongruence.tsv`. It also operationalises the

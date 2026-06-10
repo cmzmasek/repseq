@@ -986,6 +986,24 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
     # Graphical PDF + PNG rendering (phylo.pdf, default true) — a sibling
     # *_tree.pdf / *_tree.png per phyloXML tree.
     render_pdf = bool(phylo_cfg.get("pdf", True))
+    # Per-taxon monophyly: species rank is opt-in (annotation-noisy by
+    # default). Keep the prose honest about whether species rows are present.
+    mono_species = bool(
+        (phylo_cfg.get("monophyly", {}) or {}).get("include_species", False)
+    )
+    if mono_species:
+        species_note = (
+            "Species-rank rows are included "
+            "(`phylo.monophyly.include_species: true`): species is the "
+            "resolution at which a taxon clean on the whole-genome tree but "
+            "broken on a single marker tree pinpoints a reassortant. "
+        )
+    else:
+        species_note = (
+            "Species rank is excluded by default (viral species labels are "
+            "annotation-noisy); enable `phylo.monophyly.include_species` to "
+            "surface species-level reassortment / misannotation. "
+        )
     tool_pref = phylo_cfg.get("tool", "auto")
     # Match the runtime auto-pick: protein → IQ-TREE, NT → FastTree.
     if tool_pref == "auto":
@@ -1372,6 +1390,7 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             "support-aware by default (`phylo.monophyly.min_support`, default "
             "70): branches below that support are collapsed before judging, so "
             "a taxon broken only by weakly-supported branches is not flagged. "
+            f"{species_note}"
             "These conflict "
             "signals (with the incongruence table and any taxonomy review) are "
             "distilled into a plain-English `{prefix}_flags.txt`, and the whole "

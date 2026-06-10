@@ -696,6 +696,12 @@ phylo:
     # branch (topology-only). Range [0, 100]; the value used is recorded in the
     # report's `min_support` column.
     min_support: 70
+    # Add species-rank rows to the report. OFF by default because viral species
+    # labels are annotation-noisy (the same reason the taxonomic reports skip
+    # species). Turn ON for reassortment / misannotation analysis: species is
+    # the rank at which a taxon that is monophyletic on the whole-genome tree
+    # but broken on a single marker tree localises the reassortment signal.
+    include_species: false
   phyloxml:
     # <confidence> element's type= attribute. "auto" picks "sh_like" for
     # FastTree and "ufboot" for IQ-TREE (which matches the default tree

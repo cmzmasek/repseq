@@ -2107,10 +2107,14 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
         from .phylo.monophyly import write_monophyly_report
         out_dir = Path(cfg["output"]["dir"])
         prefix = cfg["output"].get("prefix", "repseq")
-        min_support = (
-            (cfg.get("phylo", {}) or {}).get("monophyly", {}) or {}
-        ).get("min_support", 70)
-        mono_tsv = write_monophyly_report(out_dir, prefix, min_support=min_support)
+        mono_cfg = (cfg.get("phylo", {}) or {}).get("monophyly", {}) or {}
+        min_support = mono_cfg.get("min_support", 70)
+        include_species = bool(mono_cfg.get("include_species", False))
+        mono_tsv = write_monophyly_report(
+            out_dir, prefix,
+            min_support=min_support,
+            include_species=include_species,
+        )
         if mono_tsv is not None:
             out_files.append(mono_tsv)
             click.echo(f"Wrote per-taxon monophyly report: {mono_tsv.name}")
