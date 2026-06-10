@@ -556,6 +556,9 @@ def test_render_summary_monophyly_paragraph(make_seq, tmp_path):
     # species rank is opt-in: default prose says so and names the knob
     assert "phylo.monophyly.include_species" in md_on
     assert "Species rank is excluded by default" in md_on
+    # cross-tree segment-status matrix is named in the monophyly prose
+    assert "{prefix}_segment_status_matrix.tsv" in md_on
+    assert "single_marker_break" in md_on
 
     md_off = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
     assert "Per-taxon monophyly" not in md_off

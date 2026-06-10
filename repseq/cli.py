@@ -2120,6 +2120,19 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
             click.echo(f"Wrote per-taxon monophyly report: {mono_tsv.name}")
     except Exception as exc:
         click.echo(f"[monophyly report skipped] {exc}", err=True)
+    # Cross-tree segment-status matrix (Ext-2) — pivots _monophyly.tsv into the
+    # taxon-resolved reassortment localisation (clean on the genome tree, broken
+    # on exactly one marker tree). Pure post-hoc synthesis; soft-fails.
+    try:
+        from .output.segment_status import write_segment_status_matrix
+        out_dir = Path(cfg["output"]["dir"])
+        prefix = cfg["output"].get("prefix", "repseq")
+        matrix_path = write_segment_status_matrix(out_dir, prefix)
+        if matrix_path is not None:
+            out_files.append(matrix_path)
+            click.echo(f"Wrote segment-status matrix: {matrix_path.name}")
+    except Exception as exc:
+        click.echo(f"[segment-status matrix skipped] {exc}", err=True)
     # Plain-English analysis flags — synthesises the conflict tables
     # (_monophyly.tsv, _incongruence.tsv, _taxonomy_review.tsv) into one
     # {prefix}_flags.txt. Pure post-hoc synthesis; soft-fails to nothing.

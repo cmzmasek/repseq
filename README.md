@@ -285,6 +285,7 @@ flags you passed. At a glance:
 | `{prefix}_per_segment/` | `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment, from the reps' raw per-segment NT. |
 | `{prefix}_msa_conservation.tsv` | any phylo step that wrote an MSA (default on) | One conservation number per alignment (JSD-to-background, Henikoff-weighted, gap-penalised). |
 | `{prefix}_monophyly.tsv` | any phylo step that built a tree (always on) | Per-taxon monophyly status off every annotated `*_tree.xml`. |
+| `{prefix}_segment_status_matrix.tsv` | whenever `_monophyly.tsv` is written | Cross-tree pivot of the monophyly report; `single_marker_break` localises which taxon breaks on which one marker tree (reassortment). |
 | `{prefix}_flags.txt` | when any conflict table exists | Plain-English synthesis of the conflict tables into one skimmable list. |
 | `{prefix}_report.html` | any run with figures or a conflict table | Single-file HTML report: flags + embedded tree-figure gallery + output-file index. |
 | `{prefix}_hmm_diagnostic.tsv` | HMM tier ran AND a spec declares `hmms:` | One row per (rep, marker spec, HMM profile): hit / best-E / coverage / cutoff / passing. |
@@ -1198,6 +1199,26 @@ recorded in the report.
 `n_intruders` (foreign classified leaves in the MRCA span), `intruder_clusters`
 (separate foreign clades — the para/poly key), `intruder_taxa` (`;`-joined), and
 `min_support` (the threshold applied).
+
+### Segment-status matrix — `{prefix}_segment_status_matrix.tsv`
+
+`_monophyly.tsv` has one row per (taxon, rank, **tree**); the biological
+question is **cross-tree**. This file pivots it so each (rank, taxon) is one
+row, and answers *which taxon breaks on which one tree*. It's a pure pivot of
+the monophyly report (no trees are re-read), so it inherits the support-aware
+collapse and — with `phylo.monophyly.include_species` on — the species rows
+where intra-genus reassortment lives.
+
+The payoff column is **`single_marker_break`**: the label of the *one* marker
+tree a taxon breaks on, populated **only** when it is monophyletic on the
+whole-genome tree and broken on exactly that one tree — the clean
+single-segment-discordance (reassortment) signal. Filtering this column to
+non-empty gives the candidate list directly; rows with a value sort to the top
+of each rank. Other columns: `n_leaves`, `n_trees` (trees that assessed the
+taxon), `n_nonmono`, `genome_status` (blank if no whole-genome tree was built),
+and `nonmono_trees` (`;`-joined labels of every tree it breaks on). Where
+`_incongruence.tsv` says *how much* two trees disagree as one global number,
+this says *which taxon, on which tree*.
 
 ### Plain-English flags — `{prefix}_flags.txt`
 
