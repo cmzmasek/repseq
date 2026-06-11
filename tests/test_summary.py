@@ -202,7 +202,7 @@ def test_render_summary_qc_numbers_pulled_from_report(make_seq, tmp_path):
     assert "**10** exact duplicates" in md
     assert "**20** outside" in md
     assert "**4** with > 5% ambiguous" in md
-    assert "*1,200* passed basic QC" in md
+    assert "*1,200* passed this initial screen" in md
 
 
 def test_render_summary_describes_input_blocklist(make_seq, tmp_path):

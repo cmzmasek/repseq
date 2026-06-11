@@ -576,17 +576,23 @@ def test_qc_summary_per_segment_breakdown_replaces_skipped_line():
     }
     out = report.summary()
     assert "skipped (segmented mode)" not in out
-    assert "Removed (length)    : 291 isolate(s) (per-segment, isolate-level)" in out
-    assert "L too short  : 257" in out
-    assert "M too short  : 28" in out
-    assert "M too long   : 6" in out
+    # Phase 2 shows the isolate-level length drop with a per-segment breakdown.
+    assert "segment length out of bounds" in out
+    assert "291 isolates" in out
+    assert "L too short: 257" in out
+    assert "M too short: 28" in out
+    assert "M too long : 6" in out
 
 
-def test_qc_summary_keeps_skipped_when_no_segment_bounds_configured():
-    # No per-segment counter populated -> fall back to the "skipped" line.
+def test_qc_summary_segmented_notes_length_filter_not_applied():
+    # Segmented mode never runs the whole-genome length filter; with no
+    # per-segment bounds configured the summary footer records that rather
+    # than showing a per-segment breakdown.
     report = QCReport(length_filter_skipped=True)
+    report.display["segmented"] = True
     out = report.summary()
-    assert "Removed (length)    : skipped (segmented mode)" in out
+    assert "not applied in segmented mode" in out
+    assert "length filters" in out
 
 
 def test_build_concatenated_sequences_one_per_isolate(make_seq):

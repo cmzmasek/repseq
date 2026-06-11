@@ -110,9 +110,13 @@ def test_run_qc_skips_genome_length_filter_in_segmented_mode(make_seq):
     assert {s.id for s in kept} == {"L1", "M1", "S1"}
     assert report.removed_length == 0
     assert report.length_filter_skipped is True
-    # Reason is recorded so the summary line reads "skipped (segmented mode)".
+    # Reason is recorded; the segmented summary footer notes the
+    # whole-genome length filter was not applied (per-segment bounds run
+    # downstream instead).
     assert report.length_filter_skip_reason == "segmented"
-    assert "skipped (segmented mode)" in report.summary()
+    out = report.summary()
+    assert "not applied in segmented mode" in out
+    assert "length filters" in out
 
 
 def test_run_qc_skips_genome_length_filter_when_disabled(make_seq):
@@ -125,12 +129,13 @@ def test_run_qc_skips_genome_length_filter_when_disabled(make_seq):
     assert {s.id for s in kept} == {"L1", "S1"}
     assert report.removed_length == 0
     assert report.length_filter_skipped is True
-    # Non-segmented + disabled must NOT claim "segmented mode" (the v0.46.1
-    # wording fix) — it reads "skipped (filter disabled)" instead.
+    # Non-segmented + disabled must NOT claim "segmented mode": the
+    # non-segmented summary renders a single per-sequence tally and simply
+    # omits the (un-run) whole-genome length-filter line.
     assert report.length_filter_skip_reason == "disabled"
     summary = report.summary()
-    assert "skipped (filter disabled)" in summary
-    assert "skipped (segmented mode)" not in summary
+    assert "segmented mode" not in summary
+    assert "Per-record screening  (unit: sequences)" in summary
 
 
 def test_run_qc_skips_dedup_in_segmented_mode(make_seq):
@@ -302,19 +307,21 @@ def test_run_qc_pipeline(make_seq):
     assert report.removed_annotation == 1
 
 
-def test_qc_summary_labels_basic_qc_and_adds_final_survivors():
-    """The summary should say 'Passed basic QC' (not 'Passed QC') and
-    append 'Final survivors' when populated. Both pieces matter:
-    the rename keeps the QC-summary line honest, the final-survivors
-    line is the number that actually reached selection."""
+def test_qc_summary_segmented_running_tally_and_unit_change():
+    """The segmented summary makes the segment->isolate unit change
+    explicit: 'input records' (segments) at the top, 'complete isolates
+    assembled' as the Phase 2 endpoint, and a reconciliation footer tying
+    the two units together — this is the line that dissolves the
+    '1.6M segments -> 12K isolates' surprise."""
     from repseq.models import QCReport
     report = QCReport(total_input=100, passed=80)
     report.final_survivors = 12
     report.final_survivors_unit = "isolates"
+    report.display["segmented"] = True
     out = report.summary()
-    assert "Passed basic QC     : 80" in out
-    assert "Passed QC           : 80" not in out
-    assert "Final survivors     : 12 isolates" in out
+    assert "input records" in out
+    assert "complete isolates assembled" in out
+    assert "100 input segments → 12 complete isolates" in out
 
 
 def test_qc_summary_omits_final_survivors_when_unset():
@@ -324,3 +331,98 @@ def test_qc_summary_omits_final_survivors_when_unset():
     report = QCReport(total_input=100, passed=80)
     out = report.summary()
     assert "Final survivors" not in out
+
+
+def _segmented_report():
+    """An Influenza-like segmented QCReport with a fully populated display
+    context — the shape the CLI driver builds for the console summary."""
+    from repseq.models import QCReport
+    r = QCReport(total_input=1_598_432)
+    r.removed_annotation = 12_300
+    r.removed_ambiguous = 4_210
+    r.removed_proteins = 3_120
+    r.removed_taxonomy_mismatch = 940
+    r.removed_protein_quality = 3
+    r.removed_hmm_failed = 16          # 12 pre-assembly + 4 at concat
+    r.removed_incomplete_isolates = 1_478_902 + 1
+    r.final_survivors = 12_031
+    r.final_survivors_unit = "isolates"
+    r.display.update({
+        "segmented": True,
+        "ambiguous_pct": 0.02,
+        "protein_quality_pct": 0.05,
+        "annotation_keywords": ["MAG:", "synthetic", "fragment", "partial"],
+        "segments_entering_assembly": 1_574_950,
+        "n_segments": 8,
+        "hmm_isolates_pre_assembly": 12,
+        "incomplete_segments": 1_478_902,
+        "concat_marker_isolates": 5,
+        "concat_hmm_isolates": 4,
+        "duplicate_isolates": 210,
+    })
+    return r
+
+
+def test_qc_summary_segmented_phases_thresholds_and_units():
+    out = _segmented_report().summary()
+    # Two explicit phases with unit headers.
+    assert "Phase 1 · per-record screening  (unit: segments)" in out
+    assert "Phase 2 · isolate assembly  (8 segments → 1 isolate; unit: isolates)" in out
+    # Live thresholds rendered into the labels.
+    assert "ambiguous nucleotides (>2% N)" in out
+    assert "ambiguous protein residues (>5% X)" in out
+    assert "description keywords (MAG:, synthetic, fragment, …)" in out
+    # Isolate-level gate sub-tally (counted in isolates, not segments).
+    assert "isolate-level identity gates" in out
+    assert "marker fails HMM identity" in out
+    # The unit-change reconciliation line + footer.
+    assert "segments entering assembly" in out
+    assert "complete isolates assembled" in out
+    assert "1,598,432 input segments → 12,031 complete isolates" in out
+
+
+def test_qc_summary_segmented_phase2_separates_missing_from_concat_hmm():
+    """Phase 2 attributes the big drop (missing segments) separately from
+    the small concatenation/HMM marker loss, with the HMM share noted."""
+    out = _segmented_report().summary()
+    assert "missing ≥1 of 8 segments / unidentifiable" in out
+    assert "≈1,478,902 segments" in out          # the cliff, in segments
+    assert "marker lost at concatenation" in out
+    assert "(4 via HMM)" in out                   # HMM share of the concat drop
+    assert "identical duplicate genomes" in out
+
+
+def test_qc_summary_running_tally_is_arithmetic():
+    """Each Phase 1 survivor number equals input minus the cumulative
+    per-segment removals shown above it."""
+    out = _segmented_report().summary()
+    # input 1,598,432 − 12,300 = 1,586,132 ; − 4,210 = 1,581,922 ; etc.
+    assert "1,586,132" in out
+    assert "1,581,922" in out
+    assert "1,578,802" in out
+    assert "1,577,862" in out          # after the cross-segment mismatch drop
+    # ground-truth pool entering assembly (after the isolate gates)
+    assert "1,574,950" in out
+
+
+def test_qc_summary_nonsegmented_single_tally_with_bounds():
+    from repseq.models import QCReport
+    r = QCReport(total_input=84_201)
+    r.removed_duplicates = 9_140
+    r.removed_length = 1_002
+    r.removed_ambiguous = 410
+    r.removed_hmm_failed = 330
+    r.final_survivors = 73_319
+    r.final_survivors_unit = "sequences"
+    r.display.update({
+        "segmented": False,
+        "ambiguous_pct": 0.05,
+        "length_bounds": {"min": 1_000, "max": 15_000},
+        "annotation_keywords": [],
+    })
+    out = r.summary()
+    assert "Per-record screening  (unit: sequences)" in out
+    assert "Phase 1" not in out                    # single phase, no segments
+    assert "genome length out of bounds (<1,000 or >15,000 nt)" in out
+    assert "exact duplicates" in out
+    assert "84,201 input sequences → 73,319 passing QC" in out

@@ -32,7 +32,7 @@ def test_final_summary_reports_success(make_seq, capsys):
     _final_summary(result, report, {"segmented": {"enabled": False}})
     out = capsys.readouterr().out
     assert "selected 12 representative sequence(s) across 4 cluster(s)" in out
-    assert "40 of 100 input sequences passed basic QC" in out
+    assert "40 of 100 input sequences passed initial screening" in out
 
 
 def test_final_summary_appends_final_survivors_when_different(make_seq, capsys):
@@ -44,7 +44,7 @@ def test_final_summary_appends_final_survivors_when_different(make_seq, capsys):
     report.final_survivors_unit = "isolates"
     _final_summary(result, report, {"segmented": {"enabled": True}})
     out = capsys.readouterr().out
-    assert "40 of 100 input sequences passed basic QC" in out
+    assert "40 of 100 input sequences passed initial screening" in out
     assert "12 isolates reached selection" in out
 
 
@@ -59,7 +59,7 @@ def test_final_summary_skips_final_survivors_when_same_as_passed(
     report.final_survivors_unit = "sequences"
     _final_summary(result, report, {"segmented": {"enabled": False}})
     out = capsys.readouterr().out
-    assert "40 of 100 input sequences passed basic QC." in out
+    assert "40 of 100 input sequences passed initial screening." in out
     assert "reached selection" not in out
 
 

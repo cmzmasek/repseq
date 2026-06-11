@@ -491,7 +491,7 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
     basic = (
         f"Initial quality control removed "
         f"{', '.join(parts) if parts else 'no'} sequence(s) "
-        f"(*{_fmt_int(qc_report.passed)}* passed basic QC)."
+        f"(*{_fmt_int(qc_report.passed)}* passed this initial screen)."
     )
 
     extra_lines: list[str] = []

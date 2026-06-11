@@ -703,6 +703,22 @@ def _run_qc(sequences, cfg):
     # extended QC and segmented-completeness steps mutate the same
     # counters), not here. Printing it now would show 0 for every
     # field a later step is responsible for filling.
+    #
+    # Stash the live thresholds + layout flag the console summary needs
+    # to render self-documenting labels (">5% N", the keyword hint, …)
+    # and pick the segmented vs non-segmented tally. The segmented
+    # assembly magnitudes are filled later in _handle_segmented.
+    qc_cfg = cfg.get("qc", {}) or {}
+    glf = qc_cfg.get("genome_length_filter", {}) or {}
+    qc_report.display.update({
+        "segmented": bool((cfg.get("segmented", {}) or {}).get("enabled")),
+        "ambiguous_pct": qc_cfg.get("ambiguous_threshold", 0.05),
+        "protein_quality_pct": (qc_cfg.get("protein_quality") or {}).get(
+            "max_bad_fraction", 0.05),
+        "annotation_keywords": (qc_cfg.get("annotation_filter") or {}).get(
+            "keywords", []),
+        "length_bounds": {"min": glf.get("min"), "max": glf.get("max")},
+    })
     return passed, qc_report
 
 
@@ -1733,9 +1749,20 @@ def _handle_segmented(sequences, cfg, qc_report):
     click.echo("Applying segmented virus completeness filter ...")
     seg_cfg = cfg.get("segmented", {}) or {}
     extra_action = seg_cfg.get("extra_segments_action", "warn")
+    # Ground-truth segment pool entering assembly (after every per-segment
+    # and isolate-level QC gate) — the console summary uses this to
+    # reconcile the segment→isolate unit change. n_segments labels the
+    # completeness rule ("missing >=1 of N segments").
+    qc_report.display["segments_entering_assembly"] = len(sequences)
+    qc_report.display["n_segments"] = len(virus_cfg.get("segments") or [])
+    qc_report.display["hmm_isolates_pre_assembly"] = qc_report.removed_hmm_failed
     kept, complete_isolates, extras_by_isolate = filter_complete_isolates(
         sequences, virus_cfg, qc_report, extra_segments_action=extra_action
     )
+    # removed_incomplete_isolates is later *also* bumped by marker loss at
+    # concatenation; snapshot the pure missing-segment/unidentifiable count
+    # now so Phase 2 attributes each cause separately.
+    qc_report.display["incomplete_segments"] = qc_report.removed_incomplete_isolates
     if extras_by_isolate:
         click.echo(
             f"  Extra-segments check: found {len(extras_by_isolate)} isolate(s) "
@@ -1787,8 +1814,11 @@ def _handle_segmented(sequences, cfg, qc_report):
                     click.echo(
                         f"    {seg_name} too long  {bound}: {counts['too_long']}"
                     )
-    click.echo(f"  Complete isolates : {len(complete_isolates)}")
-    click.echo(f"  Individual seqs   : {len(kept)}")
+    click.echo(
+        f"  Complete isolates (all {len(virus_cfg.get('segments') or [])} "
+        f"segments present): {len(complete_isolates)} "
+        f"(from {len(kept)} segment records)"
+    )
     alphabet = cfg.get("clustering", {}).get("alphabet_for_clustering", "protein")
     require_protein = alphabet == "protein"
     cluster_protein = virus_cfg.get("cluster_protein")
@@ -1819,6 +1849,11 @@ def _handle_segmented(sequences, cfg, qc_report):
         }
         dropped = before - len(complete_isolates)
         hmm_dropped = qc_report.removed_hmm_failed - hmm_before
+        # Isolates lost at concatenation (a present segment had no usable
+        # marker / failed the HMM gate at marker selection) — Phase 2 of the
+        # console summary shows this as its own line, with the HMM share.
+        qc_report.display["concat_marker_isolates"] = dropped
+        qc_report.display["concat_hmm_isolates"] = hmm_dropped
         if dropped:
             base = (
                 f"  Dropped {dropped} isolate(s) with no marker protein "
@@ -1854,6 +1889,7 @@ def _handle_segmented(sequences, cfg, qc_report):
             complete_isolates = {
                 k: v for k, v in complete_isolates.items() if k in survivors
             }
+        qc_report.display["duplicate_isolates"] = dropped
         click.echo(f"  Duplicate isolates: {dropped} removed")
     # Segmented mode: the mode consumes one CONCAT per surviving
     # isolate, so the final survivor unit is "isolates", not segments.
@@ -2401,7 +2437,7 @@ def _final_summary(result, qc_report, cfg) -> None:
         if qc_report is not None and qc_report.total_input:
             msg = (
                 f"  {qc_report.passed} of {qc_report.total_input} input "
-                f"sequences passed basic QC"
+                f"sequences passed initial screening"
             )
             # When later stages (protein QC, segmented, taxonomy_consistency,
             # strain-collision) trimmed further, show the post-everything
@@ -2452,16 +2488,16 @@ def _final_summary(result, qc_report, cfg) -> None:
         )
     elif segmented and qc_report.removed_incomplete_isolates:
         reasons.append(
-            f"{qc_report.passed} sequences passed basic QC, but the segmented "
-            f"completeness/length filter dropped everything "
+            f"{qc_report.passed} sequences passed initial screening, but the "
+            f"segmented completeness/length filter dropped everything "
             f"({qc_report.removed_incomplete_isolates} removed) — no isolate "
             "had all expected segments. Check isolate_regex, the segment "
             "names/aliases, and any segment_lengths bounds."
         )
     else:
         reasons.append(
-            f"{qc_report.passed} sequences passed basic QC but selection produced "
-            "nothing — check that MMseqs2 is on PATH and that the grouping "
+            f"{qc_report.passed} sequences passed initial screening but selection "
+            "produced nothing — check that MMseqs2 is on PATH and that the grouping "
             "field actually has values (taxonomic/host/geographic modes fall "
             "back to a single 'Unknown' group without metadata resolution)."
         )

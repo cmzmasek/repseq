@@ -284,6 +284,21 @@ class QCReport:
     # protection is never silent). Populated by overrides.protected_keep.
     protected: list[dict] = field(default_factory=list)
 
+    # Display-only context for the console ``summary()`` block. Not part of
+    # the QC logic — purely what the rendered tally needs to show live
+    # thresholds in labels (``ambiguous_pct``, ``protein_quality_pct``,
+    # ``annotation_keywords``, ``length_bounds``), pick the segmented vs
+    # non-segmented layout (``segmented``, ``n_segments``), and reconcile
+    # the segment→isolate unit change (``segments_entering_assembly`` and
+    # the per-cause Phase-2 magnitudes ``incomplete_segments`` /
+    # ``concat_marker_isolates`` / ``concat_hmm_isolates`` /
+    # ``hmm_isolates_pre_assembly`` / ``duplicate_isolates``). Populated by
+    # the CLI driver (``_run_qc`` for the thresholds, ``_handle_segmented``
+    # for the assembly magnitudes); empty for directly-constructed reports,
+    # in which case ``summary()`` infers the layout and omits the live
+    # threshold/magnitude annotations.
+    display: dict = field(default_factory=dict)
+
     def add_removed(self, seq_id: str, reason: str) -> None:
         self.details.append({"id": seq_id, "reason": reason})
 
@@ -293,83 +308,239 @@ class QCReport:
             {"id": seq_id, "stage": stage, "reason": would_be_reason}
         )
 
+    # ------------------------------------------------------------------
+    # Console QC summary
+    #
+    # The block is rendered as a *running survivor tally* so a bench
+    # scientist can see, after each step, both how many records were
+    # removed and how many remain. The one genuine subtlety it makes
+    # explicit (rather than hiding, as the old flat list did) is the
+    # **unit change**: per-record screening counts segments/sequences,
+    # but segmented isolate assembly groups segments into isolates
+    # (N segments → 1 isolate), so the count both drops *and* changes
+    # units at that boundary. That seam — not any single removal step —
+    # is what makes "1.6M segments → 12K isolates" look paradoxical.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _n(v) -> str:
+        try:
+            return f"{int(v):,}"
+        except (TypeError, ValueError):
+            return str(v)
+
+    @staticmethod
+    def _pct(frac) -> str:
+        try:
+            return f"{float(frac) * 100:g}%"
+        except (TypeError, ValueError):
+            return "?%"
+
+    @staticmethod
+    def _kw_hint(keywords) -> str:
+        kws = [k for k in (keywords or []) if k]
+        if not kws:
+            return ""
+        shown = ", ".join(kws[:3])
+        more = ", …" if len(kws) > 3 else ""
+        return f" ({shown}{more})"
+
+    @staticmethod
+    def _block(rows: list[tuple]) -> list[str]:
+        """Render ``(label, removed, running)`` rows with the label left-
+        justified and the two value columns right-justified to their own
+        max widths. A blank value column collapses (zero width) so blocks
+        that only use one column don't carry empty padding."""
+        if not rows:
+            return []
+        lw = max(len(r[0]) for r in rows)
+        rw = max(len(r[1]) for r in rows)
+        nw = max(len(r[2]) for r in rows)
+        out: list[str] = []
+        for label, removed, running in rows:
+            line = "  " + label.ljust(lw)
+            if rw:
+                line += "  " + removed.rjust(rw)
+            if nw:
+                line += "  " + running.rjust(nw)
+            out.append(line.rstrip())
+        return out
+
+    def _length_label(self, d: dict) -> str:
+        bounds = d.get("length_bounds") or {}
+        mn, mx = bounds.get("min"), bounds.get("max")
+        bits = []
+        if mn is not None:
+            bits.append(f"<{self._n(mn)}")
+        if mx is not None:
+            bits.append(f">{self._n(mx)}")
+        rng = f" ({' or '.join(bits)} nt)" if bits else ""
+        return "genome length out of bounds" + rng
+
     def summary(self) -> str:
-        length_lines: list[str]
-        if self.removed_length_by_segment:
-            total = sum(
-                c["too_short"] + c["too_long"]
-                for c in self.removed_length_by_segment.values()
+        d = self.display or {}
+        segmented = d.get("segmented")
+        if segmented is None:
+            # Infer for directly-constructed reports (tests, legacy callers).
+            segmented = (
+                self.final_survivors_unit == "isolates"
+                or self.length_filter_skip_reason == "segmented"
+                or self.dedup_skipped
+                or bool(self.removed_length_by_segment)
             )
-            length_lines = [
-                f"  Removed (length)    : {total} isolate(s) "
-                "(per-segment, isolate-level)"
-            ]
+        if segmented:
+            return self._summary_segmented(d)
+        return self._summary_nonsegmented(d)
+
+    def _summary_nonsegmented(self, d: dict) -> str:
+        n = self._n
+        lines = ["QC summary", "", "Per-record screening  (unit: sequences)"]
+        run = self.total_input
+        rows: list[tuple] = [("input sequences", "", n(run))]
+        stages = [
+            (self.removed_duplicates, "exact duplicates"),
+            (0 if self.length_filter_skipped else self.removed_length,
+             self._length_label(d)),
+            (self.removed_annotation,
+             "description keywords" + self._kw_hint(d.get("annotation_keywords"))),
+            (self.removed_ambiguous,
+             f"ambiguous nucleotides (>{self._pct(d.get('ambiguous_pct', 0.05))} N)"),
+            (self.removed_proteins, "wrong / missing CDS count"),
+            (self.removed_protein_quality,
+             f"ambiguous protein residues "
+             f"(>{self._pct(d.get('protein_quality_pct', 0.05))} X)"),
+            (self.removed_hmm_failed, "marker fails HMM identity"),
+        ]
+        for removed, label in stages:
+            if not removed:
+                continue
+            run -= removed
+            rows.append((label, "−" + n(removed), n(run)))
+        final = self.final_survivors if self.final_survivors is not None else run
+        rows.append(("sequences passing QC", "", n(final)))
+        lines += self._block(rows)
+        lines += self._protected_lines()
+        lines.append("")
+        lines.append(f"{n(self.total_input)} input sequences → {n(final)} passing QC")
+        return "\n".join(lines)
+
+    def _summary_segmented(self, d: dict) -> str:
+        n = self._n
+        lines = ["QC summary", "", "Phase 1 · per-record screening  (unit: segments)"]
+
+        # Pure per-segment removal stages — these advance the segment tally.
+        run = self.total_input
+        rows: list[tuple] = [("input records", "", n(run))]
+        seg_stages = [
+            (self.removed_annotation,
+             "description keywords" + self._kw_hint(d.get("annotation_keywords"))),
+            (self.removed_ambiguous,
+             f"ambiguous nucleotides (>{self._pct(d.get('ambiguous_pct', 0.05))} N)"),
+            (self.removed_proteins, "wrong / missing CDS count"),
+            (self.removed_taxonomy_mismatch, "cross-segment species mismatch"),
+            (self.removed_strain_collisions, "strain-id collision"),
+        ]
+        for removed, label in seg_stages:
+            if not removed:
+                continue
+            run -= removed
+            rows.append((label, "−" + n(removed), n(run)))
+        rows.append(("segments passing per-record screening", "", n(run)))
+        lines += self._block(rows)
+
+        # Isolate-level identity gates run on the segment pool but drop the
+        # whole isolate, so they are counted (and shown) in isolates — a
+        # separate sub-tally, reconciled back to the pool by the
+        # "segments entering assembly" ground-truth line below.
+        pq = self.removed_protein_quality
+        hmm_pre = d.get("hmm_isolates_pre_assembly", self.removed_hmm_failed)
+        if pq or hmm_pre:
+            lines.append("")
+            lines.append(
+                "  isolate-level identity gates — a failure drops the whole "
+                "isolate  (unit: isolates)"
+            )
+            gate_rows: list[tuple] = []
+            if pq:
+                gate_rows.append((
+                    f"ambiguous protein residues "
+                    f"(>{self._pct(d.get('protein_quality_pct', 0.05))} X)",
+                    "", "−" + n(pq) + " isolates"))
+            if hmm_pre:
+                gate_rows.append(
+                    ("marker fails HMM identity", "", "−" + n(hmm_pre) + " isolates"))
+            # Reconcile the isolate-gate removals back to the segment pool.
+            # Only meaningful here — with no gates the Phase-1 subtotal already
+            # is the pool entering assembly, so the line would be redundant.
+            sea = d.get("segments_entering_assembly")
+            if sea is not None:
+                gate_rows.append(("segments entering assembly", "", n(sea)))
+            lines += self._block(gate_rows)
+
+        # Phase 2 — isolate assembly. Units are now isolates.
+        lines.append("")
+        nseg = d.get("n_segments")
+        seg_word = f"{nseg} segments → 1 isolate" if nseg else "segments → 1 isolate"
+        lines.append(f"Phase 2 · isolate assembly  ({seg_word}; unit: isolates)")
+        p2: list[tuple] = []
+        inc = d.get("incomplete_segments", self.removed_incomplete_isolates)
+        if inc:
+            miss = (f"missing ≥1 of {nseg} segments / unidentifiable"
+                    if nseg else "missing segments / unidentifiable")
+            p2.append((miss, "", "≈" + n(inc) + " segments"))
+        if self.removed_length_by_segment:
+            tot = sum(c["too_short"] + c["too_long"]
+                      for c in self.removed_length_by_segment.values())
+            if tot:
+                p2.append(("segment length out of bounds", "",
+                           "−" + n(tot) + " isolates"))
+        if self.removed_extra_segments:
+            p2.append(("extra / non-canonical segments", "",
+                       "−" + n(self.removed_extra_segments) + " isolates"))
+        cm = d.get("concat_marker_isolates", 0)
+        if cm:
+            hmm_c = d.get("concat_hmm_isolates", 0)
+            note = f" ({n(hmm_c)} via HMM)" if hmm_c else ""
+            p2.append(("marker lost at concatenation", "",
+                       "−" + n(cm) + " isolates" + note))
+        dup = d.get("duplicate_isolates", 0)
+        if dup:
+            p2.append(("identical duplicate genomes", "",
+                       "−" + n(dup) + " isolates"))
+        final = self.final_survivors
+        if final is not None:
+            p2.append(("complete isolates assembled", "", n(final)))
+        lines += self._block(p2)
+
+        # Optional per-segment length breakdown (which segment's bound bit).
+        if self.removed_length_by_segment:
             for seg_name in sorted(self.removed_length_by_segment.keys()):
                 counts = self.removed_length_by_segment[seg_name]
-                if counts["too_short"]:
-                    length_lines.append(
-                        f"    {seg_name} too short  : {counts['too_short']}"
-                    )
-                if counts["too_long"]:
-                    length_lines.append(
-                        f"    {seg_name} too long   : {counts['too_long']}"
-                    )
-        elif self.length_filter_skipped:
-            why = (
-                "filter disabled"
-                if self.length_filter_skip_reason == "disabled"
-                else "segmented mode"
+                if counts.get("too_short"):
+                    lines.append(f"    {seg_name} too short: {n(counts['too_short'])}")
+                if counts.get("too_long"):
+                    lines.append(f"    {seg_name} too long : {n(counts['too_long'])}")
+
+        lines += self._protected_lines()
+        lines.append("")
+        if final is not None:
+            lines.append(
+                f"{n(self.total_input)} input segments → {n(final)} complete isolates"
             )
-            length_lines = [f"  Removed (length)    : skipped ({why})"]
-        else:
-            length_lines = [f"  Removed (length)    : {self.removed_length}"]
-        dup_line = (
-            f"  Removed (duplicates): {self.removed_duplicates} "
-            "(applied to concatenated isolates)"
-            if self.dedup_skipped
-            else f"  Removed (duplicates): {self.removed_duplicates}"
+        lines.append(
+            "not applied in segmented mode: exact-duplicate & whole-genome "
+            "length filters"
         )
-        lines = [
-            f"QC Summary",
-            f"  Input sequences     : {self.total_input}",
-            f"  Passed basic QC     : {self.passed}",
-            dup_line,
-            *length_lines,
-            f"  Removed (ambiguous) : {self.removed_ambiguous}",
-            f"  Removed (annotation): {self.removed_annotation}",
-            f"  Removed (proteins)  : {self.removed_proteins}",
-            f"  Removed (protein-quality): {self.removed_protein_quality}",
-            f"  Removed (incomplete): {self.removed_incomplete_isolates}",
-            f"  Removed (tax-mismatch): {self.removed_taxonomy_mismatch}",
-            f"  Removed (strain-collision): {self.removed_strain_collisions}",
-            f"  Removed (extra-segments): {self.removed_extra_segments}",
-        ]
-        if self.removed_hmm_failed or self.removed_hmm_by_marker:
-            hmm_line = f"  Removed (HMM QC)    : {self.removed_hmm_failed}"
-            if self.removed_hmm_by_marker:
-                parts = [
-                    f"{k}={v}"
-                    for k, v in sorted(self.removed_hmm_by_marker.items())
-                ]
-                hmm_line += f" ({', '.join(parts)})"
-            lines.append(hmm_line)
-        if self.protected:
-            n_ids = len({p["id"] for p in self.protected})
-            lines.append(
-                f"  Protected (overrides): {n_ids} record(s) kept despite "
-                f"failing QC ({len(self.protected)} stage-hit(s))"
-            )
-        # Add a Final survivors line when the CLI driver populated it.
-        # Older callers / tests that build a QCReport directly (without
-        # going through _handle_segmented) will see the field as None
-        # and the line is omitted, preserving prior behaviour.
-        if self.final_survivors is not None:
-            lines.append(
-                f"  Final survivors     : {self.final_survivors} "
-                f"{self.final_survivors_unit} "
-                f"(after every QC stage)"
-            )
         return "\n".join(lines)
+
+    def _protected_lines(self) -> list[str]:
+        if not self.protected:
+            return []
+        n_ids = len({p["id"] for p in self.protected})
+        return [
+            "",
+            f"  Protected (overrides): {n_ids} record(s) kept despite failing "
+            f"QC ({len(self.protected)} stage-hit(s))",
+        ]
 
 
 @dataclass
