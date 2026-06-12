@@ -492,7 +492,7 @@ phylo:
     # --fast forces this to false at runtime for a preliminary-run
     # tree build.
     use_auto: true
-  # Optional alignment trimming (trimAl) for the whole-genome tree (2E),
+  # Optional alignment trimming (trimAl) for the whole-genome tree,
   # between MAFFT and the tree-builder. OFF by default. When on,
   # {prefix}_msa.fasta becomes the trimmed (tree-input) alignment and the
   # raw MAFFT output is kept as {prefix}_msa_untrimmed.fasta. In partitioned
@@ -537,7 +537,7 @@ phylo:
     extra_args: []
   # Partitioned-supermatrix tree — the principled multi-marker analysis.
   # When enabled AND the run resolves to protein + IQ-TREE AND the HMM tier
-  # resolved >= 2 marker families, the whole-genome tree (2E) is built by
+  # resolved >= 2 marker families, the whole-genome tree is built by
   # aligning each marker family SEPARATELY (one MAFFT per family), then
   # concatenating the per-family MSAs column-wise into a supermatrix and
   # letting IQ-TREE fit a substitution model PER partition. This replaces
@@ -716,7 +716,7 @@ phylo:
   # node gets a <property ref="style:font_color" datatype="xsd:token"
   # applies_to="node">#RRGGBB</property> so viewers (Archaeopteryx) tint
   # the leaf label by taxonomy. The palette is shared across the
-  # whole-genome tree (2E) and every per-protein tree (2F), so the same
+  # whole-genome tree and every per-protein tree, so the same
   # taxon is the same colour everywhere — which is what lets you spot
   # incongruence across the per-protein trees by eye.
   coloring:
@@ -739,7 +739,7 @@ phylo:
     # mode a known parent with a missing child keeps the parent's base
     # colour; only a missing parent goes grey.
     missing_color: "#808080"
-  # Per-protein trees (2F) — enabled per-run with --per-protein-phylo.
+  # Per-protein trees — enabled per-run with --per-protein-phylo.
   # Builds one tree per declared HMM marker (one tree per `hmms:` spec you
   # configure for QC under segment_markers / cluster_protein), written into
   # the {prefix}_per_protein/ subdirectory. A spec's `hmms:` tokens are

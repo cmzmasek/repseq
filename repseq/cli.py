@@ -174,7 +174,7 @@ def _shared_options(fn):
         help=(
             "Preliminary-run mode for fast tree building. Overrides the "
             "YAML phylo: settings and forces, for every tree built in "
-            "this run (whole-genome 2E AND per-protein 2F): "
+            "this run (the whole-genome tree AND the per-protein trees): "
             "FastTree (skips IQ-TREE / ModelFinder / UFBoot), MAFFT "
             "'--retree 1' single-pass progressive alignment (drops "
             "'--auto' and any L-INS-i flags), no trimAl trimming, no "
