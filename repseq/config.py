@@ -632,12 +632,22 @@ DEFAULTS: dict[str, Any] = {
         # CONCAT isolate in segmented mode) so the bench scientist can
         # see at a glance where the elected representatives land in the
         # broader diversity. Pipeline is hard-coded for speed regardless
-        # of the rest of phylo: MAFFT --retree 1 (no --auto), FastTree
-        # (no IQ-TREE / ModelFinder / UFBoot), midpoint root only, no
-        # LCA, no trimAl. Representative leaves are prefixed with
-        # "[repr] " in the phyloXML <name> for visual identification.
+        # of the rest of phylo: MAFFT (--retree 1, or --parttree above
+        # parttree_threshold — see below), FastTree (no IQ-TREE /
+        # ModelFinder / UFBoot), midpoint root only, no LCA, no trimAl.
+        # Representative leaves are prefixed with "[repr] " in the
+        # phyloXML <name> for visual identification.
         "pre_cluster_tree": {
             "enabled": False,
+            # Above this many post-QC sequences, the pre-cluster MSA
+            # switches from MAFFT --retree 1 (single-pass FFT-NS-1, which
+            # builds an O(N^2) distance matrix and runs out of memory on
+            # very large pools) to MAFFT --retree 2 --parttree (the
+            # PartTree guide — no full matrix, scales to 10^5+ sequences).
+            # Below it the standard --retree 1 pass is used. 0 = always
+            # PartTree; a very large value effectively never. PartTree is
+            # rougher, but the pre-cluster tree is a rough overview anyway.
+            "parttree_threshold": 10000,
         },
     },
     "taxonomy": {
@@ -2036,6 +2046,17 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         mono_cfg["include_species"], bool
     ):
         errors.append("phylo.monophyly.include_species must be a boolean")
+
+    pc_cfg = phylo_cfg.get("pre_cluster_tree", {}) or {}
+    if "enabled" in pc_cfg and not isinstance(pc_cfg["enabled"], bool):
+        errors.append("phylo.pre_cluster_tree.enabled must be a boolean")
+    ptt = pc_cfg.get("parttree_threshold", 10000)
+    if not isinstance(ptt, int) or isinstance(ptt, bool) or ptt < 0:
+        errors.append(
+            "phylo.pre_cluster_tree.parttree_threshold must be a "
+            "non-negative integer (0 = always use MAFFT --parttree; a "
+            "very large value effectively never)"
+        )
 
     # HMM block
     hmm = cfg.get("hmm", {}) or {}

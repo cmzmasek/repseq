@@ -18,7 +18,10 @@ The pipeline here is intentionally **hard-coded for speed**, regardless
 of the rest of ``phylo:``:
 
 * MAFFT ``--retree 1`` (single-pass FFT-NS-1) — no ``--auto``,
-  no L-INS-i.
+  no L-INS-i. **Above** ``phylo.pre_cluster_tree.parttree_threshold``
+  (default 10000) leaves it switches to ``--retree 2 --parttree``
+  (MAFFT's PartTree guide), which skips the O(N²) distance matrix that
+  OOMs ``--retree 1`` on huge pools and scales to 10⁵⁺ sequences.
 * **FastTree** (no IQ-TREE / ModelFinder / UFBoot) regardless of
   alphabet — the user explicitly asked for "rough", and any model
   selection would dominate the runtime budget.
@@ -160,6 +163,26 @@ def run_pre_cluster_phylogeny(
         for s in sequences
     }
 
+    # MAFFT strategy, hard-coded regardless of phylo.mafft. The single-pass
+    # FFT-NS-1 path (--retree 1) builds an O(N^2) distance matrix and gets
+    # OOM-killed on huge pools, so at/above parttree_threshold we switch to
+    # the PartTree guide (--retree 2 --parttree), which skips the full matrix
+    # and scales to 10^5+ sequences.
+    pc_cfg = (cfg.get("phylo", {}) or {}).get("pre_cluster_tree", {}) or {}
+    threshold = pc_cfg.get("parttree_threshold", 10000)
+    if (
+        isinstance(threshold, int)
+        and not isinstance(threshold, bool)
+        and n >= threshold
+    ):
+        mafft_args = ["--retree", "2", "--parttree"]
+        logger.warning(
+            "[pre-cluster] %d sequences >= parttree_threshold (%d) — using "
+            "MAFFT --parttree (large-input mode)", n, threshold,
+        )
+    else:
+        mafft_args = ["--retree", "1"]
+
     out_dir.mkdir(parents=True, exist_ok=True)
     newick_path = out_dir / f"{prefix}_pre_cluster_tree.nwk"
     phyloxml_path = out_dir / f"{prefix}_pre_cluster_tree.xml"
@@ -181,12 +204,13 @@ def run_pre_cluster_phylogeny(
             sequences, id_map, input_fasta, bodies=bodies,
         )
 
-        # MAFFT --retree 1, hardcoded regardless of phylo.mafft.
-        # use_auto=False drops --auto so the extra args alone govern.
+        # use_auto=False drops --auto so the chosen extra args alone govern
+        # (mafft_args picked above: --retree 1, or --retree 2 --parttree for
+        # a large pool).
         try:
             run_mafft(
                 input_fasta, msa_fasta, cfg,
-                extra_args=["--retree", "1"],
+                extra_args=mafft_args,
                 use_auto=False,
             )
         except MafftError as exc:
@@ -247,7 +271,7 @@ def run_pre_cluster_phylogeny(
             tree_version=fasttree_mod.tool_version(),
             model=("JTT" if use_protein else "GTR"),
             ufboot=None,
-            extra_msa_args=["--retree", "1"],
+            extra_msa_args=mafft_args,
             extra_tree_args=[],
             tree=parsed,
             rooting_method=rooting_used,

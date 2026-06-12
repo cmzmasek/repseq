@@ -798,6 +798,25 @@ phylo:
       enabled: false
       mode: automated1
       extra_args: []
+  # Pre-cluster overview tree (2H): a rough single-pass FastTree over EVERY
+  # post-QC sequence (one leaf per CONCAT isolate in segmented mode), built
+  # BEFORE clustering, so you can see where the elected representatives land in
+  # the broader diversity. Representative leaves get a "[repr] " prefix in the
+  # phyloXML <name>, and every leaf carries a repseq:is_representative
+  # true/false <property> you can filter on in a viewer. Pipeline is hard-coded
+  # for speed regardless of the rest of phylo: MAFFT (see parttree_threshold),
+  # FastTree, midpoint root only, no LCA / trimAl / bootstrap. Trigger with
+  # --pre-cluster-tree or enabled: true here.
+  pre_cluster_tree:
+    enabled: false
+    # Above this many post-QC sequences, the pre-cluster MSA switches from
+    # MAFFT --retree 1 (single-pass FFT-NS-1, which builds an O(N^2) distance
+    # matrix and runs out of memory on very large pools) to MAFFT
+    # --retree 2 --parttree (the PartTree guide — no full matrix, scales to
+    # 10^5+ sequences). Below it the standard --retree 1 pass is used.
+    # 0 = always PartTree; a very large value effectively never. PartTree is
+    # rougher, but the pre-cluster tree is a rough overview anyway.
+    parttree_threshold: 10000
 
 output:
   dir: ./repseq_output

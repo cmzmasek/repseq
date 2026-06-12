@@ -200,6 +200,32 @@ def test_validate_config_rejects_bad_per_protein_domain_architecture():
     assert any("per_protein.domain_architecture" in e for e in errors)
 
 
+def test_validate_config_pre_cluster_parttree_threshold_default():
+    cfg = load_config(None)
+    assert cfg["phylo"]["pre_cluster_tree"]["parttree_threshold"] == 10000
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_accepts_zero_parttree_threshold():
+    cfg = load_config(None)
+    cfg["phylo"]["pre_cluster_tree"]["parttree_threshold"] = 0
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_negative_parttree_threshold():
+    cfg = load_config(None)
+    cfg["phylo"]["pre_cluster_tree"]["parttree_threshold"] = -1
+    errors = validate_config(cfg)
+    assert any("pre_cluster_tree.parttree_threshold" in e for e in errors)
+
+
+def test_validate_config_rejects_non_int_parttree_threshold():
+    cfg = load_config(None)
+    cfg["phylo"]["pre_cluster_tree"]["parttree_threshold"] = "lots"
+    errors = validate_config(cfg)
+    assert any("pre_cluster_tree.parttree_threshold" in e for e in errors)
+
+
 def test_validate_config_whole_polyprotein_tree_default_off():
     cfg = load_config(None)
     assert cfg["phylo"]["per_protein"]["whole_polyprotein_tree"] is False

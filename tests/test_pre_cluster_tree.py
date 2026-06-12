@@ -303,3 +303,62 @@ def test_run_pre_cluster_passes_retree1_to_mafft(tmp_path, make_seq):
         run_pre_cluster_phylogeny(seqs, [], cfg, tmp_path, "test")
     assert captured["extra_args"] == ["--retree", "1"]
     assert captured["use_auto"] is False
+
+
+def _capture_mafft_factory(captured):
+    def _capture(in_fa, out_fa, cfg, extra_args=None, use_auto=True):
+        captured["extra_args"] = extra_args
+        out_fa.parent.mkdir(parents=True, exist_ok=True)
+        out_fa.write_text(in_fa.read_text())
+    return _capture
+
+
+def test_run_pre_cluster_switches_to_parttree_above_threshold(tmp_path, make_seq):
+    """At/above phylo.pre_cluster_tree.parttree_threshold MAFFT must switch
+    from --retree 1 to the PartTree guide (--retree 2 --parttree) so a huge
+    pool builds instead of OOM-ing on the O(N^2) distance matrix."""
+    pytest.importorskip("Bio")
+    seqs = [make_seq(f"s{i}", "ACGTACGT") for i in range(4)]
+    cfg = {
+        "clustering": {"alphabet_for_clustering": "nucleotide"},
+        "segmented": {"enabled": False},
+        # 4 sequences >= threshold 3 -> PartTree path.
+        "phylo": {"pre_cluster_tree": {"parttree_threshold": 3}},
+        "output": {"dir": str(tmp_path), "prefix": "test"},
+        "temp_dir": str(tmp_path / "tmp"),
+    }
+    captured = {}
+    with patch(
+        "repseq.phylo.pre_cluster.run_mafft",
+        side_effect=_capture_mafft_factory(captured),
+    ), patch(
+        "repseq.phylo.pre_cluster.run_fasttree", side_effect=_stub_fasttree,
+    ):
+        run_pre_cluster_phylogeny(seqs, [], cfg, tmp_path, "test")
+    assert captured["extra_args"] == ["--retree", "2", "--parttree"]
+    # The phyloXML <description> records the strategy that actually ran.
+    xml = (tmp_path / "test_pre_cluster_tree.xml").read_text()
+    assert "--parttree" in xml
+
+
+def test_run_pre_cluster_keeps_retree1_below_threshold(tmp_path, make_seq):
+    """Below the threshold the standard --retree 1 pass is used (default
+    threshold 10000 — a small pool never triggers PartTree)."""
+    pytest.importorskip("Bio")
+    seqs = [make_seq(f"s{i}", "ACGTACGT") for i in range(4)]
+    cfg = {
+        "clustering": {"alphabet_for_clustering": "nucleotide"},
+        "segmented": {"enabled": False},
+        "phylo": {"pre_cluster_tree": {"parttree_threshold": 10000}},
+        "output": {"dir": str(tmp_path), "prefix": "test"},
+        "temp_dir": str(tmp_path / "tmp"),
+    }
+    captured = {}
+    with patch(
+        "repseq.phylo.pre_cluster.run_mafft",
+        side_effect=_capture_mafft_factory(captured),
+    ), patch(
+        "repseq.phylo.pre_cluster.run_fasttree", side_effect=_stub_fasttree,
+    ):
+        run_pre_cluster_phylogeny(seqs, [], cfg, tmp_path, "test")
+    assert captured["extra_args"] == ["--retree", "1"]
