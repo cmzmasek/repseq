@@ -402,7 +402,7 @@ DEFAULTS: dict[str, Any] = {
             # has no /strain qualifier, the writer substitutes
             # {isolate_id} (which segmented mode always has) so the
             # label never collapses to ``...||host``.
-            "segmented_format": "{species}|{strain}|{host}",
+            "segmented_format": "{species}|{strain}|{subtype}|{host}",
             # Replace internal whitespace runs in each placeholder value
             # with underscores. Keeps the label round-trippable through
             # tree viewers that treat whitespace as a token boundary.

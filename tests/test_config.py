@@ -438,7 +438,7 @@ def test_validate_config_rejects_non_string_iqtree_binary():
 def test_validate_config_default_phylo_labeling():
     cfg = load_config(None)
     assert cfg["phylo"]["labeling"]["format"] == "{species}|{id}|{host}"
-    assert cfg["phylo"]["labeling"]["segmented_format"] == "{species}|{strain}|{host}"
+    assert cfg["phylo"]["labeling"]["segmented_format"] == "{species}|{strain}|{subtype}|{host}"
     assert cfg["phylo"]["labeling"]["replace_whitespace"] is True
     assert cfg["phylo"]["labeling"]["keep_separator_on_empty"] is False
     assert validate_config(cfg) == []

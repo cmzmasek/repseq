@@ -583,7 +583,11 @@ phylo:
     # but the GenBank record has no /strain qualifier, the writer
     # substitutes {isolate_id} — a single template works for both.
     format: "{species}|{id}|{host}"
-    segmented_format: "{species}|{strain}|{host}"
+    # {subtype} carries the viral serotype (e.g. influenza "H5N1"); it is
+    # included by default because it is decisive for segmented viruses, and
+    # it simply drops out (with its separator) for families that have no
+    # /serotype, so a single template serves both.
+    segmented_format: "{species}|{strain}|{subtype}|{host}"
     # Replace whitespace inside each placeholder's value with "_" so
     # the label survives Newick / phyloXML viewers that treat
     # whitespace as a token boundary. Separators in the template
