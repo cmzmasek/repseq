@@ -987,6 +987,14 @@ def test_render_summary_points_to_nucleotide_taxonomic_report(make_seq, tmp_path
     assert "{prefix}_nucleotide_taxonomic_report.txt" in md
 
 
+def test_render_summary_points_to_subtype_report(make_seq, tmp_path):
+    """Summary must mention the conditional subtype-distribution report."""
+    cfg = _base_cfg(tmp_path)
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "{prefix}_subtype_report.txt" in md
+    assert "more than one viral subtype" in md
+
+
 def test_render_summary_protein_annotation_segmented_uses_segment_wording(make_seq, tmp_path):
     """In segmented mode the protein-annotation drop is per NCBI segment
     record, compared against expected_proteins_per_segment. It must appear

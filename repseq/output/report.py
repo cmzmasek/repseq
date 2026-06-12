@@ -1382,6 +1382,165 @@ def write_taxonomic_report(
     path.write_text("\n".join(lines).rstrip() + "\n")
 
 
+# Subtype (viral serotype) values that are not a real subtype — the same
+# "I don't know" tokens NCBI metadata uses, mirroring labels._EMPTY_TOKENS.
+# These never count toward subtype diversity or coverage.
+_EMPTY_SUBTYPE_TOKENS = {
+    "", "unknown", "n/a", "na", "none", "null", "not collected",
+}
+
+
+def _seq_subtype(seq: Sequence) -> Optional[str]:
+    """The sequence's viral serotype (e.g. influenza ``"H5N1"``) or None.
+
+    Reads ``seq.subtype`` — populated on the CONCAT isolate in segmented
+    mode (``/serotype`` GenBank qualifier) and on the plain sequence in
+    non-segmented mode (esummary). Empty / unknown tokens resolve to None
+    so they are excluded from every count (the "unassigned" share is
+    reported separately as a coverage figure, not as a subtype).
+    """
+    v = seq.subtype
+    if v is None:
+        return None
+    v = str(v).strip()
+    if v.lower() in _EMPTY_SUBTYPE_TOKENS:
+        return None
+    return v
+
+
+def write_subtype_report(
+    before_seqs: list[Sequence],
+    after_seqs: list[Sequence],
+    segmented: bool,
+    path: Path,
+    max_breakdown: int = 20,
+    provenance: Optional[str] = None,
+) -> bool:
+    """Write ``{prefix}_subtype_report.txt``: the distribution of viral
+    serotypes before vs after clustering — the subtype analogue of one
+    rank of ``_taxonomic_report.txt``.
+
+    Emitted **only when the representatives carry more than one distinct
+    subtype** (returns False, writing nothing, otherwise) — a
+    single-serotype selection has nothing to report. The counting unit is
+    **isolates** in segmented mode and **sequences** otherwise, matching
+    the taxonomic report. "Before" is the post-QC pool, "after" the
+    representatives; the blank/unknown share is reported as a coverage
+    figure, never as a subtype row. Ranks with more than ``max_breakdown``
+    distinct subtypes show only the top N by member count.
+    """
+    after_counts = Counter(v for s in after_seqs if (v := _seq_subtype(s)))
+    if len(after_counts) < 2:
+        return False
+    before_counts = Counter(v for s in before_seqs if (v := _seq_subtype(s)))
+
+    unit = "isolates" if segmented else "sequences"
+    n_before, n_after = len(before_seqs), len(after_seqs)
+    cov_before, cov_after = sum(before_counts.values()), sum(after_counts.values())
+
+    def _pct(a: int, b: int) -> str:
+        return f"{(100.0 * a / b):.1f}%" if b else "n/a"
+
+    lines: list[str] = []
+    if provenance:
+        lines.append(provenance)
+    lines.append("Subtype report")
+    lines.append(f"Generated: {datetime.date.today().isoformat()}")
+    lines.append(
+        f"Counting unit: {unit} (before = post-QC pool, {n_before}; "
+        f"after = representatives, {n_after})"
+    )
+    lines.append(
+        f"Subtype coverage: {cov_before} / {n_before} pool {unit} carry a "
+        f"serotype ({_pct(cov_before, n_before)}); {cov_after} / {n_after} "
+        f"representatives ({_pct(cov_after, n_after)})"
+    )
+    lines.append("")
+    lines.append(
+        "== Subtype diversity (distinct subtypes before vs after clustering) =="
+    )
+    lines.append("")
+    lines.append(
+        f"  distinct subtypes    before: {len(before_counts)}    "
+        f"after: {len(after_counts)}"
+    )
+    lines.append("")
+
+    n_distinct = len(before_counts)
+    names = sorted(before_counts, key=lambda n: (-before_counts[n], n))
+    truncated = n_distinct > max_breakdown
+    shown = names[:max_breakdown] if truncated else names
+    if truncated:
+        lines.append(
+            f"== Subtype distribution (sorted by member count; top "
+            f"{max_breakdown} of {n_distinct} shown) =="
+        )
+    else:
+        lines.append("== Subtype distribution (sorted by member count) ==")
+    lines.append("")
+    name_w = max(max((len(n) for n in shown), default=0), len("subtype"))
+    header = f"  {'subtype':<{name_w}}  {'before':>7}  {'after':>7}"
+    lines.append(header)
+    lines.append("  " + "-" * (len(header) - 2))
+    for n in shown:
+        lines.append(
+            f"  {n:<{name_w}}  {before_counts[n]:>7}  {after_counts.get(n, 0):>7}"
+        )
+    if truncated:
+        lines.append(f"  ... +{n_distinct - max_breakdown} more subtypes not shown")
+    lines.append("")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines).rstrip() + "\n")
+    return True
+
+
+def write_subtype_report_tsv(
+    before_seqs: list[Sequence],
+    after_seqs: list[Sequence],
+    path: Path,
+) -> bool:
+    """Tidy long-format TSV companion to ``_subtype_report.txt``.
+
+    Shares the 8-column :data:`_TIDY_TSV_COLUMNS` schema (``report`` =
+    ``"subtype"``, ``rank`` = ``"subtype"``, ``spec`` = ``"_subtype"``)
+    so it concatenates with the other tidy report TSVs. One ``distinct_taxa``
+    row per pool plus one ``member_count`` row per (pool, subtype), over the
+    union of subtypes seen in either pool. Gated identically to the `.txt`
+    (returns False, writing nothing, unless the representatives carry >1
+    distinct subtype).
+    """
+    after_counts = Counter(v for s in after_seqs if (v := _seq_subtype(s)))
+    if len(after_counts) < 2:
+        return False
+    before_counts = Counter(v for s in before_seqs if (v := _seq_subtype(s)))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("\t".join(_TIDY_TSV_COLUMNS) + "\n")
+        nb, na = len(before_counts), len(after_counts)
+        _emit_tidy_rows(
+            fh, "subtype", "subtype", "post_qc", "*ALL*", nb, "_subtype",
+            [("distinct_taxa", nb)],
+        )
+        _emit_tidy_rows(
+            fh, "subtype", "subtype", "reps", "*ALL*", na, "_subtype",
+            [("distinct_taxa", na)],
+        )
+        for name in sorted(set(before_counts) | set(after_counts)):
+            nb_c = before_counts.get(name, 0)
+            na_c = after_counts.get(name, 0)
+            _emit_tidy_rows(
+                fh, "subtype", "subtype", "post_qc", name, nb_c, "_subtype",
+                [("member_count", nb_c)],
+            )
+            _emit_tidy_rows(
+                fh, "subtype", "subtype", "reps", name, na_c, "_subtype",
+                [("member_count", na_c)],
+            )
+    return True
+
+
 # Ranks for the protein taxonomic report — `_TAX_RANKS` without ``species``.
 # Species-level diversity is reported in `_taxonomic_report.txt`; the protein
 # report starts at subgenus where coverage gaps between marker and accessory

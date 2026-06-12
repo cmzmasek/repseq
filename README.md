@@ -268,6 +268,7 @@ flags you passed. At a glance:
 | `{prefix}_protein_taxonomic_report.txt` | any run with `cluster_protein` / `segment_markers` / `extra_protein` declared | Per-rank protein coverage + AA length statistics. |
 | `{prefix}_nucleotide_taxonomic_report.txt` | every run | Per-rank NT length statistics: per-segment + `total` (segmented) or single `genome` column. |
 | `{prefix}_polyprotein_taxonomic_report.txt` | `polyprotein:` declared + HMM tier active | Per-rank peptide coverage + AA length statistics. |
+| `{prefix}_subtype_report.txt` / `.tsv` | only when the representatives span >1 viral subtype | Per-serotype distribution (e.g. influenza H5N1) before vs after clustering. |
 | `{prefix}_*_taxonomic_report.tsv` | parallel to the matching `.txt` reports | Machine-readable tidy long-format companions (8-column schema). |
 | `{prefix}_clustering.png` | only with `--plot` | Diagnostic scatter of the clustering. |
 | `{prefix}_msa.fasta`, `_tree.xml`, `_tree_id_map.tsv` | only with `--phylo` | Alignment + annotated tree (phyloXML) + short-id↔accession map. |
@@ -642,6 +643,23 @@ after). Section 2 is, per rank with ≥1 populated taxon, the per-taxon breakdow
 (name, before-count, after-count, sorted by before-count desc; truncated to the
 top `output.protein_report.max_breakdown`, default 20). Blank rank values are
 excluded.
+
+#### `{prefix}_subtype_report.txt` / `.tsv` — serotype distribution
+
+The subtype analogue of one rank of the taxonomic report, over `seq.subtype`
+(the viral **serotype**, e.g. influenza `H5N1`, from the GenBank `/serotype`
+qualifier in segmented mode or the esummary path otherwise). **Written only
+when the final representatives carry more than one distinct subtype** — a
+single-serotype (or serotype-less) selection produces nothing. A header
+coverage line says how many of the pool / reps carry a serotype at all (blank
+/ unknown values are not a subtype and never appear as a row), then a
+distinct-count line, then a per-subtype table (`subtype`, before-count,
+after-count, sorted by before-count desc, truncated to the top
+`output.protein_report.max_breakdown`). Counting unit is **isolates**
+(segmented) or **sequences** otherwise. The `.tsv` is the tidy long-format
+companion (same 8-column schema as the other report TSVs, `report=subtype`).
+Use for: "how are the H/N subtypes distributed in my influenza set, and did
+clustering preserve the rare ones?"
 
 #### `{prefix}_protein_taxonomic_report.txt` — per-marker coverage + length
 

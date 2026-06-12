@@ -24,6 +24,8 @@ from .output.report import (
     write_polyprotein_taxonomic_report_tsv,
     write_protein_taxonomic_report,
     write_protein_taxonomic_report_tsv,
+    write_subtype_report,
+    write_subtype_report_tsv,
     write_taxonomic_report,
     write_taxonomic_report_tsv,
 )
@@ -2252,6 +2254,36 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
                 out_files.append(tax_tsv)
         except Exception as exc:
             click.echo(f"[taxonomic report TSV skipped] {exc}", err=True)
+        # Subtype (serotype) distribution report — only when the
+        # representatives span >1 distinct subtype (the writers return False
+        # and write nothing otherwise). Parity across segmented (isolates)
+        # and non-segmented (sequences). Soft-fail like its siblings.
+        try:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            st_path = out_dir / f"{prefix}_subtype_report.txt"
+            if write_subtype_report(
+                pre_clustering_sequences,
+                result.representatives,
+                segmented=bool(complete_isolates),
+                path=st_path,
+                provenance=_report_provenance,
+            ):
+                out_files.append(st_path)
+        except Exception as exc:
+            click.echo(f"[subtype report skipped] {exc}", err=True)
+        try:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            st_tsv = out_dir / f"{prefix}_subtype_report.tsv"
+            if write_subtype_report_tsv(
+                pre_clustering_sequences,
+                result.representatives,
+                path=st_tsv,
+            ):
+                out_files.append(st_tsv)
+        except Exception as exc:
+            click.echo(f"[subtype report TSV skipped] {exc}", err=True)
     # Per-protein coverage report — for each declared marker /
     # extra_protein, the fraction of isolates / sequences carrying it
     # per taxonomic rank, plus length statistics. Only emitted when at
