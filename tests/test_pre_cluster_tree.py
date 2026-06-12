@@ -117,6 +117,66 @@ def test_phyloxml_label_prefix_appears_on_marked_leaves(tmp_path, make_seq):
     assert xml.count("[repr] ") >= 2
 
 
+def test_phyloxml_representative_ids_emits_boolean_property(tmp_path, make_seq):
+    """write_phyloxml(representative_ids=...) emits a
+    repseq:is_representative xsd:boolean <property> on EVERY leaf —
+    'true' for ids in the set, 'false' otherwise."""
+    import re
+
+    pytest.importorskip("Bio")
+    from repseq.phylo.phyloxml_writer import write_phyloxml
+
+    reps = [
+        make_seq("rep1", "ACGT", organism="Virus A"),
+        make_seq("seq2", "ACGT", organism="Virus B"),
+        make_seq("rep3", "ACGT", organism="Virus C"),
+    ]
+    id_map = {"S0001": "rep1", "S0002": "seq2", "S0003": "rep3"}
+    nwk = tmp_path / "tree.nwk"
+    nwk.write_text("(S0001:0.1,S0002:0.1,S0003:0.1);\n")
+
+    out = tmp_path / "tree.xml"
+    write_phyloxml(
+        nwk, out, reps, id_map,
+        cfg={}, prefix="x", alphabet="nucleotide",
+        msa_tool="MAFFT", msa_version="?",
+        tree_tool="FastTree", tree_version="?",
+        model="GTR", ufboot=None,
+        representative_ids={"rep1", "rep3"},
+    )
+    xml = out.read_text()
+    assert 'datatype="xsd:boolean"' in xml
+    # One property per leaf (3), values match membership.
+    vals = re.findall(r'ref="repseq:is_representative"[^>]*>(\w+)<', xml)
+    assert sorted(vals) == ["false", "true", "true"]
+
+
+def test_phyloxml_no_representative_property_when_ids_none(tmp_path, make_seq):
+    """The default (representative_ids=None) — every other tree — emits
+    NO repseq:is_representative property at all."""
+    pytest.importorskip("Bio")
+    from repseq.phylo.phyloxml_writer import write_phyloxml
+
+    reps = [
+        make_seq("a", "ACGT", organism="Virus A"),
+        make_seq("b", "ACGT", organism="Virus B"),
+        make_seq("c", "ACGT", organism="Virus C"),
+    ]
+    id_map = {"S0001": "a", "S0002": "b", "S0003": "c"}
+    nwk = tmp_path / "tree.nwk"
+    nwk.write_text("(S0001:0.1,S0002:0.1,S0003:0.1);\n")
+
+    out = tmp_path / "tree.xml"
+    write_phyloxml(
+        nwk, out, reps, id_map,
+        cfg={}, prefix="x", alphabet="nucleotide",
+        msa_tool="MAFFT", msa_version="?",
+        tree_tool="FastTree", tree_version="?",
+        model="GTR", ufboot=None,
+    )
+    assert "repseq:is_representative" not in out.read_text()
+
+
 # ---------------------------------------------------------------------------
 # run_pre_cluster_phylogeny — end-to-end (MAFFT/FastTree mocked)
 # ---------------------------------------------------------------------------
@@ -176,6 +236,12 @@ def test_run_pre_cluster_full_pipeline_writes_three_files(tmp_path, make_seq):
     xml = (tmp_path / "test_pre_cluster_tree.xml").read_text()
     assert "[repr] " in xml
     assert xml.count("[repr] ") >= 2
+
+    # ...and a machine-readable repseq:is_representative boolean on every
+    # leaf (4 leaves: 2 reps → true, 2 non-reps → false).
+    import re
+    vals = re.findall(r'ref="repseq:is_representative"[^>]*>(\w+)<', xml)
+    assert sorted(vals) == ["false", "false", "true", "true"]
 
 
 def test_run_pre_cluster_raises_under_3_sequences(tmp_path, make_seq):

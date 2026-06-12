@@ -281,7 +281,7 @@ flags you passed. At a glance:
 | `{prefix}_iqtree_summary.txt` | `--phylo` + IQ-TREE | IQ-TREE ModelFinder report. |
 | `{prefix}_iqtree_model.txt` | `--phylo` + IQ-TREE | Grep-friendly `<label>: <model>` sidecar, one line per partition. |
 | `{prefix}_per_protein/` | only with `--per-protein-phylo` | One tree (MSA + phyloXML + id map + PDF/PNG; Newick opt-in) per marker; plus `_incongruence.tsv` of pairwise Robinson-Foulds distances. |
-| `{prefix}_pre_cluster_tree.xml`, `_id_map.tsv` (+ `.pdf`/`.png`) | `--pre-cluster-tree` | Rough overview tree of every post-QC sequence, `[repr] ` prefix on representative leaves. |
+| `{prefix}_pre_cluster_tree.xml`, `_id_map.tsv` (+ `.pdf`/`.png`) | `--pre-cluster-tree` | Rough overview tree of every post-QC sequence; `[repr] ` prefix + `repseq:is_representative` boolean `<property>` on the leaves. |
 | `{prefix}_extra_protein/` | `--per-protein-phylo` + `extra_protein:` declared | Accessory-protein trees (kept out of the incongruence table by design). |
 | `{prefix}_per_segment/` | `--per-segment-phylo` (segmented only) | One **nucleotide** tree per declared segment, from the reps' raw per-segment NT. |
 | `{prefix}_msa_conservation.tsv` | any phylo step that wrote an MSA (default on) | One conservation number per alignment (JSD-to-background, Henikoff-weighted, gap-penalised). |
@@ -1083,7 +1083,11 @@ other accepted values are `taxonomy`, `mad`, `midpoint`, and `none`.
 A diagnostic tree over **every post-QC sequence**, built BEFORE clustering would
 have collapsed redundancy — so you can see where the elected representatives land
 in the broader diversity of the input pool. The phyloXML `<name>` of each
-representative leaf is prefixed with `[repr] `.
+representative leaf is prefixed with `[repr] `, and **every** leaf additionally
+carries a `repseq:is_representative` boolean `<property>` (`true`/`false`) — a
+machine-readable flag you can filter, select, or colour by in a viewer such as
+Archaeopteryx. This is the only repseq tree that emits it (every other tree
+contains only representatives).
 
 The pipeline is intentionally **hard-coded for speed**, regardless of `phylo:`:
 **MAFFT `--retree 1`**, **FastTree** (no IQ-TREE/ModelFinder/UFBoot), **midpoint
@@ -1096,8 +1100,9 @@ Output files:
 
 - `{prefix}_pre_cluster_tree.nwk` — short-id leaves. **Opt-in** (`phylo.newick`).
 - `{prefix}_pre_cluster_tree.xml` — phyloXML with the full taxonomy `<property>`
-  enrichment + per-leaf colour (same palette as the other trees) and the `[repr] `
-  prefix on representative leaves.
+  enrichment + per-leaf colour (same palette as the other trees), the `[repr] `
+  prefix on representative leaves, and a `repseq:is_representative` boolean
+  `<property>` on every leaf.
 - `{prefix}_pre_cluster_tree.pdf` / `.png` — figure, rendered by default
   (`phylo.pdf`; `--no-pdf` to skip).
 - `{prefix}_pre_cluster_tree_id_map.tsv` — three columns (`short_id`,

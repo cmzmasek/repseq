@@ -1312,7 +1312,10 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             "`<name>` of each representative leaf is prefixed with "
             "`[repr] ` so the elected representatives can be picked "
             "out at a glance against the broader diversity of the "
-            "input pool. Outputs: "
+            "input pool; every leaf additionally carries a "
+            "`repseq:is_representative` boolean `<property>` "
+            "(`true`/`false`) so a viewer (Archaeopteryx) can filter "
+            "or colour by it. Outputs: "
             + ("`{prefix}_pre_cluster_tree.nwk`, " if keep_newick else "")
             + "`{prefix}_pre_cluster_tree.xml`, and "
             "`{prefix}_pre_cluster_tree_id_map.tsv` (with an "

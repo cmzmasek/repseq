@@ -487,6 +487,7 @@ def test_render_summary_pre_cluster_paragraph_when_run(make_seq, tmp_path):
     assert "FastTree" in md
     assert "midpoint" in md.lower()
     assert "[repr]" in md
+    assert "repseq:is_representative" in md  # the machine-readable boolean property
     # phylo.newick defaults to false → the .nwk is NOT listed; the phyloXML
     # and id_map are.
     assert "{prefix}_pre_cluster_tree.nwk" not in md

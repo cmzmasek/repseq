@@ -342,6 +342,7 @@ def _serialise_leaf(
     color_scheme: Optional[ColorScheme] = None,
     shown_protein_ids: Optional[set[str]] = None,
     domain_architecture: bool = False,
+    representative_ids: Optional[set[str]] = None,
 ) -> None:
     """Emit one terminal ``<clade>`` with rich annotation.
 
@@ -374,6 +375,13 @@ def _serialise_leaf(
     ``<domain_architecture>`` block to each emitted protein
     ``<sequence>`` from that CDS's HMM hits, so viewers (Archaeopteryx)
     draw the domain boxes.
+
+    ``representative_ids`` (pre-cluster overview tree only) is the set of
+    ``seq.id`` values that were elected as representatives; when it is not
+    ``None`` every leaf gets a ``repseq:is_representative`` boolean
+    ``<property>`` (``true``/``false``). The other trees contain only
+    representatives, so their callers leave it ``None`` and no property is
+    emitted.
     """
     clade = ET.SubElement(parent, "clade")
 
@@ -471,6 +479,26 @@ def _serialise_leaf(
         )
         prop.text = str(value)
 
+    # Representative flag (pre-cluster overview tree only). The pre-cluster
+    # tree is the one tree whose leaves are the FULL post-QC pool, so "is
+    # this leaf an elected representative?" is a real, filterable question
+    # there; every other tree contains only representatives, so the caller
+    # passes representative_ids=None and no property is emitted. Boolean
+    # (not the TSVs' TRUE/FALSE string) so Archaeopteryx treats it as a
+    # togglable predicate. Emitted on BOTH true and false leaves — false is
+    # a known fact here, not missing data, so absence never means non-rep.
+    if representative_ids is not None:
+        prop = ET.SubElement(
+            clade,
+            "property",
+            {
+                "ref": "repseq:is_representative",
+                "datatype": "xsd:boolean",
+                "applies_to": "clade",
+            },
+        )
+        prop.text = "true" if seq.id in representative_ids else "false"
+
     # Taxonomy-driven leaf colour (Archaeopteryx node-styling property).
     # Always emitted when colouring is active — color_for returns the
     # missing-colour grey for leaves whose rank doesn't resolve. Uses
@@ -497,6 +525,7 @@ def _serialise_internal(
     color_scheme: Optional[ColorScheme] = None,
     leaf_protein_ids: Optional[dict[str, set[str]]] = None,
     domain_architecture: bool = False,
+    representative_ids: Optional[set[str]] = None,
 ) -> None:
     """Emit one internal ``<clade>`` and recurse into children."""
     clade = ET.SubElement(parent, "clade")
@@ -549,6 +578,7 @@ def _serialise_internal(
                     else None
                 ),
                 domain_architecture=domain_architecture,
+                representative_ids=representative_ids,
             )
         else:
             _serialise_internal(
@@ -560,6 +590,7 @@ def _serialise_internal(
                 color_scheme=color_scheme,
                 leaf_protein_ids=leaf_protein_ids,
                 domain_architecture=domain_architecture,
+                representative_ids=representative_ids,
             )
 
 
@@ -724,6 +755,7 @@ def write_phyloxml(
     domain_architecture: bool = False,
     trim_note: Optional[str] = None,
     label_prefix_by_id: Optional[dict[str, str]] = None,
+    representative_ids: Optional[set[str]] = None,
     basis_role: Optional[str] = None,
     basis_family: Optional[str] = None,
     basis_segment: Optional[str] = None,
@@ -747,6 +779,12 @@ def write_phyloxml(
     ``rooting_method`` (when provided) is included in the
     ``<phylogeny><description>`` so the user can see which method
     actually fired in the auto chain.
+
+    ``representative_ids`` (the set of ``seq.id`` values elected as
+    representatives) drives a per-leaf ``repseq:is_representative`` boolean
+    ``<property>``. Only the pre-cluster overview tree passes it (its leaves
+    are the full post-QC pool); every other tree contains only
+    representatives and leaves it ``None``, so the property is absent there.
 
     ``basis_role`` (and the ``basis_*`` context args) drive a plain-English
     "what is this tree based on" sentence (via
@@ -883,6 +921,7 @@ def write_phyloxml(
         color_scheme=color_scheme,
         leaf_protein_ids=leaf_protein_ids,
         domain_architecture=domain_architecture,
+        representative_ids=representative_ids,
     )
 
     # Phylogeny-level basis properties (repseq: namespace). Per the

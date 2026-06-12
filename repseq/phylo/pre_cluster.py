@@ -8,7 +8,11 @@ the bench scientist opens this tree alongside the post-cluster tree
 in the broader diversity of the input pool. Representative leaves get
 a ``[repr] `` prefix on their phyloXML ``<name>`` for visual
 identification; non-rep leaves carry the same formatted label without
-the prefix.
+the prefix. Every leaf also carries a machine-readable
+``repseq:is_representative`` boolean ``<property>`` (``true``/``false``)
+so a viewer (Archaeopteryx) can filter / select / colour by it — this
+is the only tree that emits it, since every other repseq tree contains
+only representatives.
 
 The pipeline here is intentionally **hard-coded for speed**, regardless
 of the rest of ``phylo:``:
@@ -27,8 +31,9 @@ Outputs land alongside the rest of the run's phylo files:
 * ``{prefix}_pre_cluster_tree.nwk`` — Newick, short-id leaves.
 * ``{prefix}_pre_cluster_tree.xml`` — phyloXML with taxonomy
   ``<property>`` enrichment + per-leaf taxonomy colouring (the same
-  colour palette 2E and 2F use) and the ``[repr] `` prefix on rep
-  leaves.
+  colour palette 2E and 2F use), the ``[repr] `` prefix on rep leaves,
+  and a ``repseq:is_representative`` boolean ``<property>`` on every
+  leaf.
 * ``{prefix}_pre_cluster_tree_id_map.tsv`` — three columns
   (``short_id``, ``accession``, ``is_rep``) so a user grepping for
   reps without opening the XML can find them.
@@ -123,7 +128,9 @@ def run_pre_cluster_phylogeny(
     ``sequences`` is the post-QC pool fed to the mode (CONCAT isolates
     in segmented mode). ``representatives`` is the elected subset;
     leaves with an id in this set get a ``[repr] `` prefix in the
-    phyloXML ``<name>``.
+    phyloXML ``<name>`` AND a ``repseq:is_representative`` boolean
+    ``<property>`` (every leaf carries the property — ``true`` for the
+    elected subset, ``false`` otherwise).
 
     Returns the list of files written (Newick, phyloXML, id_map).
     Raises ``PhyloError`` when the step cannot proceed — soft-failed
@@ -248,6 +255,7 @@ def run_pre_cluster_phylogeny(
             leaf_protein_ids=None,
             domain_architecture=False,
             label_prefix_by_id=label_prefix_by_id,
+            representative_ids=rep_ids,
             basis_role="pre_cluster",
         )
     except Exception as exc:
