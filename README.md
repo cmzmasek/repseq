@@ -1089,14 +1089,14 @@ machine-readable flag you can filter, select, or colour by in a viewer such as
 Archaeopteryx. This is the only repseq tree that emits it (every other tree
 contains only representatives).
 
-The pipeline is intentionally **hard-coded for speed**, regardless of `phylo:`:
-**MAFFT `--retree 1`** (or **`--parttree`** above
-`phylo.pre_cluster_tree.parttree_threshold`, default 10000 — see the scale note),
-**FastTree** (no IQ-TREE/ModelFinder/UFBoot), **midpoint rooting** only, **no LCA
-annotation, no trimAl, no bootstrap**. The alphabet
-mirrors `clustering.alphabet_for_clustering` (AA when the run clustered on protein
-and every sequence carries a `protein_sequence`, else NT). In segmented mode the
-leaves are CONCAT isolates.
+The leaf set is **capped at `phylo.pre_cluster_tree.max_leaves` (default 5000)** —
+above the cap, all representatives are kept and the background is randomly
+subsampled to fill it (`0` = no cap; see the scale note). The pipeline is
+otherwise **hard-coded for speed**: **MAFFT `--retree 1`** (or **`--parttree`**
+above `phylo.pre_cluster_tree.parttree_threshold` when uncapped), **FastTree**,
+**midpoint rooting**, no LCA / trimAl / bootstrap. The alphabet mirrors
+`clustering.alphabet_for_clustering` (AA when the run clustered on protein, else
+NT); in segmented mode the leaves are CONCAT isolates.
 
 Output files:
 
@@ -1115,16 +1115,14 @@ only the tree + id_map land in the output dir (run `--phylo` if you want the
 MSA). Trigger via `--pre-cluster-tree` or `phylo.pre_cluster_tree.enabled: true`.
 Soft-fails like the other phylo steps.
 
-> **Scale note:** `--retree 1` builds an O(N²) distance matrix and gets
-> OOM-killed on very large pools (tens of thousands of isolates — e.g. a global
-> influenza run). To handle that, at/above `phylo.pre_cluster_tree.parttree_threshold`
-> (default 10000) MAFFT automatically switches to **`--retree 2 --parttree`** (the
-> PartTree guide), which skips the full matrix and scales to 10⁵⁺ sequences — so
-> the tree builds instead of failing. PartTree is rougher, but this overview tree
-> is rough by design. Set the threshold to `0` to always use PartTree, or to a
-> very large value to force `--retree 1`. `--retree 1` + FastTree on 5000 leaves
-> typically finishes in a few minutes; with PartTree, tens of thousands are
-> achievable (though the figure may be visually dense without subsampling).
+> **Scale note:** on a very large pool (tens of thousands of isolates — e.g. a
+> global influenza run) FastTree memory scales ~linearly with leaf count (~1.7 GB
+> at 1,000 protein leaves → ~180 GB at 100,000). The **`max_leaves` cap (default
+> 5000)** keeps FastTree near ~7 GB and the figure legible — a few minutes to
+> build. Only if you uncap (**`max_leaves: 0`**) does the MAFFT O(N²) matrix
+> matter: at/above `phylo.pre_cluster_tree.parttree_threshold` (default 10000)
+> MAFFT switches to **`--retree 2 --parttree`** (PartTree guide, scales to 10⁵⁺;
+> `0` = always, very large = never).
 
 ### One conservation number per MSA — `{prefix}_msa_conservation.tsv`
 

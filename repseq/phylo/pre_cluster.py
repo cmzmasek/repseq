@@ -17,6 +17,15 @@ only representatives.
 The pipeline here is intentionally **hard-coded for speed**, regardless
 of the rest of ``phylo:``:
 
+* **Leaf cap** ``phylo.pre_cluster_tree.max_leaves`` (default 5000).
+  FastTree memory scales ~linearly with leaf count, so an uncapped pool
+  of tens of thousands of leaves needs hundreds of GB and gets
+  OOM-killed — and a tree that large isn't legible anyway. Above the cap
+  the tree is built on **all representatives + a random sample of the
+  non-representative background** up to ``max_leaves`` (reps are never
+  dropped — they're the point of the overview); ``0`` = no cap. This
+  mirrors the ``--plot`` subsample (``viz/clustering_plot.py``: cap 2000,
+  seed 42, reps always kept).
 * MAFFT ``--retree 1`` (single-pass FFT-NS-1) — no ``--auto``,
   no L-INS-i. **Above** ``phylo.pre_cluster_tree.parttree_threshold``
   (default 10000) leaves it switches to ``--retree 2 --parttree``
@@ -49,6 +58,7 @@ surfaces as a stderr line and the rest of the run continues.
 from __future__ import annotations
 
 import logging
+import random
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
@@ -100,6 +110,45 @@ def _build_id_map_pre(sequences: list[Sequence]) -> dict[str, str]:
     }
 
 
+def _subsample_pool(
+    sequences: list[Sequence],
+    rep_ids: set[str],
+    max_leaves: int,
+    *,
+    seed: int = 42,
+) -> tuple[list[Sequence], int]:
+    """Cap the pre-cluster pool at ``max_leaves`` leaves for tractability.
+
+    Mirrors the ``--plot`` subsample (``viz/clustering_plot.py``): **all
+    representatives are always kept**; the remaining budget is filled with
+    a deterministic random (``seed``) sample of the non-representative
+    background. FastTree memory scales ~linearly with leaf count, so an
+    uncapped pool of tens of thousands of leaves needs hundreds of GB and
+    gets OOM-killed — and a tree that large isn't legible anyway.
+
+    A pool at or below the cap (or ``max_leaves <= 0``) is returned
+    unchanged. When the representatives alone meet or exceed the cap, all
+    of them are kept and no background is added (the cap bounds only the
+    background — reps are never dropped). Input order is preserved among
+    the kept sequences so re-runs are diff-stable.
+
+    Returns ``(kept_sequences, n_background_kept)``.
+    """
+    n = len(sequences)
+    n_background_total = sum(1 for s in sequences if s.id not in rep_ids)
+    if max_leaves <= 0 or n <= max_leaves:
+        return sequences, n_background_total
+
+    reps = [s for s in sequences if s.id in rep_ids]
+    background = [s for s in sequences if s.id not in rep_ids]
+    budget = max(0, max_leaves - len(reps))
+    if budget < len(background):
+        background = random.Random(seed).sample(background, budget)
+    keep = {id(s) for s in reps} | {id(s) for s in background}
+    kept = [s for s in sequences if id(s) in keep]
+    return kept, len(background)
+
+
 def _write_id_map_with_rep_flag(
     id_map: dict[str, str],
     rep_ids: set[str],
@@ -139,14 +188,33 @@ def run_pre_cluster_phylogeny(
     Raises ``PhyloError`` when the step cannot proceed — soft-failed
     upstream by the caller exactly like 2E.
     """
-    n = len(sequences)
-    if n < 3:
+    if len(sequences) < 3:
         raise PhyloError(
-            f"pre-cluster tree needs >= 3 sequences, got {n}"
+            f"pre-cluster tree needs >= 3 sequences, got {len(sequences)}"
+        )
+
+    rep_ids = {r.id for r in representatives}
+
+    # Leaf cap (phylo.pre_cluster_tree.max_leaves, default 5000): FastTree
+    # memory scales ~linearly with leaf count, so subsample a huge pool to
+    # all reps + a random background sample before building anything.
+    # Mirrors the --plot subsample; 0 = no cap. n below is the CAPPED size,
+    # so it also drives the parttree decision (a capped pool is back under
+    # parttree_threshold and uses the fast --retree 1 path).
+    pc_cfg = (cfg.get("phylo", {}) or {}).get("pre_cluster_tree", {}) or {}
+    max_leaves = pc_cfg.get("max_leaves", 5000)
+    n_pool = len(sequences)
+    sequences, n_background = _subsample_pool(sequences, rep_ids, max_leaves)
+    n = len(sequences)
+    if n < n_pool:
+        logger.warning(
+            "[pre-cluster] pool of %d isolates capped to %d leaves (all %d "
+            "representatives + %d background sample; set "
+            "phylo.pre_cluster_tree.max_leaves: 0 to disable)",
+            n_pool, n, n - n_background, n_background,
         )
 
     use_protein = _use_protein_sequence(sequences, cfg)
-    rep_ids = {r.id for r in representatives}
 
     id_map = _build_id_map_pre(sequences)
     # The Newick keeps the short ids (safe across phylo tools); the
@@ -167,8 +235,7 @@ def run_pre_cluster_phylogeny(
     # FFT-NS-1 path (--retree 1) builds an O(N^2) distance matrix and gets
     # OOM-killed on huge pools, so at/above parttree_threshold we switch to
     # the PartTree guide (--retree 2 --parttree), which skips the full matrix
-    # and scales to 10^5+ sequences.
-    pc_cfg = (cfg.get("phylo", {}) or {}).get("pre_cluster_tree", {}) or {}
+    # and scales to 10^5+ sequences. (pc_cfg was read above for max_leaves.)
     threshold = pc_cfg.get("parttree_threshold", 10000)
     if (
         isinstance(threshold, int)

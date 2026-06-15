@@ -14,6 +14,7 @@ import pytest
 
 from repseq.phylo.pre_cluster import (
     _build_id_map_pre,
+    _subsample_pool,
     _use_protein_sequence,
     _write_id_map_with_rep_flag,
     run_pre_cluster_phylogeny,
@@ -362,3 +363,83 @@ def test_run_pre_cluster_keeps_retree1_below_threshold(tmp_path, make_seq):
     ):
         run_pre_cluster_phylogeny(seqs, [], cfg, tmp_path, "test")
     assert captured["extra_args"] == ["--retree", "1"]
+
+
+# ---------------------------------------------------------------------------
+# _subsample_pool (leaf cap)
+# ---------------------------------------------------------------------------
+
+def test_subsample_pool_caps_keeping_all_reps(make_seq):
+    """Above the cap: all reps kept + a random background sample, total ==
+    max_leaves. FastTree memory scales with leaf count, so the cap bounds it."""
+    seqs = [make_seq(f"s{i}", "ACGT") for i in range(10)]
+    rep_ids = {"s0", "s1"}  # 2 reps
+    kept, n_bg = _subsample_pool(seqs, rep_ids, max_leaves=5)
+    assert len(kept) == 5
+    kept_ids = {s.id for s in kept}
+    assert {"s0", "s1"} <= kept_ids       # every rep survives
+    assert n_bg == 3                       # 5 - 2 reps = 3 background
+    # input order preserved among the kept
+    assert [s.id for s in kept] == sorted(kept_ids, key=lambda x: int(x[1:]))
+
+
+def test_subsample_pool_no_cap_when_zero(make_seq):
+    seqs = [make_seq(f"s{i}", "ACGT") for i in range(10)]
+    kept, n_bg = _subsample_pool(seqs, {"s0"}, max_leaves=0)
+    assert kept is seqs            # returned unchanged
+    assert n_bg == 9
+
+
+def test_subsample_pool_unchanged_at_or_below_cap(make_seq):
+    seqs = [make_seq(f"s{i}", "ACGT") for i in range(5)]
+    kept, n_bg = _subsample_pool(seqs, {"s0"}, max_leaves=5)
+    assert kept is seqs
+    assert n_bg == 4
+
+
+def test_subsample_pool_keeps_all_reps_even_when_reps_exceed_cap(make_seq):
+    """Reps are never dropped: if reps alone meet/exceed the cap, all of them
+    are kept and no background is added (the cap bounds only the background)."""
+    seqs = [make_seq(f"s{i}", "ACGT") for i in range(10)]
+    rep_ids = {f"s{i}" for i in range(6)}  # 6 reps, cap 4
+    kept, n_bg = _subsample_pool(seqs, rep_ids, max_leaves=4)
+    assert {s.id for s in kept} == rep_ids
+    assert n_bg == 0
+
+
+def test_subsample_pool_is_deterministic(make_seq):
+    """Fixed seed (42) → identical background sample across calls."""
+    seqs = [make_seq(f"s{i}", "ACGT") for i in range(50)]
+    rep_ids = {"s0"}
+    a, _ = _subsample_pool(seqs, rep_ids, max_leaves=10)
+    b, _ = _subsample_pool(seqs, rep_ids, max_leaves=10)
+    assert [s.id for s in a] == [s.id for s in b]
+
+
+def test_run_pre_cluster_caps_leaf_set_end_to_end(tmp_path, make_seq):
+    """End-to-end: a pool larger than max_leaves builds a tree with exactly
+    max_leaves leaves — all reps + sampled background — verified off the
+    id_map TSV (one row per shown leaf, is_rep flag per row)."""
+    pytest.importorskip("Bio")
+    seqs = [make_seq(f"s{i}", "ACGTACGT", organism="Virus A") for i in range(20)]
+    reps = [seqs[0], seqs[1], seqs[2]]  # 3 reps
+    cfg = {
+        "clustering": {"alphabet_for_clustering": "nucleotide"},
+        "segmented": {"enabled": False},
+        "phylo": {"pre_cluster_tree": {"max_leaves": 8}},
+        "output": {"dir": str(tmp_path), "prefix": "test"},
+        "temp_dir": str(tmp_path / "tmp"),
+    }
+    with patch("repseq.phylo.pre_cluster.run_mafft", side_effect=_stub_mafft), \
+         patch("repseq.phylo.pre_cluster.run_fasttree", side_effect=_stub_fasttree):
+        run_pre_cluster_phylogeny(seqs, reps, cfg, tmp_path, "test")
+    rows = [
+        ln for ln in
+        (tmp_path / "test_pre_cluster_tree_id_map.tsv").read_text().splitlines()[1:]
+        if ln.strip()
+    ]
+    assert len(rows) == 8                                  # capped to max_leaves
+    trues = [r for r in rows if r.endswith("\tTRUE")]
+    assert len(trues) == 3                                 # all 3 reps shown
+    shown_accs = {r.split("\t")[1] for r in rows}
+    assert {"s0", "s1", "s2"} <= shown_accs                # the reps by id

@@ -226,6 +226,32 @@ def test_validate_config_rejects_non_int_parttree_threshold():
     assert any("pre_cluster_tree.parttree_threshold" in e for e in errors)
 
 
+def test_validate_config_pre_cluster_max_leaves_default():
+    cfg = load_config(None)
+    assert cfg["phylo"]["pre_cluster_tree"]["max_leaves"] == 5000
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_accepts_zero_max_leaves():
+    cfg = load_config(None)
+    cfg["phylo"]["pre_cluster_tree"]["max_leaves"] = 0  # no cap
+    assert validate_config(cfg) == []
+
+
+def test_validate_config_rejects_negative_max_leaves():
+    cfg = load_config(None)
+    cfg["phylo"]["pre_cluster_tree"]["max_leaves"] = -1
+    errors = validate_config(cfg)
+    assert any("pre_cluster_tree.max_leaves" in e for e in errors)
+
+
+def test_validate_config_rejects_non_int_max_leaves():
+    cfg = load_config(None)
+    cfg["phylo"]["pre_cluster_tree"]["max_leaves"] = "lots"
+    errors = validate_config(cfg)
+    assert any("pre_cluster_tree.max_leaves" in e for e in errors)
+
+
 def test_validate_config_whole_polyprotein_tree_default_off():
     cfg = load_config(None)
     assert cfg["phylo"]["per_protein"]["whole_polyprotein_tree"] is False

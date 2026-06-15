@@ -485,6 +485,7 @@ def test_render_summary_pre_cluster_paragraph_when_run(make_seq, tmp_path):
     assert "pre-cluster overview tree" in md
     assert "MAFFT" in md and "`--retree 1`" in md
     assert "`--parttree`" in md  # the large-input fallback is described
+    assert "max_leaves" in md     # the leaf cap is described
     assert "FastTree" in md
     assert "midpoint" in md.lower()
     assert "[repr]" in md

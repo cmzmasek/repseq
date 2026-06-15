@@ -803,19 +803,32 @@ phylo:
   # BEFORE clustering, so you can see where the elected representatives land in
   # the broader diversity. Representative leaves get a "[repr] " prefix in the
   # phyloXML <name>, and every leaf carries a repseq:is_representative
-  # true/false <property> you can filter on in a viewer. Pipeline is hard-coded
-  # for speed regardless of the rest of phylo: MAFFT (see parttree_threshold),
-  # FastTree, midpoint root only, no LCA / trimAl / bootstrap. Trigger with
+  # true/false <property> you can filter on in a viewer. Capped at max_leaves
+  # leaves (default 5000; reps always kept, background randomly sampled) so a
+  # huge pool builds + stays legible. Pipeline is hard-coded for speed
+  # regardless of the rest of phylo: MAFFT (see parttree_threshold), FastTree,
+  # midpoint root only, no LCA / trimAl / bootstrap. Trigger with
   # --pre-cluster-tree or enabled: true here.
   pre_cluster_tree:
     enabled: false
-    # Above this many post-QC sequences, the pre-cluster MSA switches from
-    # MAFFT --retree 1 (single-pass FFT-NS-1, which builds an O(N^2) distance
-    # matrix and runs out of memory on very large pools) to MAFFT
-    # --retree 2 --parttree (the PartTree guide — no full matrix, scales to
-    # 10^5+ sequences). Below it the standard --retree 1 pass is used.
-    # 0 = always PartTree; a very large value effectively never. PartTree is
-    # rougher, but the pre-cluster tree is a rough overview anyway.
+    # Cap on the number of leaves in the pre-cluster tree. FastTree memory
+    # scales ~linearly with leaf count, so an uncapped pool of tens of
+    # thousands of leaves needs hundreds of GB and gets OOM-killed — and a
+    # tree that large isn't legible anyway. Above this many post-QC
+    # sequences the tree is built on ALL representatives + a random sample
+    # of the non-representative background, up to max_leaves (reps are never
+    # dropped — they're the point of the overview). At/below it the full
+    # pool is used. 0 = no cap (build everything; only on a big-memory box).
+    max_leaves: 5000
+    # Above this many post-QC sequences (AFTER the max_leaves cap), the
+    # pre-cluster MSA switches from MAFFT --retree 1 (single-pass FFT-NS-1,
+    # which builds an O(N^2) distance matrix and runs out of memory on very
+    # large pools) to MAFFT --retree 2 --parttree (the PartTree guide — no
+    # full matrix, scales to 10^5+ sequences). Below it the standard
+    # --retree 1 pass is used. 0 = always PartTree; a very large value
+    # effectively never. PartTree is rougher, but the pre-cluster tree is a
+    # rough overview anyway. With the default max_leaves: 5000 cap this
+    # never triggers; it only matters when max_leaves: 0 uncaps the pool.
     parttree_threshold: 10000
 
 output:

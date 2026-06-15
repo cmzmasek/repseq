@@ -631,22 +631,38 @@ DEFAULTS: dict[str, Any] = {
         # single rough tree of EVERY post-QC sequence (one leaf per
         # CONCAT isolate in segmented mode) so the bench scientist can
         # see at a glance where the elected representatives land in the
-        # broader diversity. Pipeline is hard-coded for speed regardless
-        # of the rest of phylo: MAFFT (--retree 1, or --parttree above
-        # parttree_threshold — see below), FastTree (no IQ-TREE /
+        # broader diversity. Capped at max_leaves leaves (default 5000;
+        # reps always kept, background randomly sampled) so a huge pool
+        # builds + stays legible. Pipeline is hard-coded for speed
+        # regardless of the rest of phylo: MAFFT (--retree 1, or --parttree
+        # above parttree_threshold — see below), FastTree (no IQ-TREE /
         # ModelFinder / UFBoot), midpoint root only, no LCA, no trimAl.
         # Representative leaves are prefixed with "[repr] " in the
         # phyloXML <name> for visual identification.
         "pre_cluster_tree": {
             "enabled": False,
-            # Above this many post-QC sequences, the pre-cluster MSA
-            # switches from MAFFT --retree 1 (single-pass FFT-NS-1, which
-            # builds an O(N^2) distance matrix and runs out of memory on
-            # very large pools) to MAFFT --retree 2 --parttree (the
-            # PartTree guide — no full matrix, scales to 10^5+ sequences).
-            # Below it the standard --retree 1 pass is used. 0 = always
-            # PartTree; a very large value effectively never. PartTree is
-            # rougher, but the pre-cluster tree is a rough overview anyway.
+            # Cap on the number of leaves (post-QC sequences) in the
+            # pre-cluster tree. FastTree memory scales ~linearly with leaf
+            # count, so an uncapped pool of tens of thousands of leaves
+            # needs hundreds of GB and gets OOM-killed — and a tree that
+            # large isn't legible anyway. Above this many sequences the
+            # tree is built on ALL representatives + a random sample of
+            # the non-representative background, up to max_leaves (reps are
+            # never dropped — they're the point of the overview). At/below
+            # it the full pool is used. 0 = no cap (build everything; only
+            # do this on a big-memory machine).
+            "max_leaves": 5000,
+            # Above this many post-QC sequences (AFTER the max_leaves cap),
+            # the pre-cluster MSA switches from MAFFT --retree 1 (single-
+            # pass FFT-NS-1, which builds an O(N^2) distance matrix and
+            # runs out of memory on very large pools) to MAFFT --retree 2
+            # --parttree (the PartTree guide — no full matrix, scales to
+            # 10^5+ sequences). Below it the standard --retree 1 pass is
+            # used. 0 = always PartTree; a very large value effectively
+            # never. PartTree is rougher, but the pre-cluster tree is a
+            # rough overview anyway. (With the default max_leaves: 5000
+            # cap this never triggers; it only matters when max_leaves: 0
+            # uncaps the pool.)
             "parttree_threshold": 10000,
         },
     },
@@ -2050,6 +2066,13 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     pc_cfg = phylo_cfg.get("pre_cluster_tree", {}) or {}
     if "enabled" in pc_cfg and not isinstance(pc_cfg["enabled"], bool):
         errors.append("phylo.pre_cluster_tree.enabled must be a boolean")
+    pml = pc_cfg.get("max_leaves", 5000)
+    if not isinstance(pml, int) or isinstance(pml, bool) or pml < 0:
+        errors.append(
+            "phylo.pre_cluster_tree.max_leaves must be a non-negative "
+            "integer (0 = no cap, build every post-QC sequence as a leaf "
+            "— only on a big-memory machine)"
+        )
     ptt = pc_cfg.get("parttree_threshold", 10000)
     if not isinstance(ptt, int) or isinstance(ptt, bool) or ptt < 0:
         errors.append(

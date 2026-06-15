@@ -1317,7 +1317,11 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             "input pool; every leaf additionally carries a "
             "`repseq:is_representative` boolean `<property>` "
             "(`true`/`false`) so a viewer (Archaeopteryx) can filter "
-            "or colour by it. Outputs: "
+            "or colour by it. To keep the tree buildable and legible, "
+            "the leaf set is capped at `phylo.pre_cluster_tree.max_leaves` "
+            "(default 5000): above the cap all representatives are kept "
+            "and the non-representative background is randomly subsampled "
+            "to fill the budget (`0` disables the cap). Outputs: "
             + ("`{prefix}_pre_cluster_tree.nwk`, " if keep_newick else "")
             + "`{prefix}_pre_cluster_tree.xml`, and "
             "`{prefix}_pre_cluster_tree_id_map.tsv` (with an "
