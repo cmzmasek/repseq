@@ -669,7 +669,7 @@ DEFAULTS: dict[str, Any] = {
     "taxonomy": {
         "ncbi_email": None,
         "ncbi_api_key": None,
-        "cache_ttl_days": 30,
+        "cache_ttl_days": 90,
     },
     "output": {
         "dir": "./repseq_output",

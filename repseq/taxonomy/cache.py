@@ -17,7 +17,7 @@ class TaxonomyCache:
     Values are JSON-serialised dicts.
     """
 
-    def __init__(self, cache_dir: str | Path, ttl_days: int = 30) -> None:
+    def __init__(self, cache_dir: str | Path, ttl_days: int = 90) -> None:
         cache_dir = Path(cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
         self._db_path = cache_dir / "taxonomy.db"

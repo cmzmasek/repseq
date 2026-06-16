@@ -2176,7 +2176,7 @@ repetitive across related isolates, this pays for itself within a single run.
    `(AA sequence, database fingerprint)`, the fingerprint derived from the `.hmm`
    file's size and mtime — so pointing at a different file, or rebuilding the
    bundled DB, automatically invalidates old entries. They fall out via TTL
-   (`taxonomy.cache_ttl_days`, 30 days by default).
+   (`taxonomy.cache_ttl_days`, 90 days by default).
 
 You only need to manually clear it when: reclaiming disk after a DB swap; you
 edited the `.hmm` file in place without changing its size or mtime; or you suspect

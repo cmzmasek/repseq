@@ -691,7 +691,7 @@ def _resolve_metadata(sequences, cfg, no_resolve):
     if no_resolve:
         return None
     tax_cfg = cfg.get("taxonomy", {})
-    cache = TaxonomyCache(cfg["cache_dir"], ttl_days=tax_cfg.get("cache_ttl_days", 30))
+    cache = TaxonomyCache(cfg["cache_dir"], ttl_days=tax_cfg.get("cache_ttl_days", 90))
     ncbi = NCBITaxonomy(cache, email=tax_cfg.get("ncbi_email"), api_key=tax_cfg.get("ncbi_api_key"))
     uniprot = UniProtAPI(cache)
     resolver = MetadataResolver(cache, ncbi, uniprot, threads=cfg.get("threads", 4))

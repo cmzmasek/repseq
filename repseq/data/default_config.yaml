@@ -169,8 +169,9 @@ taxonomy:
   ncbi_email: null
   # Optional: NCBI API key for higher rate limits (10 req/s vs 3 req/s)
   ncbi_api_key: null
-  # How long to keep cached entries before re-querying (days)
-  cache_ttl_days: 30
+  # How long to keep cached entries before re-querying (days). Metadata
+  # fetches for a large dataset can take days, so the default is generous.
+  cache_ttl_days: 90
 
 clustering:
   # Two backends are supported:
