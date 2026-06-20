@@ -24,9 +24,11 @@ the loader (only `*.hmm` files are read).
 
 ## Bundled profiles
 
-All from Pfam-A (CC0), carrying curated GA cutoffs. Listed in N→C order along
-the flaviviral polyprotein (structural C–prM/M–E first, then the
-non-structural NS1–NS5 cassette):
+All from Pfam-A (CC0), carrying curated GA cutoffs. The first block is the
+**Orthoflavivirus** polyprotein, listed in N→C order (structural C–prM/M–E
+first, then the non-structural NS1–NS5 cassette); these `Flavi_*` /
+`Peptidase_S7` / `FtsJ` profiles are *Orthoflavivirus-specific* and do **not**
+match the structurally distinct proteins of the other three genera:
 
 | Pfam | Profile (`NAME`) | Flaviviral protein / domain |
 |------|------------------|------------------------------|
@@ -47,6 +49,21 @@ non-structural NS1–NS5 cassette):
 | PF01728 | `FtsJ`              | NS5 — FtsJ-like methyltransferase (N-terminal) |
 | PF00972 | `Flavi_NS5`         | NS5 — RdRp fingers + palm domains |
 | PF20483 | `Flavi_NS5_thumb`   | NS5 — RdRp thumb domain |
+
+**Pan-genus RdRp** (added so the non-Orthoflavivirus genera can be identified
+at all — their RdRp is a different Pfam family, not `Flavi_NS5`):
+
+| Pfam | Profile (`NAME`) | Flaviviral protein / domain |
+|------|------------------|------------------------------|
+| PF00998 | `RdRP_3`            | NS5B RdRp of **Hepacivirus / Pegivirus / Pestivirus** |
+
+`RdRP_3` is the HCV NS5B family (representative structure 1gx6). Hepacivirus and
+Pegivirus cover it near-fully; the more divergent Pestivirus NS5B clears the GA
+bit-score by a wide margin but only matches its conserved core (~43 % of the
+486-aa model), so admitting Pestivirus needs `hmm.relative_length_cutoff` ≤ 0.4.
+Use it as the genus-agnostic polyprotein marker by OR-ing it with `Flavi_NS5`:
+`hmms: ["Flavi_NS5", "RdRP_3"]` (Orthoflavivirus → `Flavi_NS5`, the other three
+genera → `RdRP_3`).
 
 Reference a profile in config by its `NAME`, e.g. `hmms: ["Flavi_NS1"]` or a
 multidomain token like
