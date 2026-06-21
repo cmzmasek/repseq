@@ -1,16 +1,19 @@
 """Plain-English analysis flags — a synthesis of the conflict reports.
 
 The interesting anomalies a run can surface are scattered across several
-machine-readable tables: ``{prefix}_monophyly.tsv`` (per-taxon mono/para/poly),
-``{prefix}_per_protein/{prefix}_incongruence.tsv`` (tree-vs-tree RF distance),
-and ``{prefix}_taxonomy_review.tsv`` (per-leaf rank conflicts, when the opt-in
-review ran). This module reads whichever of those exist and distils them into
-one human-readable ``{prefix}_flags.txt`` — the "what's worth a look" summary a
-bench scientist can skim without joining four TSVs by hand.
+machine-readable tables: ``{prefix}_taxonomic_report.tsv`` (pre-QC vs post-QC
+taxon counts — a whole genus/family eliminated by QC), ``{prefix}_monophyly.tsv``
+(per-taxon mono/para/poly), ``{prefix}_per_protein/{prefix}_incongruence.tsv``
+(tree-vs-tree RF distance), and ``{prefix}_taxonomy_review.tsv`` (per-leaf rank
+conflicts, when the opt-in review ran). This module reads whichever of those
+exist and distils them into one human-readable ``{prefix}_flags.txt`` — the
+"what's worth a look" summary a bench scientist can skim without joining the
+TSVs by hand.
 
 It is a pure post-hoc synthesis (no new computation), runs whenever any source
-table is present, and soft-fails to nothing otherwise. ``collect_flags``
-returns the structured flags so the HTML report can reuse them.
+table is present OR a QC elimination is detected, and soft-fails to nothing
+otherwise. ``collect_flags`` returns the structured flags so the HTML report
+can reuse them.
 
 Flags are heuristics over thresholds documented inline; absence of a flag is
 not proof of cleanliness — the source tables remain authoritative.
@@ -35,7 +38,7 @@ _MAX_INCONGRUENCE_FLAGS = 15
 @dataclass
 class Flag:
     """One analysis flag. ``severity`` ∈ {``warn``, ``info``}; ``category`` ∈
-    {``reassortment``, ``monophyly``, ``taxonomy``}."""
+    {``qc_drop``, ``reassortment``, ``monophyly``, ``taxonomy``}."""
     severity: str
     category: str
     message: str
@@ -169,16 +172,67 @@ def _taxonomy_review_flags(out_dir: Path, prefix: str) -> list[Flag]:
     return out
 
 
+def _qc_elimination_flags(out_dir: Path, prefix: str) -> list[Flag]:
+    """Genus-and-higher taxa present in the input but eliminated by QC.
+
+    Reads the pre-QC vs post-QC ``member_count`` rows of
+    ``{prefix}_taxonomic_report.tsv`` (the ``pre_qc`` rows exist only when
+    metadata was resolved) and flags any taxon, at a rank in
+    :data:`repseq.output.report._ALARM_RANKS` (genus and up), whose pre-QC
+    count is > 0 but whose post-QC count is 0 — a whole genus / family wiped
+    out by a QC gate (the silent-drop danger). The most prominent flag class,
+    so it's collected first and given the leading section.
+    """
+    rows = _read_tsv(out_dir / f"{prefix}_taxonomic_report.tsv")
+    if not rows:
+        return []
+    from .report import _ALARM_RANKS
+    alarm = set(_ALARM_RANKS)
+    counts: dict[tuple[str, str], dict[str, int]] = {}
+    for r in rows:
+        if r.get("report") != "diversity" or r.get("metric") != "member_count":
+            continue
+        rank, taxon = r.get("rank", ""), r.get("taxon", "")
+        if rank not in alarm or not taxon or taxon == "*ALL*":
+            continue
+        try:
+            val = int(float(r.get("value") or 0))
+        except ValueError:
+            continue
+        counts.setdefault((rank, taxon), {})[r.get("pool", "")] = val
+
+    eliminated = [
+        (rank, taxon, pools.get("pre_qc", 0))
+        for (rank, taxon), pools in counts.items()
+        if pools.get("pre_qc", 0) > 0 and pools.get("post_qc", 0) == 0
+    ]
+    rank_order = {r: i for i, r in enumerate(_ALARM_RANKS)}
+    eliminated.sort(key=lambda e: (rank_order.get(e[0], 99), -e[2], e[1]))
+    return [
+        Flag(
+            "warn", "qc_drop",
+            f"{taxon} ({rank}) was present in the input ({pre} pre-QC "
+            f"record(s)) but has ZERO survivors after QC — the entire {rank} "
+            f"was eliminated by QC. See _qc_removed.tsv for the per-record "
+            f"reason (e.g. an HMM marker, a missing segment, length, or "
+            f"ambiguous residues).",
+        )
+        for rank, taxon, pre in eliminated
+    ]
+
+
 def collect_flags(out_dir: Path, prefix: str) -> list[Flag]:
     """Gather all flags from whichever source tables are present."""
     return (
-        _monophyly_flags(out_dir, prefix)
+        _qc_elimination_flags(out_dir, prefix)
+        + _monophyly_flags(out_dir, prefix)
         + _incongruence_flags(out_dir, prefix)
         + _taxonomy_review_flags(out_dir, prefix)
     )
 
 
 _SECTIONS = [
+    ("qc_drop", "Taxa eliminated entirely by QC"),
     ("reassortment", "Reassortment / recombination signals"),
     ("monophyly", "Taxonomy ↔ tree conflicts (non-monophyletic taxa)"),
     ("taxonomy", "Per-isolate taxonomy conflicts"),
@@ -188,29 +242,35 @@ _SECTIONS = [
 def write_flags_report(out_dir: Path, prefix: str) -> Optional[Path]:
     """Write ``{prefix}_flags.txt`` summarising the conflict tables.
 
-    Returns the path, or None when no source table exists (nothing to
-    synthesise). A clean run still gets a file saying so, so a user can tell
-    "no conflicts" from "report not produced".
+    Returns the path, or None when there is nothing to synthesise (no
+    conflict table AND no QC-elimination). A clean run that *does* have a
+    conflict table still gets a file saying "No flags raised", so a user can
+    tell "no conflicts" from "report not produced".
     """
-    sources = (
+    flags = collect_flags(out_dir, prefix)
+    qc_drops = [f for f in flags if f.category == "qc_drop"]
+    has_conflict_tables = (
         (out_dir / f"{prefix}_monophyly.tsv").exists()
         or (out_dir / f"{prefix}_per_protein" / f"{prefix}_incongruence.tsv").exists()
         or (out_dir / f"{prefix}_taxonomy_review.tsv").exists()
     )
-    if not sources:
+    # The QC-elimination alarm fires even on a plain clustering run (no
+    # --phylo, so no conflict tables) — that's exactly when an inexperienced
+    # user can't otherwise see a whole genus vanish.
+    if not has_conflict_tables and not qc_drops:
         return None
 
-    flags = collect_flags(out_dir, prefix)
     path = out_dir / f"{prefix}_flags.txt"
     lines = [
         f"# {prefix} — analysis flags",
         "",
-        "Taxonomy / tree conflicts worth a look, distilled from "
-        "_monophyly.tsv,",
-        "_incongruence.tsv, and _taxonomy_review.tsv. These are heuristics — "
-        "absence of",
-        "a flag is not proof of cleanliness; the source tables are "
-        "authoritative.",
+        "Anomalies worth a look, distilled from the taxonomic report "
+        "(pre-QC vs",
+        "post-QC), _monophyly.tsv, _incongruence.tsv, and "
+        "_taxonomy_review.tsv. These",
+        "are heuristics — absence of a flag is not proof of cleanliness; the "
+        "source",
+        "tables are authoritative.",
         "",
     ]
     if not flags:

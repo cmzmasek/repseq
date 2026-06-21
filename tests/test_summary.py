@@ -980,7 +980,9 @@ def test_render_summary_points_to_taxonomic_report(make_seq, tmp_path):
     cfg = _base_cfg(tmp_path)
     md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
     assert "{prefix}_taxonomic_report.txt" in md
-    assert "Taxonomic diversity at each rank before and after clustering" in md
+    assert "Taxonomic diversity at each rank across three pipeline stages" in md
+    assert "pre-QC, pre-clustering, and representatives" in md
+    assert "zero post-QC survivors is additionally flagged" in md
 
 
 def test_render_summary_points_to_nucleotide_taxonomic_report(make_seq, tmp_path):

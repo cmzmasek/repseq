@@ -299,6 +299,21 @@ class QCReport:
     # threshold/magnitude annotations.
     display: dict = field(default_factory=dict)
 
+    # Pre-QC taxonomic snapshot: ``{rank: Counter(taxon -> count)}`` over the
+    # input pool *before any QC removal* (after exclusions + metadata
+    # resolution). Taken once at the QC chokepoint so the taxonomic report can
+    # show a leading pre-QC column and the "eliminated taxa" alarm can compare
+    # it against the post-QC pool — without holding the raw input list to end
+    # of run. Counts raw input records (segments, in segmented mode). Empty
+    # for directly-constructed reports and ``--no-resolve`` runs (no taxonomy).
+    pre_qc_taxa: dict = field(default_factory=dict)
+    # Taxa (genus and higher) present pre-QC but with zero survivors after QC —
+    # the silent-drop alarm. Each entry is ``{rank, taxon, pre_qc_count}``.
+    # Computed by the CLI driver from ``pre_qc_taxa`` vs the post-QC pool
+    # (output.report.find_eliminated_taxa); surfaced in the console final
+    # summary and, via the taxonomic-report TSV, in ``_flags.txt``.
+    eliminated_taxa: list = field(default_factory=list)
+
     def add_removed(self, seq_id: str, reason: str) -> None:
         self.details.append({"id": seq_id, "reason": reason})
 

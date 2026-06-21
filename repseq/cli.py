@@ -17,6 +17,8 @@ from .models import SequenceSource
 from .models import RunResult
 from .overrides import ProtectionPolicy, protected_keep, resolve_ids, resolve_stages
 from .output.report import (
+    find_eliminated_taxa,
+    tally_taxa_by_rank,
     write_all_reports,
     write_nucleotide_taxonomic_report,
     write_nucleotide_taxonomic_report_tsv,
@@ -729,6 +731,13 @@ def _run_qc(sequences, cfg):
             "keywords", []),
         "length_bounds": {"min": glf.get("min"), "max": glf.get("max")},
     })
+    # Pre-QC taxonomic snapshot — taken HERE, the single point every record
+    # passes through after resolution/exclusions but before any QC removal, so
+    # the taxonomic report can show a pre-QC column and the "eliminated taxa"
+    # alarm can fire (a whole genus/family wiped out by a QC gate). Compact
+    # ({rank: Counter}); the raw input list is not held to end of run. No-op
+    # under --no-resolve (no taxonomy → empty counters).
+    qc_report.pre_qc_taxa = tally_taxa_by_rank(sequences)
     return passed, qc_report
 
 
@@ -2179,9 +2188,75 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
             click.echo(f"Wrote segment-status matrix: {matrix_path.name}")
     except Exception as exc:
         click.echo(f"[segment-status matrix skipped] {exc}", err=True)
+    # Taxonomic diversity report (pre-QC / pre-clustering / representatives).
+    # Written HERE — before the flags + HTML steps below — so collect_flags
+    # can read the pre-QC vs post-QC rows of its TSV and raise the "taxa
+    # eliminated by QC" alarm (a whole genus/family wiped out by a QC gate).
+    # The pre-QC column/rows come from qc_report.pre_qc_taxa (snapshot taken
+    # before any QC removal); the "pre-clust" pool is pre_clustering_sequences
+    # (CONCAT isolates in segmented mode). Soft-fail so a render bug never
+    # voids a real selection.
+    #
+    # One-line provenance header shared by the plain-text taxonomic reports,
+    # so each is self-describing when read in isolation (dataset type,
+    # clustering substrate, tool, rep count). Computed once.
+    try:
+        from .output.summary import build_provenance_header
+        _report_provenance = build_provenance_header(
+            cfg, result, segmented=bool(complete_isolates),
+        )
+    except Exception:
+        _report_provenance = None
+    if pre_clustering_sequences is not None:
+        pre_qc_taxa = getattr(qc_report, "pre_qc_taxa", None) or None
+        # No taxonomy resolved (e.g. --no-resolve) → every rank counter is
+        # empty → fall back to the original two-column report rather than
+        # render an all-zeros pre-QC column with a silent-drop note it can't
+        # deliver on.
+        if pre_qc_taxa is not None and not any(pre_qc_taxa.values()):
+            pre_qc_taxa = None
+        # Genus-and-higher taxa present pre-QC but with zero survivors after
+        # QC — the silent-drop alarm, surfaced on the console final summary
+        # and (via the TSV) in _flags.txt. Computed in-memory; soft.
+        try:
+            qc_report.eliminated_taxa = find_eliminated_taxa(
+                pre_qc_taxa, pre_clustering_sequences,
+            )
+        except Exception:
+            qc_report.eliminated_taxa = []
+        try:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            tax_path = out_dir / f"{prefix}_taxonomic_report.txt"
+            write_taxonomic_report(
+                pre_clustering_sequences,
+                result.representatives,
+                segmented=bool(complete_isolates),
+                path=tax_path,
+                provenance=_report_provenance,
+                pre_qc_by_rank=pre_qc_taxa,
+                pre_qc_total=(qc_report.total_input or None),
+            )
+            out_files.append(tax_path)
+        except Exception as exc:
+            click.echo(f"[taxonomic report skipped] {exc}", err=True)
+        try:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            tax_tsv = out_dir / f"{prefix}_taxonomic_report.tsv"
+            if write_taxonomic_report_tsv(
+                pre_clustering_sequences,
+                result.representatives,
+                path=tax_tsv,
+                pre_qc_by_rank=pre_qc_taxa,
+            ):
+                out_files.append(tax_tsv)
+        except Exception as exc:
+            click.echo(f"[taxonomic report TSV skipped] {exc}", err=True)
     # Plain-English analysis flags — synthesises the conflict tables
-    # (_monophyly.tsv, _incongruence.tsv, _taxonomy_review.tsv) into one
-    # {prefix}_flags.txt. Pure post-hoc synthesis; soft-fails to nothing.
+    # (_monophyly.tsv, _incongruence.tsv, _taxonomy_review.tsv) plus the
+    # taxonomic report's pre-QC-vs-post-QC rows into one {prefix}_flags.txt.
+    # Pure post-hoc synthesis; soft-fails to nothing.
     try:
         from .output.flags import write_flags_report
         out_dir = Path(cfg["output"]["dir"])
@@ -2219,49 +2294,10 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
         complete_isolates=complete_isolates,
         pre_clustering_sequences=pre_clustering_sequences,
     )
-    # One-line provenance header shared by the four plain-text taxonomic
-    # reports, so each is self-describing when read in isolation (dataset
-    # type, clustering substrate, tool, rep count). Computed once; soft so a
-    # build failure never blocks the reports.
-    try:
-        from .output.summary import build_provenance_header
-        _report_provenance = build_provenance_header(
-            cfg, result, segmented=bool(complete_isolates),
-        )
-    except Exception:
-        _report_provenance = None
-    # Taxonomic diversity report — distinct taxa per rank before/after
-    # clustering, plus a per-taxon breakdown for low-diversity ranks. The
-    # "before" pool is the post-QC sequence list fed to the mode (CONCAT
-    # isolates in segmented mode). Soft-fail so a render bug never voids
-    # a real selection.
+    # (The taxonomic diversity report .txt/.tsv is written earlier — above the
+    # flags + HTML steps — so those can read its pre-QC rows; see that block.
+    # _report_provenance was computed there and is reused below.)
     if pre_clustering_sequences is not None:
-        try:
-            out_dir = Path(cfg["output"]["dir"])
-            prefix = cfg["output"].get("prefix", "repseq")
-            tax_path = out_dir / f"{prefix}_taxonomic_report.txt"
-            write_taxonomic_report(
-                pre_clustering_sequences,
-                result.representatives,
-                segmented=bool(complete_isolates),
-                path=tax_path,
-                provenance=_report_provenance,
-            )
-            out_files.append(tax_path)
-        except Exception as exc:
-            click.echo(f"[taxonomic report skipped] {exc}", err=True)
-        try:
-            out_dir = Path(cfg["output"]["dir"])
-            prefix = cfg["output"].get("prefix", "repseq")
-            tax_tsv = out_dir / f"{prefix}_taxonomic_report.tsv"
-            if write_taxonomic_report_tsv(
-                pre_clustering_sequences,
-                result.representatives,
-                path=tax_tsv,
-            ):
-                out_files.append(tax_tsv)
-        except Exception as exc:
-            click.echo(f"[taxonomic report TSV skipped] {exc}", err=True)
         # Subtype (serotype) distribution report — only when the
         # representatives span >1 distinct subtype (the writers return False
         # and write nothing otherwise). Parity across segmented (isolates)
@@ -2470,6 +2506,32 @@ def _final_summary(result, qc_report, cfg) -> None:
     n_clusters = len(result.clusters)
     segmented = bool(cfg.get("segmented", {}).get("enabled"))
 
+    def _echo_eliminated() -> None:
+        # Silent-drop alarm: entire genera / higher clades present in the
+        # input but wiped out by a QC gate — the danger the inexperienced user
+        # can't otherwise see. Fires whether or not anything was selected (a
+        # total wipeout is exactly when it matters most).
+        elim = (qc_report.eliminated_taxa if qc_report else None) or []
+        if not elim:
+            return
+        n = len(elim)
+        shown = elim[:5]
+        bits = ", ".join(
+            f"{e['taxon']} ({e['rank']}, {e['pre_qc_count']} pre-QC)"
+            for e in shown
+        )
+        more = f", +{n - len(shown)} more" if n > len(shown) else ""
+        click.echo(
+            f"\nWARNING: {n} taxon(s) at genus rank or higher were present in "
+            f"the input but ELIMINATED by QC (0 survivors): {bits}{more}.",
+            err=True,
+        )
+        click.echo(
+            "  See _qc_removed.tsv for the per-record reason, plus _flags.txt "
+            "and the pre-QC column of _taxonomic_report.txt.",
+            err=True,
+        )
+
     if n_reps > 0:
         cluster_note = f" across {n_clusters} cluster(s)" if n_clusters else ""
         unit = "isolate(s)" if segmented else "representative sequence(s)"
@@ -2494,6 +2556,7 @@ def _final_summary(result, qc_report, cfg) -> None:
             else:
                 msg += "."
             click.echo(msg)
+        _echo_eliminated()
         return
 
     # Nothing was selected — diagnose.
@@ -2545,6 +2608,7 @@ def _final_summary(result, qc_report, cfg) -> None:
     for r in reasons:
         click.echo(f"  - {r}", err=True)
     click.echo("  See the run log for the full QC and selection breakdown.", err=True)
+    _echo_eliminated()
 
 
 # ---------------------------------------------------------------------------

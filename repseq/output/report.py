@@ -915,6 +915,16 @@ _TAX_RANKS = (
     "class",
 )
 
+# Ranks at which a *fully eliminated* taxon is alarming enough to flag: genus
+# and every rank above it. ``species`` and ``subgenus`` are deliberately
+# excluded — species-level disappearance is common and noisy (annotation
+# churn, rare singletons dropped on length/QC), and subgenus is mostly blank
+# for viruses. The danger this guards against is an entire GENUS or higher
+# clade being wiped out by a QC gate (the Flaviviridae RdRp-marker episode,
+# where three genera silently vanished at the marker check). Used by the
+# pre-QC-vs-post-QC "eliminated taxa" alarm.
+_ALARM_RANKS = tuple(r for r in _TAX_RANKS if r not in ("species", "subgenus"))
+
 
 def _format_hmmscan_cell(prot: dict) -> str:
     """Render passing HMM hits as ``Name(E=val,cov=val);Name(E=val,cov=val)``.
@@ -1277,6 +1287,60 @@ def _seq_rank_value(seq: Sequence, rank: str) -> Optional[str]:
     return tax.get_rank(rank) or None
 
 
+def tally_taxa_by_rank(seqs: list[Sequence]) -> dict[str, Counter]:
+    """Per-rank taxon counts over a sequence pool: ``{rank: Counter(taxon -> n)}``
+    for every rank in :data:`_TAX_RANKS`.
+
+    Empty / missing rank cells are not a taxon and are excluded (same rule as
+    the report writers). Compact enough to snapshot the pre-QC pool (a few
+    hundred taxa × 9 ranks of ints) without holding the — potentially huge —
+    raw input sequence list to end of run.
+    """
+    out: dict[str, Counter] = {}
+    for rank in _TAX_RANKS:
+        out[rank] = Counter(v for s in seqs if (v := _seq_rank_value(s, rank)))
+    return out
+
+
+def find_eliminated_taxa(
+    pre_qc_by_rank: Optional[dict[str, Counter]],
+    post_qc_seqs: list[Sequence],
+    ranks: tuple[str, ...] = _ALARM_RANKS,
+) -> list[dict]:
+    """Taxa present in the pre-QC pool but with **zero** survivors after QC.
+
+    Compares the pre-QC per-rank tally (snapshotted before any QC removal, via
+    :func:`tally_taxa_by_rank`) against the post-QC pool, at ``ranks`` (genus
+    and higher by default — see :data:`_ALARM_RANKS`). Each returned entry is
+    ``{"rank", "taxon", "pre_qc_count"}``; the list is sorted by rank depth
+    (genus first) then pre-QC count descending. This is the silent-drop alarm:
+    an entire genus / family wiped out by a QC gate.
+
+    The pre-QC count is in **input-record units** (raw segments, not yet
+    grouped into isolates, in segmented mode) while survival is assessed on the
+    post-QC pool; only *presence* (count > 0 vs absent) is compared, so the
+    unit difference never affects which taxa are flagged.
+    """
+    if not pre_qc_by_rank:
+        return []
+    out: list[dict] = []
+    for rank in ranks:
+        pre_counts = pre_qc_by_rank.get(rank) or {}
+        if not pre_counts:
+            continue
+        survivors = {v for s in post_qc_seqs if (v := _seq_rank_value(s, rank))}
+        for taxon, n in pre_counts.items():
+            if taxon not in survivors:
+                out.append(
+                    {"rank": rank, "taxon": taxon, "pre_qc_count": int(n)}
+                )
+    rank_order = {r: i for i, r in enumerate(ranks)}
+    out.sort(
+        key=lambda e: (rank_order.get(e["rank"], 99), -e["pre_qc_count"], e["taxon"])
+    )
+    return out
+
+
 def write_taxonomic_report(
     before_seqs: list[Sequence],
     after_seqs: list[Sequence],
@@ -1284,64 +1348,120 @@ def write_taxonomic_report(
     path: Path,
     max_breakdown: int = 20,
     provenance: Optional[str] = None,
+    pre_qc_by_rank: Optional[dict[str, Counter]] = None,
+    pre_qc_total: Optional[int] = None,
 ) -> None:
     """Write ``{prefix}_taxonomic_report.txt``: taxonomic diversity at each
-    of the nine :data:`_TAX_RANKS`, before vs after clustering.
+    of the nine :data:`_TAX_RANKS`, across up to three pipeline stages.
 
-    "Before" is the post-QC pool fed to the clustering step (one synthetic
+    "pre-clust" is the post-QC pool fed to the clustering step (one synthetic
     CONCAT isolate per record in segmented mode, one sequence per record
-    otherwise); "after" is the selected representatives. The counting unit
-    is therefore **isolates** in segmented mode and **sequences** otherwise.
-    Empty / missing rank values are not a taxon and are excluded from every
-    count.
+    otherwise); "reps" is the selected representatives. The counting unit for
+    those two is therefore **isolates** in segmented mode and **sequences**
+    otherwise. Empty / missing rank values are not a taxon and are excluded
+    from every count.
+
+    When ``pre_qc_by_rank`` (a ``{rank: Counter}`` snapshot from
+    :func:`tally_taxa_by_rank`, taken *before any QC removal*) is supplied, a
+    leading **pre-QC** column is added to both sections — this is what makes a
+    whole genus/family eliminated by a QC gate visible (its pre-clust/reps
+    cells are 0, but its pre-QC cell is not). In segmented mode the pre-QC
+    column counts **raw input segments** (records are not yet grouped into
+    isolates at QC time), so only *presence* is comparable to the other two
+    columns, not the raw numbers — the header note says so. With
+    ``pre_qc_by_rank=None`` the output is the original two-column report.
 
     Two sections:
 
-    1. Rank diversity — distinct non-empty taxa before and after, one row
-       per rank.
-    2. Per-rank breakdown — for every rank with at least one distinct
-       taxon, each taxon name with its before / after unit count, sorted
-       by member count (the *before* unit count) descending. Ranks with
-       more than ``max_breakdown`` distinct taxa show only the top
-       ``max_breakdown`` by member count, with a note in the rank label.
+    1. Rank diversity — distinct non-empty taxa per stage, one row per rank.
+    2. Per-rank breakdown — for every rank with at least one distinct taxon,
+       each taxon name with its per-stage unit count, sorted by the **earliest
+       available** stage's member count descending (pre-QC when present). Ranks
+       with more than ``max_breakdown`` distinct taxa show only the top
+       ``max_breakdown`` — except that a **fully eliminated** taxon (present
+       pre-QC, zero in both later stages) at genus rank or higher
+       (:data:`_ALARM_RANKS`) is always appended even past the cap, so the
+       silent-drop signal is never truncated away.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     unit = "isolates" if segmented else "sequences"
+    three = pre_qc_by_rank is not None
 
-    before_by_rank: dict[str, Counter] = {}
-    after_by_rank: dict[str, Counter] = {}
-    for rank in _TAX_RANKS:
-        before_by_rank[rank] = Counter(
-            v for s in before_seqs if (v := _seq_rank_value(s, rank))
-        )
-        after_by_rank[rank] = Counter(
-            v for s in after_seqs if (v := _seq_rank_value(s, rank))
-        )
+    before_by_rank = tally_taxa_by_rank(before_seqs)
+    after_by_rank = tally_taxa_by_rank(after_seqs)
+    pre_by_rank: dict[str, Counter] = (
+        {rank: Counter(pre_qc_by_rank.get(rank) or {}) for rank in _TAX_RANKS}
+        if three
+        else {}
+    )
 
     lines: list[str] = []
     if provenance:
         lines.append(provenance)
     lines.append("Taxonomic report")
     lines.append(f"Generated: {datetime.date.today().isoformat()}")
-    lines.append(
-        f"Counting unit: {unit} "
-        f"(before = post-QC pool fed to clustering, {len(before_seqs)} {unit}; "
-        f"after = representatives, {len(after_seqs)} {unit})"
-    )
+    if three:
+        n_pre = pre_qc_total if pre_qc_total is not None else "?"
+        if segmented:
+            lines.append(
+                f"Counting unit — pre-QC: input segments before isolate "
+                f"grouping ({n_pre}); pre-clust: post-QC isolates fed to "
+                f"clustering ({len(before_seqs)}); reps: representative "
+                f"isolates ({len(after_seqs)})."
+            )
+            lines.append(
+                "NOTE: the pre-QC column counts raw segments while the other "
+                "two count assembled isolates, so per-taxon numbers are not "
+                "directly comparable across that boundary — a taxon present "
+                "pre-QC but absent afterwards (the silent-drop signal) is what "
+                "to read here, not the magnitudes."
+            )
+        else:
+            lines.append(
+                f"Counting unit: {unit} (pre-QC = input pool before QC, "
+                f"{n_pre}; pre-clust = post-QC pool fed to clustering, "
+                f"{len(before_seqs)}; reps = representatives, "
+                f"{len(after_seqs)})."
+            )
+    else:
+        lines.append(
+            f"Counting unit: {unit} "
+            f"(before = post-QC pool fed to clustering, {len(before_seqs)} {unit}; "
+            f"after = representatives, {len(after_seqs)} {unit})"
+        )
     lines.append("")
-    lines.append("== Rank diversity (distinct taxa before vs after clustering) ==")
+
+    # Column headers / order differ by mode.
+    cols = (
+        [("pre-QC", pre_by_rank), ("pre-clust", before_by_rank), ("reps", after_by_rank)]
+        if three
+        else [("before", before_by_rank), ("after", after_by_rank)]
+    )
+    num_w = max(7, *(len(h) for h, _ in cols))
+
+    if three:
+        lines.append(
+            "== Rank diversity (distinct taxa: pre-QC vs pre-clustering vs "
+            "representatives) =="
+        )
+    else:
+        lines.append(
+            "== Rank diversity (distinct taxa before vs after clustering) =="
+        )
     lines.append("")
 
     rank_w = max(len(r) for r in _TAX_RANKS)
-    header = f"{'rank':<{rank_w}}  {'before':>7}  {'after':>7}"
+    header = f"{'rank':<{rank_w}}" + "".join(f"  {h:>{num_w}}" for h, _ in cols)
     lines.append(header)
     lines.append("-" * len(header))
     for rank in _TAX_RANKS:
-        nb = len(before_by_rank[rank])
-        na = len(after_by_rank[rank])
-        lines.append(f"{rank:<{rank_w}}  {nb:>7}  {na:>7}")
+        cells = "".join(f"  {len(by[rank]):>{num_w}}" for _, by in cols)
+        lines.append(f"{rank:<{rank_w}}{cells}")
     lines.append("")
 
+    # The "earliest stage" Counter drives sort + the distinct-count label, so
+    # an eliminated taxon (0 in the later stages) stays near the top.
+    primary_by_rank = pre_by_rank if three else before_by_rank
     lines.append(
         f"== Per-rank breakdown (per-taxon member counts, sorted by member "
         f"count; ranks with > {max_breakdown} distinct taxa show the top "
@@ -1350,30 +1470,45 @@ def write_taxonomic_report(
     lines.append("")
     printed_any = False
     for rank in _TAX_RANKS:
-        before_c = before_by_rank[rank]
-        n_distinct = len(before_c)
+        primary_c = primary_by_rank[rank]
+        n_distinct = len(primary_c)
         if n_distinct == 0:
             continue
         printed_any = True
-        after_c = after_by_rank[rank]
-        names = sorted(before_c, key=lambda n: (-before_c[n], n))
+        names = sorted(primary_c, key=lambda n: (-primary_c[n], n))
         if n_distinct > max_breakdown:
-            names = names[:max_breakdown]
+            kept = names[:max_breakdown]
+            # Never truncate away a fully-eliminated taxon (present pre-QC,
+            # zero in both later stages) at an alarm rank — that's the whole
+            # point of the pre-QC column. Append any that fell past the cap.
+            extra = (
+                [
+                    n for n in names[max_breakdown:]
+                    if before_by_rank[rank].get(n, 0) == 0
+                    and after_by_rank[rank].get(n, 0) == 0
+                ]
+                if three and rank in _ALARM_RANKS
+                else []
+            )
+            names = kept + extra
+            extra_note = f" + {len(extra)} eliminated" if extra else ""
             label = (
                 f"{rank} ({n_distinct} distinct, top {max_breakdown} by "
-                f"member count shown):"
+                f"member count{extra_note} shown):"
             )
         else:
             label = f"{rank} ({n_distinct} distinct):"
         lines.append(label)
         name_w = max(max(len(n) for n in names), len("name"))
-        sub_header = f"  {'name':<{name_w}}  {'before':>7}  {'after':>7}"
+        sub_header = (
+            f"  {'name':<{name_w}}"
+            + "".join(f"  {h:>{num_w}}" for h, _ in cols)
+        )
         lines.append(sub_header)
         lines.append("  " + "-" * (len(sub_header) - 2))
         for n in names:
-            lines.append(
-                f"  {n:<{name_w}}  {before_c[n]:>7}  {after_c.get(n, 0):>7}"
-            )
+            cells = "".join(f"  {by[rank].get(n, 0):>{num_w}}" for _, by in cols)
+            lines.append(f"  {n:<{name_w}}{cells}")
         lines.append("")
     if not printed_any:
         lines.append("(no taxonomy available at any rank)")
@@ -2271,6 +2406,7 @@ def write_taxonomic_report_tsv(
     before_seqs: list[Sequence],
     after_seqs: list[Sequence],
     path: Path,
+    pre_qc_by_rank: Optional[dict[str, Counter]] = None,
 ) -> bool:
     """Tidy long-format TSV companion to ``_taxonomic_report.txt``.
 
@@ -2281,27 +2417,39 @@ def write_taxonomic_report_tsv(
       ``taxon_count`` equal to the value.
     * ``member_count`` — per-taxon item count (the same numbers shown
       in the per-rank breakdown of the `.txt`). One row per
-      (rank, pool, taxon) actually populated; emits both pools for
-      every taxon seen in *either* pool (so reps-only rare survivors
+      (rank, pool, taxon) actually populated; emits every pool for
+      every taxon seen in *any* pool (so reps-only rare survivors
       and pool-only drops both show up).
+
+    ``pool`` ∈ {``pre_qc``, ``post_qc``, ``reps``}. The ``pre_qc`` rows are
+    emitted only when ``pre_qc_by_rank`` (a ``{rank: Counter}`` snapshot from
+    :func:`tally_taxa_by_rank`, taken before any QC removal) is supplied;
+    they are what the ``_flags.txt`` "taxa eliminated by QC" alarm reads. In
+    segmented mode the ``pre_qc`` counts are raw input segments (records are
+    not yet grouped into isolates at QC time).
 
     All nine ``_TAX_RANKS`` are covered. Empty / missing rank values
     are excluded from every count (same rule as the `.txt`).
     """
-    before_by_rank: dict[str, Counter] = {}
-    after_by_rank: dict[str, Counter] = {}
-    for rank in _TAX_RANKS:
-        before_by_rank[rank] = Counter(
-            v for s in before_seqs if (v := _seq_rank_value(s, rank))
-        )
-        after_by_rank[rank] = Counter(
-            v for s in after_seqs if (v := _seq_rank_value(s, rank))
-        )
+    three = pre_qc_by_rank is not None
+    before_by_rank = tally_taxa_by_rank(before_seqs)
+    after_by_rank = tally_taxa_by_rank(after_seqs)
+    pre_by_rank: dict[str, Counter] = (
+        {rank: Counter(pre_qc_by_rank.get(rank) or {}) for rank in _TAX_RANKS}
+        if three
+        else {}
+    )
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fh:
         fh.write("\t".join(_TIDY_TSV_COLUMNS) + "\n")
         for rank in _TAX_RANKS:
+            if three:
+                npre = len(pre_by_rank[rank])
+                _emit_tidy_rows(
+                    fh, "diversity", rank, "pre_qc", "*ALL*", npre,
+                    "_diversity", [("distinct_taxa", npre)],
+                )
             nb = len(before_by_rank[rank])
             na = len(after_by_rank[rank])
             _emit_tidy_rows(
@@ -2312,10 +2460,18 @@ def write_taxonomic_report_tsv(
                 fh, "diversity", rank, "reps", "*ALL*", na,
                 "_diversity", [("distinct_taxa", na)],
             )
-            # Per-taxon member counts — union of pool keys so neither
-            # pool's exclusive members are lost.
+            # Per-taxon member counts — union of pool keys so no pool's
+            # exclusive members are lost (incl. pre-QC-only eliminations).
             names: set[str] = set(before_by_rank[rank]) | set(after_by_rank[rank])
+            if three:
+                names |= set(pre_by_rank[rank])
             for name in sorted(names):
+                if three:
+                    pre_c = pre_by_rank[rank].get(name, 0)
+                    _emit_tidy_rows(
+                        fh, "diversity", rank, "pre_qc", name, pre_c,
+                        "_diversity", [("member_count", pre_c)],
+                    )
                 nb_c = before_by_rank[rank].get(name, 0)
                 na_c = after_by_rank[rank].get(name, 0)
                 _emit_tidy_rows(

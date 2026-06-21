@@ -264,7 +264,7 @@ flags you passed. At a glance:
 | `{prefix}_polyprotein/{prefix}_<spec>_polyprotein.fasta` | `polyprotein:` declared + HMM tier active | Unaligned **whole-polyprotein** FASTA — the entire parent CDS per rep. |
 | `{prefix}_polyprotein/{prefix}_<spec>_polyprotein_tree.{xml,pdf,png}` (+ `_msa.fasta`, `_tree_id_map.tsv`) | `--per-protein-phylo` + `phylo.per_protein.whole_polyprotein_tree` | Whole-polyprotein tree; its phyloXML `<domain_architecture>` shows every HMM domain end-to-end. Off by default. |
 | `{prefix}_representatives_protein.fasta` | when `alphabet_for_clustering: protein` (default) | The AA strings actually fed into the clusterer. |
-| `{prefix}_taxonomic_report.txt` | every run | Per-rank diversity table: distinct taxa before vs after clustering. |
+| `{prefix}_taxonomic_report.txt` | every run | Per-rank diversity table across three stages: **pre-QC**, pre-clustering, representatives — so a whole genus/family wiped out by QC is visible. |
 | `{prefix}_protein_taxonomic_report.txt` | any run with `cluster_protein` / `segment_markers` / `extra_protein` declared | Per-rank protein coverage + AA length statistics. |
 | `{prefix}_nucleotide_taxonomic_report.txt` | every run | Per-rank NT length statistics: per-segment + `total` (segmented) or single `genome` column. |
 | `{prefix}_polyprotein_taxonomic_report.txt` | `polyprotein:` declared + HMM tier active | Per-rank peptide coverage + AA length statistics. |
@@ -287,7 +287,7 @@ flags you passed. At a glance:
 | `{prefix}_msa_conservation.tsv` | any phylo step that wrote an MSA (default on) | One conservation number per alignment (JSD-to-background, Henikoff-weighted, gap-penalised). |
 | `{prefix}_monophyly.tsv` | any phylo step that built a tree (always on) | Per-taxon monophyly status off every annotated `*_tree.xml`. |
 | `{prefix}_segment_status_matrix.tsv` | whenever `_monophyly.tsv` is written | Cross-tree pivot of the monophyly report; `single_marker_break` localises which taxon breaks on which one marker tree (reassortment). |
-| `{prefix}_flags.txt` | when any conflict table exists | Plain-English synthesis of the conflict tables into one skimmable list. |
+| `{prefix}_flags.txt` | when any conflict table exists **or** a genus+ taxon was eliminated by QC | Plain-English synthesis: taxa eliminated by QC + the conflict tables, one skimmable list. |
 | `{prefix}_report.html` | any run with figures or a conflict table | Single-file HTML report: flags + embedded tree-figure gallery + output-file index. |
 | `{prefix}_hmm_diagnostic.tsv` | HMM tier ran AND a spec declares `hmms:` | One row per (rep, marker spec, HMM profile): hit / best-E / coverage / cutoff / passing. |
 | `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations), led by an "Analysis at a glance" table. |
@@ -634,15 +634,32 @@ provenance line (version, mode, dataset type, clustering substrate + tool, rep
 count), so an isolated report is self-describing. The TSV companions carry the
 same facts as rows.
 
-#### `{prefix}_taxonomic_report.txt` — diversity before vs after
+#### `{prefix}_taxonomic_report.txt` — diversity across three stages
 
-Per-rank counts of **distinct taxa** in the pool fed to selection versus in the
-final representatives. Counting unit is **isolates** (segmented) or **sequences**
-otherwise. Section 1 is a 9-rank ladder with two columns (distinct before /
-after). Section 2 is, per rank with ≥1 populated taxon, the per-taxon breakdown
-(name, before-count, after-count, sorted by before-count desc; truncated to the
-top `output.protein_report.max_breakdown`, default 20). Blank rank values are
-excluded.
+Per-rank counts of **distinct taxa** at three pipeline stages: **pre-QC** (the
+input pool, before any QC removal), **pre-clustering** (the post-QC pool fed to
+selection), and **representatives** (the final set). The leading pre-QC column is
+what makes a **silent drop visible** — if a whole genus or family is wiped out by
+a QC gate (e.g. an HMM marker that doesn't cover it), its pre-QC cell is non-zero
+while the other two are `0`. Section 1 is a 9-rank ladder with the three columns;
+Section 2 is, per rank with ≥1 populated taxon, the per-taxon breakdown sorted by
+the **pre-QC** count, truncated to the top `output.protein_report.max_breakdown`
+(default 20) — **except** that a fully-eliminated taxon (present pre-QC, zero
+afterwards) at genus rank or higher is always appended even past that cap, so the
+silent-drop signal is never truncated away. Blank rank values are excluded.
+
+The pre-clustering / representatives columns count **isolates** (segmented) or
+**sequences** otherwise. In segmented mode the **pre-QC column counts raw input
+segments** (records aren't yet grouped into isolates at QC time), so across that
+boundary only *presence* is comparable, not the raw numbers — the header note
+says so. Under `--no-resolve` (no taxonomy) there is nothing to snapshot, so the
+report falls back to the original two-column (pre-clustering / representatives)
+form.
+
+Any **genus-or-higher taxon present in the input but with zero post-QC survivors**
+is additionally called out as a `WARNING` on the console at the end of the run and
+in `{prefix}_flags.txt` (see below). The pre-QC vs post-QC counts also appear as
+`pool=pre_qc` / `pool=post_qc` rows in the tidy `.tsv` companion.
 
 #### `{prefix}_subtype_report.txt` / `.tsv` — serotype distribution
 
@@ -1251,11 +1268,17 @@ this says *which taxon, on which tree*.
 
 ### Plain-English flags — `{prefix}_flags.txt`
 
-The interesting anomalies a run can find are spread across several tables
-(`_monophyly.tsv`, `_incongruence.tsv`, and — when the opt-in review ran —
-`_taxonomy_review.tsv`). `{prefix}_flags.txt` distils them into one skimmable,
-plain-English list so you don't have to join TSVs by hand:
+The interesting anomalies a run can find are spread across several tables (the
+taxonomic report, `_monophyly.tsv`, `_incongruence.tsv`, and — when the opt-in
+review ran — `_taxonomy_review.tsv`). `{prefix}_flags.txt` distils them into one
+skimmable, plain-English list so you don't have to join TSVs by hand:
 
+- **Taxa eliminated entirely by QC** — any genus-or-higher taxon present in the
+  input pool but with **zero survivors** after QC (read from the pre-QC vs post-QC
+  rows of `_taxonomic_report.tsv`). This is the silent-drop alarm: a whole genus
+  vanishing usually means a QC gate (often an HMM marker) doesn't cover it — check
+  `_qc_removed.tsv` for the per-record reason. Listed first, and **also printed as
+  a `WARNING` on the console** at the end of the run.
 - **Reassortment / recombination signals** — taxa monophyletic on the
   whole-genome tree but broken on a marker tree, and marker-tree pairs with a high
   normalised Robinson-Foulds distance (≥ 0.2).
@@ -1265,9 +1288,11 @@ plain-English list so you don't have to join TSVs by hand:
   neighbourhood disagrees with (from the taxonomy review).
 
 It's a pure synthesis (no new computation), written whenever any source table
-exists; a clean run gets a `No flags raised ✓` file so you can tell "nothing
-flagged" from "report not produced". The flags are heuristics — the source tables
-remain authoritative.
+exists **or** a QC elimination is detected — so the eliminated-taxa alarm fires
+even on a plain clustering run with no `--phylo`. A clean run that has conflict
+tables gets a `No flags raised ✓` file so you can tell "nothing flagged" from
+"report not produced". The flags are heuristics — the source tables remain
+authoritative.
 
 ### One-page HTML report — `{prefix}_report.html`
 

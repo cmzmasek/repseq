@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .flags import collect_flags
+from .flags import _SECTIONS, collect_flags
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +69,10 @@ def _flags_html(out_dir: Path, prefix: str) -> str:
     if not flags:
         return '<div class="clean">No taxonomy / tree conflicts flagged. ✓</div>'
     parts: list[str] = []
-    for category, title in (
-        ("reassortment", "Reassortment / recombination signals"),
-        ("monophyly", "Taxonomy ↔ tree conflicts (non-monophyletic taxa)"),
-        ("taxonomy", "Per-isolate taxonomy conflicts"),
-    ):
+    # Iterate the canonical section order from flags._SECTIONS so the HTML
+    # gallery and _flags.txt never drift (e.g. the "Taxa eliminated by QC"
+    # section appears in both).
+    for category, title in _SECTIONS:
         group = [f for f in flags if f.category == category]
         if not group:
             continue
@@ -142,7 +141,12 @@ def write_html_report(
         or (out_dir / f"{prefix}_taxonomy_review.tsv").exists()
     )
     have_figures = any(out_dir.rglob("*_tree.png"))
-    if not have_flag_sources and not have_figures:
+    # A QC-elimination flag (genus+ wiped out by QC) is worth a report even on
+    # a plain clustering run with no conflict tables or tree figures.
+    have_qc_drop = any(
+        f.category == "qc_drop" for f in collect_flags(out_dir, prefix)
+    )
+    if not have_flag_sources and not have_figures and not have_qc_drop:
         return None
 
     self_name = f"{prefix}_report.html"
