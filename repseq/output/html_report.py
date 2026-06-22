@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .flags import _SECTIONS, collect_flags
+from .flags import _SECTIONS, Flag, collect_flags
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +64,7 @@ def _human_size(n: int) -> str:
     return f"{n} B"
 
 
-def _flags_html(out_dir: Path, prefix: str) -> str:
-    flags = collect_flags(out_dir, prefix)
+def _flags_html(flags: list[Flag]) -> str:
     if not flags:
         return '<div class="clean">No taxonomy / tree conflicts flagged. ✓</div>'
     parts: list[str] = []
@@ -141,11 +140,13 @@ def write_html_report(
         or (out_dir / f"{prefix}_taxonomy_review.tsv").exists()
     )
     have_figures = any(out_dir.rglob("*_tree.png"))
+    # Collect the flags once and reuse for both the qc-drop guard below and the
+    # flags section in the body (re-parsing the source TSVs twice for one render
+    # is wasted I/O).
+    flags = collect_flags(out_dir, prefix)
     # A QC-elimination flag (genus+ wiped out by QC) is worth a report even on
     # a plain clustering run with no conflict tables or tree figures.
-    have_qc_drop = any(
-        f.category == "qc_drop" for f in collect_flags(out_dir, prefix)
-    )
+    have_qc_drop = any(f.category == "qc_drop" for f in flags)
     if not have_flag_sources and not have_figures and not have_qc_drop:
         return None
 
@@ -166,7 +167,7 @@ def write_html_report(
 {summary_link}
 
 <h2>Analysis flags</h2>
-{_flags_html(out_dir, prefix)}
+{_flags_html(flags)}
 
 <h2>Tree figures</h2>
 {_tree_gallery_html(out_dir, prefix)}

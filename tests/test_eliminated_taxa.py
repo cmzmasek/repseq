@@ -3,7 +3,7 @@
 Covers the v0.67.0 addition: a leading pre-QC column on the taxonomic report
 (both .txt and tidy .tsv) and the flags-file / console alarm for an entire
 genus-or-higher clade present in the input but wiped out by a QC gate (the
-Flaviviridae RdRp-marker episode).
+Amarillovirales RdRp-marker episode).
 """
 from __future__ import annotations
 

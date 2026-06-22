@@ -920,7 +920,7 @@ _TAX_RANKS = (
 # excluded — species-level disappearance is common and noisy (annotation
 # churn, rare singletons dropped on length/QC), and subgenus is mostly blank
 # for viruses. The danger this guards against is an entire GENUS or higher
-# clade being wiped out by a QC gate (the Flaviviridae RdRp-marker episode,
+# clade being wiped out by a QC gate (the Amarillovirales RdRp-marker episode,
 # where three genera silently vanished at the marker check). Used by the
 # pre-QC-vs-post-QC "eliminated taxa" alarm.
 _ALARM_RANKS = tuple(r for r in _TAX_RANKS if r not in ("species", "subgenus"))
