@@ -70,20 +70,44 @@ _VERSION = re.compile(r"\.\d+$")
 
 
 def _norm_id(value: Optional[str]) -> Optional[str]:
-    """Lower-case, whitespace-collapse, and pipe-strip an id for matching.
+    """Normalise an id for matching: lower-case, then replace every
+    whitespace run AND pipe with ``_``. Returns ``None`` for empty input.
 
-    Mirrors the normalisation used for ``complete_isolates`` keys so an
-    isolate id round-trips identically. Returns ``None`` for empty input.
+    This is the **single source of truth** for id normalisation:
+    ``segmented.completeness._normalise_isolate_id`` (which builds the
+    concatenated isolate's ``isolate_id`` / ``seq.id``) delegates to it, so
+    the two cannot drift. They MUST agree, because a force_select /
+    protect_qc / exclude id is matched against BOTH a per-segment
+    ``seq.isolate_id`` (the raw strain, e.g. ``"A/Foo Bar/1"``) and the
+    concatenated isolate's normalised id (``"a/foo_bar/1"``). The
+    pre-2026-06 behaviour collapsed whitespace to a single space here while
+    the isolate-id builder used ``_``; the natural space-form id then
+    silently failed to bind any segmented isolate whose name contained
+    whitespace — i.e. most influenza / segmented strain names.
     """
     if value is None:
         return None
-    s = _WS.sub(" ", str(value).strip().strip("|")).lower()
+    s = _WS.sub("_", str(value).strip().lower()).replace("|", "_")
     return s or None
 
 
 def _strip_version(norm: str) -> str:
-    """Drop a trailing ``.<digits>`` accession version from a normalised id."""
-    return _VERSION.sub("", norm)
+    """Return the version-insensitive match key for a normalised id.
+
+    Drops a trailing ``.<digits>`` accession version (so ``nc_045512.2``
+    matches ``nc_045512``), and first trims any leading/trailing ``_`` — the
+    residue a delimiter pipe or edge whitespace leaves behind once
+    :func:`_norm_id` has mapped it to ``_``. A pipe-bearing header id from
+    the UNKNOWN-source FASTA fallback (e.g. ``AB123456.1|``) normalises to
+    ``ab123456.1_``; without trimming the trailing ``_`` the ``\\.\\d+$``
+    anchor can't reach the version, and a bare/versioned override id would
+    silently fail to bind it. Trimming is applied symmetrically to both the
+    configured ids and the sequence fields (every caller routes through this
+    helper), so matching stays consistent and version-insensitive in either
+    direction. Internal ``_`` (real accession underscores, ``nc_045512``) is
+    untouched — only the ends are trimmed.
+    """
+    return _VERSION.sub("", norm.strip("_"))
 
 
 def resolve_stages(spec: Any) -> frozenset[str]:

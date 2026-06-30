@@ -12,6 +12,7 @@ from ..clustering.marker import (
     select_marker_protein,
 )
 from ..models import QCReport, Sequence
+from ..overrides import _norm_id
 
 
 # ---------------------------------------------------------------------------
@@ -60,10 +61,15 @@ def _normalise_isolate_id(raw: str) -> str:
       * The segmented FASTA writer and the protein-fasta report read
         the isolate back out of seq.id via ``split("|")[1]``; a stray
         pipe inside the captured name would truncate the recovered id.
+
+    Delegates to :func:`repseq.overrides._norm_id`, the single source of
+    truth for id normalisation, so the grouping key / CONCAT ``seq.id`` and
+    the force_select / protect_qc / exclude matcher cannot drift apart (a
+    space-form override id must bind both the raw per-segment ``isolate_id``
+    and this underscored CONCAT id). ``_norm_id`` returns ``None`` for empty
+    input; an empty isolate name normalises to ``""`` as before.
     """
-    out = re.sub(r"\s+", "_", raw.strip().lower())
-    out = out.replace("|", "_")
-    return out
+    return _norm_id(raw) or ""
 
 
 # ---------------------------------------------------------------------------

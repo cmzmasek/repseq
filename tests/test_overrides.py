@@ -16,9 +16,11 @@ from repseq.models import (
 from repseq.overrides import (
     QC_PROTECT_STAGES,
     ProtectionPolicy,
+    _norm_id,
     resolve_ids,
     resolve_stages,
 )
+from repseq.segmented.completeness import _normalise_isolate_id
 from repseq.models import Cluster, RunResult
 from repseq.overrides import apply_force_select
 from repseq.output.report import write_force_selected_tsv, write_overrides_tsv
@@ -69,6 +71,74 @@ def test_policy_matches_id_and_isolate_id():
                          resolve_stages("all"), enabled=True)
     assert p.protects(_seq("x", isolate_id="iso-1"), "hmm")
     assert not p.protects(_seq("x", isolate_id="iso-2"), "hmm")
+
+
+def test_norm_id_canonical_outputs():
+    # Pin the canonical normalisation to CONCRETE outputs (not a self-
+    # referential comparison, which would be tautological now that
+    # _normalise_isolate_id delegates to _norm_id): lower-case, every
+    # whitespace run -> "_", every pipe -> "_".
+    assert _norm_id("A/Louisiana/12/2024 OR_IR") == "a/louisiana/12/2024_or_ir"
+    assert _norm_id("  Mixed   WS\tName  ") == "mixed_ws_name"
+    assert _norm_id("a|b|c") == "a_b_c"
+    assert _norm_id("NC_045512.2") == "nc_045512.2"  # internal "_" preserved
+    assert _norm_id("") is None
+    assert _norm_id("   ") is None
+
+
+def test_normalise_isolate_id_concrete_outputs():
+    # _normalise_isolate_id delegates to _norm_id but must keep producing
+    # exactly these strings (grouping dict key + CONCAT seq.id). Pinning the
+    # concrete output catches a future inlined re-implementation that drifts
+    # (the regression class the delegation removed) — the previous test
+    # compared the two functions, which can never fail while one calls the
+    # other.
+    assert _normalise_isolate_id("A/Foo Bar/1") == "a/foo_bar/1"
+    assert _normalise_isolate_id("a|b|c") == "a_b_c"
+    assert _normalise_isolate_id("") == ""  # empty -> "" (not None)
+
+
+def test_override_matches_pipe_bearing_accession():
+    # Regression (review finding 1/2): an UNKNOWN-source FASTA header can
+    # yield a seq.accession carrying a leading/trailing pipe (io/fasta.py's
+    # first-token fallback). _norm_id maps the pipe to "_"; version-
+    # insensitive matching must still bind the bare / versioned override id —
+    # the trailing "_" must not defeat _strip_version.
+    p = ProtectionPolicy(resolve_ids({"ids": ["AB123456"]}),
+                         resolve_stages("all"), enabled=True)
+    assert p.protects(_seq("s", accession="AB123456.1|"), "ambiguous")
+    assert p.protects(_seq("s", accession="|AB123456.1"), "ambiguous")
+    assert p.protects(_seq("s", accession="AB123456.1"), "ambiguous")  # control
+    assert not p.protects(_seq("s", accession="XY999999.1|"), "ambiguous")
+
+
+def test_exclude_conflict_detected_across_pipe_and_version():
+    # Regression (review finding 2): the exclude-vs-keep hard error must fire
+    # even when the two spellings differ only by a trailing pipe + version,
+    # i.e. their version-stripped match keys coincide.
+    cfg = copy.deepcopy(DEFAULTS)
+    cfg["overrides"]["protect_qc"] = True
+    cfg["overrides"]["ids"] = ["AB123456.1"]
+    cfg["overrides"]["exclude"]["enabled"] = True
+    cfg["overrides"]["exclude"]["ids"] = ["AB123456.1|"]
+    assert any("cannot be both" in e for e in validate_config(cfg))
+
+
+def test_force_select_binds_segmented_isolate_by_space_form_name():
+    # The user lists the natural strain name (with spaces); it must match
+    # BOTH a raw per-segment isolate_id and the underscored CONCAT id that
+    # _normalise_isolate_id produces.
+    p = ProtectionPolicy(resolve_ids({"ids": ["A/Louisiana/12/2024 OR_IR"]}),
+                         resolve_stages("all"), enabled=True, force_select=True)
+    concat_id = _normalise_isolate_id("A/Louisiana/12/2024 OR_IR")
+    assert concat_id == "a/louisiana/12/2024_or_ir"
+    # CONCAT pool sequence (isolate_id already normalised to underscores)
+    assert p.pins(_seq("CONCAT|" + concat_id, isolate_id=concat_id))
+    # raw per-segment sequence (isolate_id is the original space-form strain)
+    assert p.protects(
+        _seq("seg8", isolate_id="A/Louisiana/12/2024 OR_IR"), "hmm")
+    # a different isolate is not bound
+    assert not p.pins(_seq("CONCAT|other", isolate_id="a/other/1"))
 
 
 def test_policy_inactive_without_ids():
