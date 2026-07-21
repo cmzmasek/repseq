@@ -104,7 +104,8 @@ class TimeMode(BaseMode):
                     grouping="time", group=label,
                     n_before=len(group_seqs), n_after=len(clusters),
                     clustered=True, cutoff=threshold,
-                    cutoff_counts=compute_diversity_curve(group_seqs, self.cfg),
+                    cutoff_counts=compute_diversity_curve(
+                        group_seqs, self.cfg, label=label),
                 ))
 
         return RunResult(

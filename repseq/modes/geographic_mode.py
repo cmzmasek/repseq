@@ -60,7 +60,8 @@ class GeographicMode(BaseMode):
                     grouping="country", group=country,
                     n_before=len(group_seqs), n_after=len(clusters),
                     clustered=True, cutoff=threshold,
-                    cutoff_counts=compute_diversity_curve(group_seqs, self.cfg),
+                    cutoff_counts=compute_diversity_curve(
+                        group_seqs, self.cfg, label=country),
                 ))
 
         return RunResult(
