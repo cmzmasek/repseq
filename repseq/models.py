@@ -313,6 +313,12 @@ class QCReport:
     # (output.report.find_eliminated_taxa); surfaced in the console final
     # summary and, via the taxonomic-report TSV, in ``_flags.txt``.
     eliminated_taxa: list = field(default_factory=list)
+    # Polyprotein peptide-coverage "walls of zeros": a clade whose home
+    # polyprotein spec leaves most of its peptides at 0 % coverage (mistuned
+    # profiles), or that no spec slices at all. Each entry is a dict from
+    # ``output.report.find_polyprotein_coverage_walls``; surfaced in the console
+    # final summary and, via the polyprotein-report TSV, in ``_flags.txt``.
+    polyprotein_walls: list = field(default_factory=list)
 
     def add_removed(self, seq_id: str, reason: str) -> None:
         self.details.append({"id": seq_id, "reason": reason})

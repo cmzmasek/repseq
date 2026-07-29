@@ -682,6 +682,28 @@ DEFAULTS: dict[str, Any] = {
         "protein_report": {
             "max_breakdown": 20,
         },
+        # {prefix}_polyprotein_taxonomic_report.* — the peptide-coverage
+        # "wall of zeros" alarm. When a declared polyprotein spec's peptide
+        # profiles fail to cover a whole clade, that clade's peptide columns
+        # go 0% (the pre-fix Orthohepacivirus/Pegivirus/Orthopestivirus case
+        # under the Orthoflavivirus-only slicing). This warns loudly (console
+        # + _flags.txt + HTML) when it sees such a wall. Each taxon is judged
+        # against the ONE spec that covers the most of its peptides (its "home"
+        # spec), so the expected all-zero rows a taxon has under OTHER clades'
+        # specs never false-fire.
+        "polyprotein_report": {
+            "wall_warning": {
+                "enabled": True,
+                # Rank to assess (one rank avoids redundant multi-rank alarms).
+                "rank": "genus",
+                # Warn when >= this fraction of the home spec's peptides are at
+                # 0% coverage for the taxon.
+                "wall_fraction": 0.6,
+                # Ignore taxa with fewer than this many representatives (noise
+                # guard — a 1-2 rep taxon isn't a systemic coverage wall).
+                "min_reps": 3,
+            },
+        },
     },
     # Sequences of special importance. `protect_qc` force-keeps the named
     # sequences through the QC removal stages they would otherwise fail (a
@@ -2217,6 +2239,35 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                 f"{' …' if len(shown) > 10 else ''}. An id cannot be both "
                 "removed and guaranteed — remove it from one list."
             )
+
+    # output.polyprotein_report.wall_warning — the peptide-coverage alarm knobs.
+    ww = (
+        cfg.get("output", {}).get("polyprotein_report", {}) or {}
+    ).get("wall_warning", {}) or {}
+    if not isinstance(ww.get("enabled", True), bool):
+        errors.append("output.polyprotein_report.wall_warning.enabled must be true or false")
+    wall_ranks = (
+        "species", "subgenus", "genus", "subfamily", "family",
+        "suborder", "order", "subclass", "class",
+    )
+    wrank = ww.get("rank", "genus")
+    if not isinstance(wrank, str) or wrank not in wall_ranks:
+        errors.append(
+            "output.polyprotein_report.wall_warning.rank must be one of "
+            f"{', '.join(wall_ranks)}"
+        )
+    wfrac = ww.get("wall_fraction", 0.6)
+    if not isinstance(wfrac, (int, float)) or isinstance(wfrac, bool) or not (0.0 <= wfrac <= 1.0):
+        errors.append(
+            "output.polyprotein_report.wall_warning.wall_fraction must be a "
+            "number in [0, 1]"
+        )
+    wmin = ww.get("min_reps", 3)
+    if not isinstance(wmin, int) or isinstance(wmin, bool) or wmin < 1:
+        errors.append(
+            "output.polyprotein_report.wall_warning.min_reps must be a "
+            "positive integer"
+        )
 
     return errors
 

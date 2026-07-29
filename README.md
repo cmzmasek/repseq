@@ -287,7 +287,7 @@ flags you passed. At a glance:
 | `{prefix}_msa_conservation.tsv` | any phylo step that wrote an MSA (default on) | One conservation number per alignment (JSD-to-background, Henikoff-weighted, gap-penalised). |
 | `{prefix}_monophyly.tsv` | any phylo step that built a tree (always on) | Per-taxon monophyly status off every annotated `*_tree.xml`. |
 | `{prefix}_segment_status_matrix.tsv` | whenever `_monophyly.tsv` is written | Cross-tree pivot of the monophyly report; `single_marker_break` localises which taxon breaks on which one marker tree (reassortment). |
-| `{prefix}_flags.txt` | when any conflict table exists **or** a genus+ taxon was eliminated by QC | Plain-English synthesis: taxa eliminated by QC + the conflict tables, one skimmable list. |
+| `{prefix}_flags.txt` | when any conflict table exists **or** a genus+ taxon was eliminated by QC **or** a polyprotein-coverage wall is detected | Plain-English synthesis: taxa eliminated by QC + polyprotein peptide-coverage walls + the conflict tables, one skimmable list. |
 | `{prefix}_report.html` | any run with figures or a conflict table | Single-file HTML report: flags + embedded tree-figure gallery + output-file index. |
 | `{prefix}_hmm_diagnostic.tsv` | HMM tier ran AND a spec declares `hmms:` | One row per (rep, marker spec, HMM profile): hit / best-E / coverage / cutoff / passing. |
 | `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations), led by an "Analysis at a glance" table. |
@@ -1279,6 +1279,20 @@ skimmable, plain-English list so you don't have to join TSVs by hand:
   vanishing usually means a QC gate (often an HMM marker) doesn't cover it — check
   `_qc_removed.tsv` for the per-record reason. Listed first, and **also printed as
   a `WARNING` on the console** at the end of the run.
+- **Polyprotein peptide-coverage walls** — when polyprotein slicing is
+  configured, a clade whose peptides are almost all at **0 % coverage** under its
+  best-matching (“home”) spec — a “wall of zeros” meaning the peptide profiles are
+  mistuned or missing for that clade (e.g. an Orthoflavivirus-only slicing config
+  run against Hepacivirus/Pegivirus/Pestivirus). Each taxon is judged only against
+  its home spec, so the all-zero rows a taxon naturally has under *other* clades’
+  specs never false-fire. Read from `_polyprotein_taxonomic_report.tsv`, also
+  printed as a console `WARNING`. Thresholds:
+  `output.polyprotein_report.wall_warning` (`enabled`, `rank` = genus,
+  `wall_fraction` = 0.6, `min_reps` = 3). Note this keys on peptide columns at
+  **exactly 0 %** — it catches profiles that don’t cover a clade at all, not
+  clades that are merely *sparsely* covered (a peptide sliced for even one
+  representative is a non-zero column); watch `coverage_pct` in the report
+  itself for the sparse case.
 - **Reassortment / recombination signals** — taxa monophyletic on the
   whole-genome tree but broken on a marker tree, and marker-tree pairs with a high
   normalised Robinson-Foulds distance (≥ 0.2).
@@ -1288,8 +1302,8 @@ skimmable, plain-English list so you don't have to join TSVs by hand:
   neighbourhood disagrees with (from the taxonomy review).
 
 It's a pure synthesis (no new computation), written whenever any source table
-exists **or** a QC elimination is detected — so the eliminated-taxa alarm fires
-even on a plain clustering run with no `--phylo`. A clean run that has conflict
+exists **or** a QC elimination / polyprotein-coverage wall is detected — so those
+two alarms fire even on a plain clustering run with no `--phylo`. A clean run that has conflict
 tables gets a `No flags raised ✓` file so you can tell "nothing flagged" from
 "report not produced". The flags are heuristics — the source tables remain
 authoritative.

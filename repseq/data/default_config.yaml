@@ -847,6 +847,26 @@ output:
   protein_report:
     max_breakdown: 20
 
+  # `{prefix}_polyprotein_taxonomic_report.*` "wall of zeros" alarm. When a
+  # declared polyprotein spec's peptide profiles don't cover a whole clade,
+  # that clade's peptide columns go 0 % (e.g. an Orthoflavivirus-only slicing
+  # config against Hepacivirus/Pegivirus/Pestivirus records). This warns
+  # loudly — console + `{prefix}_flags.txt` + the HTML report — when it sees
+  # such a wall. Each taxon is judged against the ONE spec that covers the most
+  # of its peptides (its "home" spec), so the all-zero rows a taxon naturally
+  # has under OTHER clades' specs never false-fire. Only active on runs that
+  # declare a `clustering.polyprotein:` spec and run the HMM tier.
+  polyprotein_report:
+    wall_warning:
+      enabled: true
+      # Taxonomic rank to assess (one rank avoids redundant multi-rank alarms).
+      rank: genus
+      # Warn when at least this fraction of the home spec's peptides are at
+      # 0 % coverage for the taxon.
+      wall_fraction: 0.6
+      # Ignore taxa with fewer than this many representatives (noise guard).
+      min_reps: 3
+
 # ---------------------------------------------------------------------------
 # Overrides — sequences of special importance
 # ---------------------------------------------------------------------------

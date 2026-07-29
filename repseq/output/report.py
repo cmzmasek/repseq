@@ -2159,6 +2159,149 @@ def _polyprotein_coverage_data_per_taxon(
     return taxon_totals, taxon_lengths
 
 
+def compute_polyprotein_walls(
+    coverage: dict[tuple[str, str], dict[str, int]],
+    totals: dict[str, int],
+    spec_peptides: dict[str, list[str]],
+    *,
+    rank: str,
+    wall_fraction: float = 0.6,
+    min_reps: int = 3,
+) -> list[dict]:
+    """Detect polyprotein peptide-coverage "walls of zeros" (shared core).
+
+    Inputs (both the in-memory and the TSV-reading callers build these):
+
+    * ``coverage[(spec_name, taxon)][peptide]`` — number of representatives of
+      ``taxon`` for which ``spec_name`` sliced ``peptide`` (coverage count).
+    * ``totals[taxon]`` — number of representatives of the taxon (spec-agnostic).
+    * ``spec_peptides[spec_name]`` — the spec's full declared peptide list, so a
+      never-sliced peptide still counts toward the denominator.
+
+    A taxon is judged against its **home spec** — the spec covering the MOST of
+    its peptides (``count > 0``). Judging only the home spec is what prevents
+    false alarms: with per-clade specs, every taxon has an all-zero row under
+    the *other* clades' specs (expected), and a peptide shared across specs
+    (e.g. ``RdRP_3`` as NS5B in both the hepacivirus and pestivirus specs) makes
+    a foreign taxon look nominally "claimed" by 1 peptide — the argmax-coverage
+    home rule ignores both.
+
+    Two wall kinds are returned (``min_reps`` guards tiny, noisy taxa):
+
+    * ``unsliced_taxon`` — the home spec covers **zero** peptides (nothing is
+      sliced for the taxon anywhere).
+    * ``mistuned_spec`` — the home spec leaves ``>= wall_fraction`` of its
+      peptides at 0 % coverage for the taxon (the profiles don't fit the clade).
+
+    **Detection scope — literal zero columns only.** A peptide counts as a
+    "wall" column only when its coverage is exactly 0 across the taxon's reps
+    (``count == 0``), not merely low. This deliberately keys on the "wall of
+    zeros" the profiles-don't-cover-this-clade case produces; it does NOT flag
+    a clade that is *sparsely* covered (e.g. a peptide sliced for only 1 of 100
+    reps is a non-zero column and suppresses the wall for that peptide). Sparse
+    coverage is visible as low ``coverage_pct`` in
+    ``_polyprotein_taxonomic_report.txt`` but is not itself an alarm.
+
+    Each entry: ``{kind, rank, taxon, spec, n_reps, covered_peptides,
+    zero_peptides, total_peptides}``. Sorted most-severe first (unsliced before
+    mistuned, then by rep count desc).
+    """
+    walls: list[dict] = []
+    taxa = {t for (_s, t) in coverage} | set(totals)
+    for taxon in taxa:
+        n_reps = totals.get(taxon, 0)
+        if n_reps < min_reps:
+            continue
+        # Pick the home spec: max peptides covered (count > 0), tie-break on
+        # total coverage sum then spec name for determinism.
+        best = None  # (covered, total_sum, -1*ord) proxy via tuple compare
+        home = None
+        for spec_name in sorted(spec_peptides):
+            peps = spec_peptides[spec_name]
+            covmap = coverage.get((spec_name, taxon), {})
+            covered = sum(1 for p in peps if covmap.get(p, 0) > 0)
+            total_sum = sum(covmap.get(p, 0) for p in peps)
+            key = (covered, total_sum)
+            if best is None or key > best:
+                best = key
+                home = spec_name
+        if home is None:
+            continue
+        peps = spec_peptides[home]
+        covmap = coverage.get((home, taxon), {})
+        total_pep = len(peps)
+        covered = sum(1 for p in peps if covmap.get(p, 0) > 0)
+        zero = sum(1 for p in peps if covmap.get(p, 0) == 0)
+        if covered == 0:
+            walls.append({
+                "kind": "unsliced_taxon", "rank": rank, "taxon": taxon,
+                "spec": None, "n_reps": n_reps, "covered_peptides": 0,
+                "zero_peptides": total_pep, "total_peptides": total_pep,
+            })
+        elif total_pep and zero / total_pep >= wall_fraction:
+            walls.append({
+                "kind": "mistuned_spec", "rank": rank, "taxon": taxon,
+                "spec": home, "n_reps": n_reps, "covered_peptides": covered,
+                "zero_peptides": zero, "total_peptides": total_pep,
+            })
+    walls.sort(key=lambda w: (0 if w["kind"] == "unsliced_taxon" else 1,
+                              -w["n_reps"], w["taxon"]))
+    return walls
+
+
+def find_polyprotein_coverage_walls(
+    reps: list[Sequence],
+    cfg: dict[str, Any],
+    *,
+    rank: Optional[str] = None,
+    wall_fraction: Optional[float] = None,
+    min_reps: Optional[int] = None,
+) -> list[dict]:
+    """In-memory polyprotein wall detection over the representatives.
+
+    Slices every rep under each declared polyprotein spec (same engine as the
+    polyprotein report), aggregates coverage at ``rank``, and delegates to
+    :func:`compute_polyprotein_walls`. Returns ``[]`` when no ``polyprotein:``
+    spec is declared, the HMM tier didn't run, or the alarm is disabled. The
+    thresholds default to ``output.polyprotein_report.wall_warning.*``.
+    """
+    from ..polyprotein import collect_polyprotein_specs
+    from ..phylo.per_protein import _hmm_tier_ran, overlap_tolerance_from_cfg
+
+    ww = (
+        (cfg or {}).get("output", {}).get("polyprotein_report", {}) or {}
+    ).get("wall_warning", {}) or {}
+    if not ww.get("enabled", True):
+        return []
+    rank = rank or ww.get("rank", "genus")
+    wall_fraction = ww.get("wall_fraction", 0.6) if wall_fraction is None else wall_fraction
+    min_reps = ww.get("min_reps", 3) if min_reps is None else min_reps
+
+    specs = collect_polyprotein_specs(cfg)
+    if not specs or not _hmm_tier_ran(cfg, reps):
+        return []
+    tol = overlap_tolerance_from_cfg(cfg)
+
+    coverage: dict[tuple[str, str], dict[str, int]] = {}
+    totals: dict[str, int] = {}
+    spec_peptides: dict[str, list[str]] = {}
+    for spec in specs:
+        t_totals, t_lengths = _polyprotein_coverage_data_per_taxon(
+            reps, spec, rank, overlap_tolerance=tol,
+        )
+        spec_peptides[spec.name] = [p.name for p in spec.peptides]
+        for taxon, n in t_totals.items():
+            totals[taxon] = n
+            coverage[(spec.name, taxon)] = {
+                p.name: len(t_lengths[taxon][i])
+                for i, p in enumerate(spec.peptides)
+            }
+    return compute_polyprotein_walls(
+        coverage, totals, spec_peptides,
+        rank=rank, wall_fraction=wall_fraction, min_reps=min_reps,
+    )
+
+
 def write_polyprotein_taxonomic_report(
     before_seqs: list[Sequence],
     after_seqs: list[Sequence],

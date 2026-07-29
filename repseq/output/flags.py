@@ -221,10 +221,96 @@ def _qc_elimination_flags(out_dir: Path, prefix: str) -> list[Flag]:
     ]
 
 
-def collect_flags(out_dir: Path, prefix: str) -> list[Flag]:
+def _polyprotein_wall_flags(
+    out_dir: Path, prefix: str, cfg: Optional[dict] = None
+) -> list[Flag]:
+    """Polyprotein peptide-coverage "walls of zeros".
+
+    Reads the ``reps`` / ``coverage_count`` rows of
+    ``{prefix}_polyprotein_taxonomic_report.tsv`` (``spec`` column carries the
+    ``<spec>:<peptide>`` composite) and delegates to the shared
+    :func:`repseq.output.report.compute_polyprotein_walls`: a clade whose
+    home polyprotein spec leaves most peptides at 0 % coverage (mistuned
+    profiles), or that no spec slices at all. Thresholds come from
+    ``output.polyprotein_report.wall_warning.*``; the alarm is skippable via
+    its ``enabled`` flag.
+    """
+    ww = (
+        (cfg or {}).get("output", {}).get("polyprotein_report", {}) or {}
+    ).get("wall_warning", {}) or {}
+    if not ww.get("enabled", True):
+        return []
+    rank = ww.get("rank", "genus")
+    wall_fraction = ww.get("wall_fraction", 0.6)
+    min_reps = ww.get("min_reps", 3)
+
+    rows = _read_tsv(out_dir / f"{prefix}_polyprotein_taxonomic_report.tsv")
+    if not rows:
+        return []
+
+    coverage: dict[tuple[str, str], dict[str, int]] = {}
+    totals: dict[str, int] = {}
+    spec_peptides: dict[str, list[str]] = {}
+    for r in rows:
+        if r.get("report") != "polyprotein" or r.get("pool") != "reps":
+            continue
+        if r.get("rank") != rank or r.get("metric") != "coverage_count":
+            continue
+        spec_full = r.get("spec", "")
+        if ":" not in spec_full:
+            continue
+        spec_name, pep = spec_full.split(":", 1)
+        taxon = r.get("taxon", "")
+        if not taxon or taxon == "*ALL*":
+            continue
+        try:
+            cnt = int(float(r.get("value") or 0))
+            tot = int(float(r.get("taxon_count") or 0))
+        except ValueError:
+            continue
+        coverage.setdefault((spec_name, taxon), {})[pep] = cnt
+        totals[taxon] = tot
+        peps = spec_peptides.setdefault(spec_name, [])
+        if pep not in peps:
+            peps.append(pep)
+
+    if not coverage:
+        return []
+    from .report import compute_polyprotein_walls
+    walls = compute_polyprotein_walls(
+        coverage, totals, spec_peptides,
+        rank=rank, wall_fraction=wall_fraction, min_reps=min_reps,
+    )
+    out: list[Flag] = []
+    for w in walls:
+        if w["kind"] == "unsliced_taxon":
+            out.append(Flag(
+                "warn", "polyprotein_wall",
+                f"{w['taxon']} ({w['rank']}): {w['n_reps']} representative(s) "
+                f"cluster but NO polyprotein spec slices any peptide for them — "
+                f"the peptide profiles don't cover this clade. See "
+                f"_polyprotein_taxonomic_report.txt.",
+            ))
+        else:
+            out.append(Flag(
+                "warn", "polyprotein_wall",
+                f"{w['taxon']} ({w['rank']}): the '{w['spec']}' polyprotein "
+                f"spec covers only {w['covered_peptides']}/{w['total_peptides']} "
+                f"of its peptides for this {w['rank']} "
+                f"({w['zero_peptides']} at 0 % coverage across {w['n_reps']} "
+                f"representative(s)) — the peptide profiles may not fit this "
+                f"clade. See _polyprotein_taxonomic_report.txt.",
+            ))
+    return out
+
+
+def collect_flags(
+    out_dir: Path, prefix: str, cfg: Optional[dict] = None
+) -> list[Flag]:
     """Gather all flags from whichever source tables are present."""
     return (
         _qc_elimination_flags(out_dir, prefix)
+        + _polyprotein_wall_flags(out_dir, prefix, cfg)
         + _monophyly_flags(out_dir, prefix)
         + _incongruence_flags(out_dir, prefix)
         + _taxonomy_review_flags(out_dir, prefix)
@@ -233,31 +319,38 @@ def collect_flags(out_dir: Path, prefix: str) -> list[Flag]:
 
 _SECTIONS = [
     ("qc_drop", "Taxa eliminated entirely by QC"),
+    ("polyprotein_wall", "Polyprotein peptide-coverage walls"),
     ("reassortment", "Reassortment / recombination signals"),
     ("monophyly", "Taxonomy ↔ tree conflicts (non-monophyletic taxa)"),
     ("taxonomy", "Per-isolate taxonomy conflicts"),
 ]
 
 
-def write_flags_report(out_dir: Path, prefix: str) -> Optional[Path]:
+def write_flags_report(
+    out_dir: Path, prefix: str, cfg: Optional[dict] = None
+) -> Optional[Path]:
     """Write ``{prefix}_flags.txt`` summarising the conflict tables.
 
     Returns the path, or None when there is nothing to synthesise (no
-    conflict table AND no QC-elimination). A clean run that *does* have a
-    conflict table still gets a file saying "No flags raised", so a user can
-    tell "no conflicts" from "report not produced".
+    conflict table AND no QC-elimination AND no polyprotein-coverage wall).
+    A clean run that *does* have a conflict table still gets a file saying
+    "No flags raised", so a user can tell "no conflicts" from "report not
+    produced".
     """
-    flags = collect_flags(out_dir, prefix)
-    qc_drops = [f for f in flags if f.category == "qc_drop"]
+    flags = collect_flags(out_dir, prefix, cfg)
+    standalone = [
+        f for f in flags if f.category in ("qc_drop", "polyprotein_wall")
+    ]
     has_conflict_tables = (
         (out_dir / f"{prefix}_monophyly.tsv").exists()
         or (out_dir / f"{prefix}_per_protein" / f"{prefix}_incongruence.tsv").exists()
         or (out_dir / f"{prefix}_taxonomy_review.tsv").exists()
     )
-    # The QC-elimination alarm fires even on a plain clustering run (no
-    # --phylo, so no conflict tables) — that's exactly when an inexperienced
-    # user can't otherwise see a whole genus vanish.
-    if not has_conflict_tables and not qc_drops:
+    # The QC-elimination and polyprotein-wall alarms fire even on a plain
+    # clustering run (no --phylo, so no conflict tables) — that's exactly when
+    # an inexperienced user can't otherwise see a whole genus vanish or a
+    # clade's peptides silently go uncovered.
+    if not has_conflict_tables and not standalone:
         return None
 
     path = out_dir / f"{prefix}_flags.txt"

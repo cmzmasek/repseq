@@ -18,6 +18,7 @@ from .models import RunResult
 from .overrides import ProtectionPolicy, protected_keep, resolve_ids, resolve_stages
 from .output.report import (
     find_eliminated_taxa,
+    find_polyprotein_coverage_walls,
     tally_taxa_by_rank,
     write_all_reports,
     write_nucleotide_taxonomic_report,
@@ -2253,6 +2254,51 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
                 out_files.append(tax_tsv)
         except Exception as exc:
             click.echo(f"[taxonomic report TSV skipped] {exc}", err=True)
+        # Per-peptide coverage + length report for declared polyprotein specs
+        # — the sliced-peptide analogue of the protein taxonomic report. Only
+        # emitted when at least one `polyprotein:` spec is declared AND the HMM
+        # tier ran. Written HERE — before the flags + HTML steps below — so
+        # collect_flags can read its TSV and raise the peptide-coverage "wall
+        # of zeros" alarm (a clade whose home spec leaves most peptides
+        # uncovered). Soft-fail so a render bug never voids a real selection.
+        try:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            pp_path = out_dir / f"{prefix}_polyprotein_taxonomic_report.txt"
+            if write_polyprotein_taxonomic_report(
+                pre_clustering_sequences,
+                result.representatives,
+                cfg,
+                segmented=bool(complete_isolates),
+                path=pp_path,
+                provenance=_report_provenance,
+            ):
+                out_files.append(pp_path)
+        except Exception as exc:
+            click.echo(f"[polyprotein taxonomic report skipped] {exc}", err=True)
+        try:
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            pp_tsv = out_dir / f"{prefix}_polyprotein_taxonomic_report.tsv"
+            if write_polyprotein_taxonomic_report_tsv(
+                pre_clustering_sequences,
+                result.representatives,
+                cfg,
+                path=pp_tsv,
+            ):
+                out_files.append(pp_tsv)
+        except Exception as exc:
+            click.echo(f"[polyprotein taxonomic report TSV skipped] {exc}", err=True)
+        # Peptide-coverage "wall of zeros" alarm: a clade whose home polyprotein
+        # spec leaves most peptides at 0 % (mistuned profiles), or that no spec
+        # slices at all. Computed in-memory here for the console final summary;
+        # _flags.txt re-derives it from the TSV above. Soft.
+        try:
+            qc_report.polyprotein_walls = find_polyprotein_coverage_walls(
+                result.representatives, cfg,
+            )
+        except Exception:
+            qc_report.polyprotein_walls = []
     # Plain-English analysis flags — synthesises the conflict tables
     # (_monophyly.tsv, _incongruence.tsv, _taxonomy_review.tsv) plus the
     # taxonomic report's pre-QC-vs-post-QC rows into one {prefix}_flags.txt.
@@ -2261,7 +2307,7 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
         from .output.flags import write_flags_report
         out_dir = Path(cfg["output"]["dir"])
         prefix = cfg["output"].get("prefix", "repseq")
-        flags_path = write_flags_report(out_dir, prefix)
+        flags_path = write_flags_report(out_dir, prefix, cfg)
         if flags_path is not None:
             out_files.append(flags_path)
     except Exception as exc:
@@ -2395,40 +2441,6 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
                 out_files.append(nt_tsv)
         except Exception as exc:
             click.echo(f"[nucleotide taxonomic report TSV skipped] {exc}", err=True)
-    # Per-peptide coverage + length report for declared polyprotein
-    # specs — the sliced-peptide analogue of the protein taxonomic
-    # report. Only emitted when at least one `polyprotein:` spec is
-    # declared AND the HMM tier ran; soft-fail so a render bug never
-    # voids a real selection.
-    if pre_clustering_sequences is not None:
-        try:
-            out_dir = Path(cfg["output"]["dir"])
-            prefix = cfg["output"].get("prefix", "repseq")
-            pp_path = out_dir / f"{prefix}_polyprotein_taxonomic_report.txt"
-            if write_polyprotein_taxonomic_report(
-                pre_clustering_sequences,
-                result.representatives,
-                cfg,
-                segmented=bool(complete_isolates),
-                path=pp_path,
-                provenance=_report_provenance,
-            ):
-                out_files.append(pp_path)
-        except Exception as exc:
-            click.echo(f"[polyprotein taxonomic report skipped] {exc}", err=True)
-        try:
-            out_dir = Path(cfg["output"]["dir"])
-            prefix = cfg["output"].get("prefix", "repseq")
-            pp_tsv = out_dir / f"{prefix}_polyprotein_taxonomic_report.tsv"
-            if write_polyprotein_taxonomic_report_tsv(
-                pre_clustering_sequences,
-                result.representatives,
-                cfg,
-                path=pp_tsv,
-            ):
-                out_files.append(pp_tsv)
-        except Exception as exc:
-            click.echo(f"[polyprotein taxonomic report TSV skipped] {exc}", err=True)
     # Methods-section starter — written after every successful run so
     # a bench scientist can copy it into a paper. Soft-fail (one stderr
     # line) so a render bug never voids a real selection.
@@ -2532,6 +2544,37 @@ def _final_summary(result, qc_report, cfg) -> None:
             err=True,
         )
 
+    def _echo_polyprotein_walls() -> None:
+        # Peptide-coverage "wall of zeros" alarm: a clade that clusters fine but
+        # whose polyprotein peptides are almost all uncovered (mistuned profiles
+        # for that clade) — the silent gap the user can't see without reading
+        # the polyprotein report cell by cell.
+        walls = (qc_report.polyprotein_walls if qc_report else None) or []
+        if not walls:
+            return
+        n = len(walls)
+        shown = walls[:5]
+        bits = ", ".join(
+            f"{w['taxon']} ({w['rank']})"
+            + (
+                f" [{w['spec']}: {w['covered_peptides']}/{w['total_peptides']} peptides]"
+                if w["kind"] == "mistuned_spec"
+                else " [no spec slices it]"
+            )
+            for w in shown
+        )
+        more = f", +{n - len(shown)} more" if n > len(shown) else ""
+        click.echo(
+            f"\nWARNING: {n} clade(s) have a polyprotein peptide-coverage WALL "
+            f"(most peptides at 0 % — the peptide profiles may not fit the "
+            f"clade): {bits}{more}.",
+            err=True,
+        )
+        click.echo(
+            "  See _polyprotein_taxonomic_report.txt and _flags.txt.",
+            err=True,
+        )
+
     if n_reps > 0:
         cluster_note = f" across {n_clusters} cluster(s)" if n_clusters else ""
         unit = "isolate(s)" if segmented else "representative sequence(s)"
@@ -2557,6 +2600,7 @@ def _final_summary(result, qc_report, cfg) -> None:
                 msg += "."
             click.echo(msg)
         _echo_eliminated()
+        _echo_polyprotein_walls()
         return
 
     # Nothing was selected — diagnose.

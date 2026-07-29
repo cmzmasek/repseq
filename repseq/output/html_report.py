@@ -143,10 +143,13 @@ def write_html_report(
     # Collect the flags once and reuse for both the qc-drop guard below and the
     # flags section in the body (re-parsing the source TSVs twice for one render
     # is wasted I/O).
-    flags = collect_flags(out_dir, prefix)
-    # A QC-elimination flag (genus+ wiped out by QC) is worth a report even on
-    # a plain clustering run with no conflict tables or tree figures.
-    have_qc_drop = any(f.category == "qc_drop" for f in flags)
+    flags = collect_flags(out_dir, prefix, cfg)
+    # A QC-elimination flag (genus+ wiped out by QC) or a polyprotein-coverage
+    # wall is worth a report even on a plain clustering run with no conflict
+    # tables or tree figures.
+    have_qc_drop = any(
+        f.category in ("qc_drop", "polyprotein_wall") for f in flags
+    )
     if not have_flag_sources and not have_figures and not have_qc_drop:
         return None
 

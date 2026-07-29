@@ -983,6 +983,8 @@ def test_render_summary_points_to_taxonomic_report(make_seq, tmp_path):
     assert "Taxonomic diversity at each rank across three pipeline stages" in md
     assert "pre-QC, pre-clustering, and representatives" in md
     assert "zero post-QC survivors is additionally flagged" in md
+    # The polyprotein peptide-coverage "wall of zeros" alarm prose.
+    assert 'peptide-coverage "wall of' in md
 
 
 def test_render_summary_points_to_nucleotide_taxonomic_report(make_seq, tmp_path):
