@@ -167,6 +167,50 @@ def write_force_selected_tsv(result: RunResult, path: Path) -> bool:
     return True
 
 
+_GROUP_ASSIGNMENT_COLUMNS = (
+    "isolate_id", "strain", "accessions", "stratified_by", "value",
+    "matched_by", "detail", "stratum", "representative",
+)
+
+
+def write_group_assignments_tsv(result: RunResult, path: Path) -> bool:
+    """Write the per-sequence group assignments of the custom / hybrid modes.
+
+    One row per pool isolate (segmented) or sequence (non-segmented) — per
+    field, for hybrid — with its group label (``value``), where the label
+    came from (``matched_by``: ``table:<kind>`` / ``attribute`` / ``taxonomy``
+    / ``header_regex`` / ``conflict`` / ``none``), the identifier(s) that
+    matched (``detail``), the stratum it was selected in (same string as
+    ``stratum`` in ``_group_counts.tsv``), and whether it ended up a
+    representative. The representative flag reads the final rep set, so a
+    force-selected sequence counts. Rows are sorted by field, stratum, then
+    representatives first. Returns ``False`` (writing nothing) for the other
+    modes, which record no assignments.
+    """
+    if not result.group_assignments:
+        return False
+    rep_ids = {seq.id for seq in result.representatives}
+    field_order = {
+        f: i for i, f in enumerate(dict.fromkeys(
+            a["stratified_by"] for a in result.group_assignments))
+    }
+    rows = sorted(
+        result.group_assignments,
+        key=lambda a: (
+            field_order[a["stratified_by"]], a["stratum"],
+            a["seq_id"] not in rep_ids, a["isolate_id"] or a["accessions"],
+        ),
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("\t".join(_GROUP_ASSIGNMENT_COLUMNS) + "\n")
+        for a in rows:
+            cells = [_tsv_safe(a[c]) for c in _GROUP_ASSIGNMENT_COLUMNS[:-1]]
+            cells.append(_tsv_bool(a["seq_id"] in rep_ids))
+            fh.write("\t".join(cells) + "\n")
+    return True
+
+
 def write_excluded_tsv(cfg: dict[str, Any], path: Path) -> bool:
     """Write the input-blocklist audit TSV (overrides.exclude).
 
@@ -3171,6 +3215,11 @@ def write_all_reports(
     excluded_path = out_dir / f"{prefix}_excluded.tsv"
     if write_excluded_tsv(cfg, excluded_path):
         output_files.append(excluded_path)
+    # Group labels of the custom / hybrid modes (incl. metadata-table
+    # matching): only those two modes record assignments.
+    assignments_path = out_dir / f"{prefix}_group_assignments.tsv"
+    if write_group_assignments_tsv(result, assignments_path):
+        output_files.append(assignments_path)
     # Mode-aware: segmented runs produce one row per representative
     # isolate (CONCAT|<isolate_id> Sequence with concat_segments
     # populated); non-segmented runs produce one row per representative

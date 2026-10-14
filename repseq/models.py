@@ -578,3 +578,9 @@ class RunResult:
     # already_representative / unavailable. Written to
     # {prefix}_force_selected.tsv and summarised in {prefix}_summary.md.
     force_selected: list[dict] = field(default_factory=list)
+    # custom / hybrid modes: one entry per pool sequence (per field, for
+    # hybrid) recording its group label and where the label came from
+    # (metadata table, attribute, taxonomy, header regex, or none).
+    # Written to {prefix}_group_assignments.tsv; the writer adds the
+    # representative flag from the final (post-force-select) rep set.
+    group_assignments: list[dict] = field(default_factory=list)

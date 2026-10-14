@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-from itertools import product
 from typing import Any, Optional
 
 from ..clustering import compute_diversity_curve
+from ..errors import InputError
 from ..models import Cluster, GroupStat, RunResult, Sequence
 from .base import BaseMode
-from .custom_mode import _get_field_value, load_metadata_table
+from .custom_mode import (
+    FieldValue,
+    MetadataTable,
+    assignment_row,
+    load_metadata_table,
+    report_table_coverage,
+    resolve_field,
+)
 from .taxonomic1 import _binary_search_threshold
 
 
@@ -16,22 +23,20 @@ from .taxonomic1 import _binary_search_threshold
 # Multi-key grouping
 # ---------------------------------------------------------------------------
 
-def _multi_group(
+def _resolve_all(
     sequences: list[Sequence],
     fields: list[str],
-    metadata_table: Optional[dict[str, dict[str, str]]],
+    metadata_table: Optional[MetadataTable],
     field_regexes: Optional[dict[str, str]],
-) -> dict[tuple[str, ...], list[Sequence]]:
-    """Group sequences by a composite key of multiple fields."""
-    groups: dict[tuple[str, ...], list[Sequence]] = {}
-    for seq in sequences:
-        key_parts: list[str] = []
-        for field in fields:
-            regex = (field_regexes or {}).get(field)
-            key_parts.append(_get_field_value(seq, field, metadata_table, regex))
-        key = tuple(key_parts)
-        groups.setdefault(key, []).append(seq)
-    return groups
+) -> list[list[FieldValue]]:
+    """Per sequence, the resolved value of each field (in ``fields`` order)."""
+    return [
+        [
+            resolve_field(seq, field, metadata_table, (field_regexes or {}).get(field))
+            for field in fields
+        ]
+        for seq in sequences
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -70,14 +75,42 @@ class HybridMode(BaseMode):
         self.n_per_group = n_per_group
         self.overflow = overflow
         self.field_regexes = field_regexes or {}
-        self.metadata_table: Optional[dict[str, dict[str, str]]] = None
+        self.metadata_table: Optional[MetadataTable] = None
         if metadata_table_path:
             self.metadata_table = load_metadata_table(metadata_table_path)
+            if not any(self.metadata_table.column_for(f) for f in fields):
+                raise InputError(
+                    f"None of --fields ({', '.join(fields)}) is a column of "
+                    f"{self.metadata_table.path.name}.\n"
+                    f"       Columns found: "
+                    f"{', '.join(self.metadata_table.columns)}\n"
+                    f"       Name at least one of those in --fields (upper / "
+                    f"lower case does not matter), or drop --metadata-table."
+                )
 
     def run(self, sequences: list[Sequence]) -> RunResult:
-        groups = _multi_group(
+        resolved = _resolve_all(
             sequences, self.fields, self.metadata_table, self.field_regexes
         )
+        coverage: dict[str, dict[str, int]] = {}
+        if self.metadata_table is not None:
+            for j, field in enumerate(self.fields):
+                if self.metadata_table.column_for(field) is None:
+                    continue
+                coverage[field] = report_table_coverage(
+                    field, sequences, [vals[j] for vals in resolved],
+                    self.metadata_table, self.cfg, "hybrid",
+                )
+
+        groups: dict[tuple[str, ...], list[Sequence]] = {}
+        assignments: list[dict[str, str]] = []
+        for seq, vals in zip(sequences, resolved):
+            key = tuple(v.value for v in vals)
+            groups.setdefault(key, []).append(seq)
+            label = "|".join(f"{f}={v}" for f, v in zip(self.fields, key))
+            for field, fv in zip(self.fields, vals):
+                assignments.append(assignment_row(seq, field, fv, label))
+
         all_reps: list[Sequence] = []
         all_clusters: list[Cluster] = []
         group_stats: list[GroupStat] = []
@@ -110,17 +143,23 @@ class HybridMode(BaseMode):
                     grouping=grouping, group=label,
                     n_before=len(group_seqs), n_after=len(clusters),
                     clustered=True, cutoff=threshold,
-                    cutoff_counts=compute_diversity_curve(group_seqs, self.cfg),
+                    cutoff_counts=compute_diversity_curve(
+                        group_seqs, self.cfg, label=label),
                 ))
 
+        snapshot: dict[str, Any] = {
+            "fields": self.fields,
+            "n_per_group": self.n_per_group,
+            "overflow": self.overflow,
+        }
+        if self.metadata_table is not None:
+            snapshot["metadata_table"] = str(self.metadata_table.path)
+            snapshot["table_coverage"] = coverage
         return RunResult(
             mode="hybrid",
             representatives=all_reps,
             clusters=all_clusters,
             group_stats=group_stats,
-            config_snapshot={
-                "fields": self.fields,
-                "n_per_group": self.n_per_group,
-                "overflow": self.overflow,
-            },
+            config_snapshot=snapshot,
+            group_assignments=assignments,
         )

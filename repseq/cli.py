@@ -3003,25 +3003,61 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
 # run custom
 # ---------------------------------------------------------------------------
 
+_METADATA_TABLE_HELP = (
+    "TSV/CSV table (tab, comma or semicolon separated) of per-sequence or "
+    "per-isolate metadata, e.g. a Nextclade or GenoFLU result. Rows are "
+    "matched on an accession, id, isolate, isolate_id, strain or seqName "
+    "column (case and accession version ignored); in segmented runs any "
+    "segment's accession reaches its isolate. Sequences with no value go to "
+    "an 'Unknown' group, isolates whose rows disagree to 'Conflict'; the run "
+    "stops if no row matches at all. Labels: {prefix}_group_assignments.tsv."
+)
+
+
 @main.command("custom")
 @_shared_options
 @click.option("--field", "-f", required=True,
-              help="Field name to group by (attribute, taxonomy rank, or metadata column).")
+              help="Field name to group by: a column of --metadata-table "
+                   "(e.g. clade, genotype), a sequence attribute (host, "
+                   "country, subtype, ...) or a taxonomy rank.")
 @click.option("--n-per-group", "-n", required=True, type=int,
               help="Target representatives per group.")
 @click.option("--metadata-table", default=None,
-              help="Path to TSV/CSV metadata table with accession column.")
+              help=_METADATA_TABLE_HELP)
 @click.option("--field-regex", default=None,
-              help="Regex to extract the field value from FASTA headers.")
+              help="Regex to extract the field value from FASTA headers "
+                   "(segmented: the original per-segment headers).")
 def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
                segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,field, n_per_group,
                metadata_table, field_regex):
-    """Custom metadata mode: group by any field or metadata table column."""
+    """Custom metadata mode: group by any field or metadata table column.
+
+    Selects up to -n representatives per value of --field. To select per
+    influenza clade or genotype, classify your sequences first (e.g.
+    Nextclade for H5 HA clades, GenoFLU for genotypes) and pass the result
+    as --metadata-table:
+
+    \b
+      repseq custom -c cfg.yaml -i flu.fasta --segmented \\
+          --field clade --metadata-table nextclade.tsv -n 5
+
+    Each sequence's label is written to {prefix}_group_assignments.tsv.
+    """
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
                              verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
     if segmented:
         cfg["segmented"]["enabled"] = True
+
+    # Built before the pipeline so a missing / malformed metadata table
+    # fails in seconds rather than after metadata resolution and QC.
+    from .modes.custom_mode import CustomMode
+    mode = CustomMode(
+        cfg, field=field, n_per_group=n_per_group,
+        metadata_table_path=metadata_table,
+        field_regex=field_regex,
+        overflow=overflow,
+    )
     if dry_run:
         click.echo("Dry run — config valid. Exiting.")
         return
@@ -3039,13 +3075,6 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
 
-    from .modes.custom_mode import CustomMode
-    mode = CustomMode(
-        cfg, field=field, n_per_group=n_per_group,
-        metadata_table_path=metadata_table,
-        field_regex=field_regex,
-        overflow=overflow,
-    )
     result = mode.run(sequences)
     result.qc_report = qc_report
 
@@ -3063,17 +3092,30 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-group", "-n", required=True, type=int,
               help="Target representatives per stratum.")
 @click.option("--metadata-table", default=None,
-              help="Path to TSV/CSV metadata table with accession column.")
+              help=_METADATA_TABLE_HELP)
 def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
                segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,fields, n_per_group,
                metadata_table):
-    """Hybrid mode: multi-dimensional stratification (e.g. genus × host × year)."""
+    """Hybrid mode: multi-dimensional stratification (e.g. genus × host × year).
+
+    Fields can mix sequence attributes, taxonomy ranks and columns of
+    --metadata-table (e.g. --fields clade,host). Each sequence's labels are
+    written to {prefix}_group_assignments.tsv.
+    """
     field_list = [f.strip() for f in fields.split(",")]
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
                              verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
     if segmented:
         cfg["segmented"]["enabled"] = True
+
+    # Built before the pipeline so a missing / malformed metadata table
+    # fails in seconds rather than after metadata resolution and QC.
+    from .modes.hybrid_mode import HybridMode
+    mode = HybridMode(
+        cfg, fields=field_list, n_per_group=n_per_group,
+        overflow=overflow, metadata_table_path=metadata_table,
+    )
     if dry_run:
         click.echo("Dry run — config valid. Exiting.")
         return
@@ -3091,11 +3133,6 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
 
-    from .modes.hybrid_mode import HybridMode
-    mode = HybridMode(
-        cfg, fields=field_list, n_per_group=n_per_group,
-        overflow=overflow, metadata_table_path=metadata_table,
-    )
     result = mode.run(sequences)
     result.qc_report = qc_report
 

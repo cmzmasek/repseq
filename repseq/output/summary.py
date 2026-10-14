@@ -808,6 +808,8 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
             "`{prefix}_force_selected.tsv`."
         )
 
+    group_sentence = _group_assignment_sentence(result, segmented)
+
     hmm_sentence = ""
     hmm_rt = cfg.get("_hmm_runtime", {}) or {}
     if hmm_rt.get("active"):
@@ -855,7 +857,7 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
     else:
         lead = (
             f"Clustering was performed on {input_desc} using **{tool_name}** "
-            f"({tool_cite}). {mode_desc}{hmm_sentence} Within each cluster the "
+            f"({tool_cite}). {mode_desc}{group_sentence}{hmm_sentence} Within each cluster the "
             f"representative was chosen by the configured priority "
             f"(**{priority}**, with sequence length as the final tiebreaker). "
             f"The final set contains **{_fmt_int(n_reps)} {rep_unit}** "
@@ -914,6 +916,61 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
         f"under `--per-protein-phylo` a separate tree per entry is also "
         f"emitted into `{{prefix}}_extra_protein/`.\n"
     )
+
+
+def _group_assignment_sentence(result: RunResult, segmented: bool) -> str:
+    """Methods prose for the custom / hybrid group labels: where they came
+    from (metadata table coverage) and where they are listed."""
+    if not result.group_assignments:
+        return ""
+    unit = "isolates" if segmented else "sequences"
+    snapshot = result.config_snapshot or {}
+    table = snapshot.get("metadata_table")
+    coverage = snapshot.get("table_coverage") or {}
+    out = ""
+    if table and coverage:
+        name = Path(table).name
+        fallback_groups: set[str] = set()
+        for field, c in coverage.items():
+            out += (
+                f" Group labels for `{field}` were read from a user-supplied "
+                f"metadata table (`{name}`): **{_fmt_int(c['table'])} of "
+                f"{_fmt_int(c['n'])}** {unit} matched a table row (by "
+                f"accession, id, isolate name or strain, ignoring case and "
+                f"accession version"
+                + ("; an isolate is matched through any of its segments' "
+                   "accessions" if segmented else "")
+                + ")."
+            )
+            if c.get("other"):
+                out += (
+                    f" {_fmt_int(c['other'])} took their label from a "
+                    f"sequence attribute, taxonomy rank or header pattern "
+                    f"instead."
+                )
+            if c.get("unknown"):
+                fallback_groups.add("Unknown")
+                out += (
+                    f" {_fmt_int(c['unknown'])} without a label formed an "
+                    f"`Unknown` group."
+                )
+            if c.get("conflict"):
+                fallback_groups.add("Conflict")
+                out += (
+                    f" {_fmt_int(c['conflict'])} whose table rows disagreed "
+                    f"formed a `Conflict` group."
+                )
+        if fallback_groups:
+            names = " and ".join(f"`{g}`" for g in sorted(fallback_groups, reverse=True))
+            out += (
+                f" The {names} group{'s were' if len(fallback_groups) > 1 else ' was'} "
+                f"sampled like any other group."
+            )
+    out += (
+        f" The label of every {unit[:-1]}, and how it was assigned, is "
+        f"listed in `{{prefix}}_group_assignments.tsv`."
+    )
+    return out
 
 
 def _describe_mode(mode: str, cfg: dict) -> str:

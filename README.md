@@ -136,7 +136,7 @@ each group*. All modes take `-i` (input), `-c` (config), and most take `-n`
 | `host` | Up to `-n` sequences per host organism. | You care which host the virus came from. |
 | `time` | Up to `-n` per time window — `--window year`, `decade`, or a number like `5` for 5-year bins. | You want even coverage across collection dates. |
 | `geographic` | Up to `-n` per country. | You want even geographic coverage. |
-| `custom` | Up to `-n` per *any* field — a sequence attribute, a taxonomy rank, or a column in a metadata spreadsheet you provide. | Your grouping isn't one of the built-ins. |
+| `custom` | Up to `-n` per *any* field — a sequence attribute, a taxonomy rank, or a column in a metadata spreadsheet you provide (e.g. an influenza clade or genotype — see [Selecting per clade or genotype](#selecting-per-clade-or-genotype-metadata-tables)). | Your grouping isn't one of the built-ins. |
 | `hybrid` | Up to `-n` per *combination* of fields, e.g. `--fields genus,host,decade`. | You want a balanced grid across several variables at once. |
 
 **Within each group**, if it already has `-n` or fewer sequences, all are kept.
@@ -164,6 +164,59 @@ Every mode also accepts: `--input/-i`, `--output-dir/-o`, `--config/-c`,
 (force-select a list as representatives), `--exclude-ids FILE` (blocklist a list
 out of the input) — see
 [Sequences of special importance](#sequences-of-special-importance--overrides).
+
+### Selecting per clade or genotype (metadata tables)
+
+`custom` and `hybrid` can group by a column of a table you supply with
+`--metadata-table`. The typical use is choosing representatives per influenza
+clade or genotype. repseq does not assign clades itself, so classify your
+sequences first and pass the classifier's output:
+
+```bash
+# H5 HA clades from Nextclade, 5 representatives per clade
+repseq custom -c cfg.yaml -i flu.fasta --segmented \
+    --field clade --metadata-table nextclade.tsv -n 5
+
+# a clade x host grid
+repseq hybrid -c cfg.yaml -i flu.fasta --segmented \
+    --fields clade,host --metadata-table nextclade.tsv -n 3
+```
+
+**The table.** Tab-, comma- or semicolon-separated (detected from the header
+line), so Nextclade's `.tsv` and `.csv` both work, as does an Excel CSV
+export. It needs one column saying which sequence or isolate a row
+describes — `accession`, `id`, `isolate`, `isolate_id`, `strain` or
+Nextclade's `seqName` (the whole FASTA header; only its leading identifier is
+used) — plus the column you group by. Column names are matched ignoring
+upper / lower case.
+
+**How rows are matched.** Identifiers are compared ignoring case, whitespace
+vs. underscores, and accession version (`PQ123456` matches `PQ123456.1`). In
+a segmented run, an isolate is matched through its isolate name, its strain
+and **every one of its segments' accessions** — so a Nextclade table keyed by
+HA accession and a GenoFLU table keyed by isolate name both work.
+
+**Isolates without a label** (not in the table, or a blank cell) fall back to a
+sequence attribute or taxonomy rank of the same name if there is one, and
+otherwise form an `Unknown` group. **Isolates whose rows disagree** (e.g. the
+table gives their HA and NA accessions different clades) form a `Conflict`
+group, with a warning. Both groups are sampled like any other, so nothing
+disappears silently. The run prints how many isolates took their label from the
+table, and **stops with an error if no row matches at all** — that almost always
+means the key column holds something other than your accessions or isolate
+names. Each isolate's label and how it was matched are listed in
+[`{prefix}_group_assignments.tsv`](#prefix_group_assignmentstsv--custom--hybrid-modes).
+
+Things to know:
+
+- **Classifier scope.** GenoFLU genotypes cover North American H5N1 clade
+  2.3.4.4b; on a global H5 dataset most isolates would land in `Unknown`. HA
+  clades cover all H5 viruses.
+- **Clade depth.** H5 clades are hierarchical (2.3.4.4b sits inside 2.3.4.4).
+  To group at a coarser level, put the coarser label in its own column and
+  name that column in `--field`.
+- **Checking a table first.** `--dry-run` loads the table and checks the
+  column names, without running the pipeline.
 
 Two diagnostic/utility subcommands:
 
@@ -246,6 +299,7 @@ flags you passed. At a glance:
 | `{prefix}_force_selected.tsv` | when any sequence was force-selected | Force-select audit: each `overrides.force_select` / `--pin-ids` pin and the action taken. |
 | `{prefix}_excluded.tsv` | when any sequence was blocklisted | Input-blocklist audit: each `overrides.exclude` / `--exclude-ids` record dropped on load, plus any exclude id that matched nothing. |
 | `{prefix}_group_counts.tsv` | yes | One row per stratum: in / out / clustered / cutoff. |
+| `{prefix}_group_assignments.tsv` | `custom` / `hybrid` modes | Each isolate's (or sequence's) group label, where it came from (metadata table, attribute, taxonomy, header regex), and whether it became a representative. |
 | `{prefix}_clusters.tsv` | yes | Which sequences ended up grouped, who represents whom. |
 | `{prefix}_representatives.fasta` | non-segmented | Selected representative sequences. |
 | `{prefix}_representative_sequences.tsv` | non-segmented | Per-representative metadata spreadsheet. |
@@ -532,6 +586,24 @@ The input-blocklist audit for `overrides.exclude` / `--exclude-ids`. Columns:
 matched no input sequence — a typo-catcher). Only written when at least one
 record was excluded. See
 [Excluding bad sequences](#excluding-bad-sequences).
+
+#### `{prefix}_group_assignments.tsv` — custom / hybrid modes
+
+One row per isolate (segmented) or sequence (non-segmented) in the pool that
+was grouped — one row per field for `hybrid`. Columns: `isolate_id` (blank in
+non-segmented runs), `strain`, `accessions` (comma-joined segment accessions
+for an isolate), `stratified_by` (the field), `value` (its label),
+`matched_by`, `detail`, `stratum` (the same string as in `_group_counts.tsv`,
+so the two files join), and `representative` (`TRUE`/`FALSE`, including
+force-selected representatives).
+
+`matched_by` says where the label came from: `table:accession`, `table:id`,
+`table:isolate` or `table:strain` (the identifier that reached a
+`--metadata-table` row), `attribute`, `taxonomy`, `header_regex`, `conflict`
+(rows with different values — `detail` lists each one), or `none` (no label,
+grouped as `Unknown`). For a table match `detail` names the identifier, e.g.
+`PQ123456.1 (segment 4)`. Rows are sorted by stratum, representatives first.
+See [Selecting per clade or genotype](#selecting-per-clade-or-genotype-metadata-tables).
 
 #### `{prefix}_hmm_diagnostic.tsv` — when the HMM tier ran
 
