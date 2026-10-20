@@ -535,13 +535,21 @@ def _write_specs_to_fastas(
     sub_dir: Path,
     prefix: str,
     label: str,
+    *,
+    extra: bool = False,
 ) -> list[Path]:
     """Emit one unaligned protein FASTA per spec under ``sub_dir``.
 
     Shared engine for ``write_per_protein_fastas`` (cluster_protein /
     segment_markers) and ``write_extra_protein_fastas`` (extra_protein).
     Spec format: ``(family_label, hmm_tokens, aliases, segment_or_None)``.
-    ``label`` is used only in the soft-fail stderr line.
+    ``label`` is used in the stderr lines.
+
+    ``extra=True`` (the extra_protein writer) picks through
+    :func:`phylo.per_protein.pick_extra_cds` — HMM-claimed CDSes are
+    withheld from alias specs and ``length_aa`` bounds apply — and prints
+    one stderr block per spec listing the CDSes it set aside, since those
+    are usually GenBank ``/product`` mislabels worth knowing about.
 
     Filename: ``{sub_dir}/{prefix}_{family_label}.fasta`` — the prefix
     inside the basename matches the existing improvement-#1 pattern and
@@ -550,7 +558,9 @@ def _write_specs_to_fastas(
     from ..phylo.per_protein import (
         _hmm_tier_ran,
         _segment_proteins,
+        build_extra_pick_context,
         overlap_tolerance_from_cfg,
+        pick_extra_cds,
     )
 
     if not specs:
@@ -566,9 +576,12 @@ def _write_specs_to_fastas(
         )
         return []
 
+    extra_ctx = build_extra_pick_context(cfg, hmm_active) if extra else None
+
     written: list[Path] = []
     for family_label, hmm_tokens, aliases, segment in specs:
         records: list[tuple[Optional[str], Sequence, dict]] = []
+        set_aside_rows: list[tuple[Optional[str], dict, str]] = []
         for rep in result.representatives:
             # Pick the parent Sequence the CDS lives on so its segment/
             # accession/host/etc. drive the FASTA header tags.
@@ -592,13 +605,22 @@ def _write_specs_to_fastas(
                         isolate_id = parts[1]
 
             proteins = _segment_proteins(rep, segment) if segment else (rep.proteins or [])
-            cds = _pick_marker_cds(
-                proteins, hmm_tokens, aliases, hmm_active,
-                overlap_tolerance=tol,
-            )
+            if extra_ctx is not None:
+                cds, set_aside = pick_extra_cds(
+                    proteins, family_label, hmm_tokens, aliases, segment, extra_ctx,
+                )
+                set_aside_rows.extend((isolate_id, p, why) for p, why in set_aside)
+            else:
+                cds = _pick_marker_cds(
+                    proteins, hmm_tokens, aliases, hmm_active,
+                    overlap_tolerance=tol,
+                )
             if cds is None:
                 continue
             records.append((isolate_id, parent, cds))
+
+        if set_aside_rows:
+            _report_set_aside(label, family_label, set_aside_rows)
 
         if not records:
             continue
@@ -676,7 +698,41 @@ def write_extra_protein_fastas(
         result, cfg,
         out_dir / f"{prefix}_extra_protein_fasta",
         prefix, "extra-protein",
+        extra=True,
     )
+
+
+# How many set-aside CDSes to list per spec before summarising the rest.
+_SET_ASIDE_LIST_MAX = 10
+
+
+def _report_set_aside(
+    label: str,
+    family_label: str,
+    rows: list[tuple[Optional[str], dict, str]],
+) -> None:
+    """One stderr block per extra_protein spec naming the CDSes it withheld.
+
+    These are CDSes that matched the spec's aliases (or satisfied its HMM
+    tokens) but were set aside because an HMM spec had already selected
+    them, or because they fall outside the spec's ``length_aa``. Most are
+    GenBank ``/product`` mislabels, so the block names each one — accession,
+    length, product, isolate, reason — for the user to inspect.
+    """
+    lines = [
+        f"[{label}] {family_label}: left out {len(rows)} CDS that matched "
+        f"this spec — usually a mislabelled GenBank /product, or a fragment "
+        f"outside length_aa:"
+    ]
+    for iso, prot, why in rows[:_SET_ASIDE_LIST_MAX]:
+        pid = prot.get("protein_id") or "?"
+        n = len(prot.get("sequence") or "")
+        product = prot.get("product") or ""
+        where = f", isolate {iso}" if iso else ""
+        lines.append(f'    {pid} ({n} aa, "{product}"{where}) — {why}')
+    if len(rows) > _SET_ASIDE_LIST_MAX:
+        lines.append(f"    ... and {len(rows) - _SET_ASIDE_LIST_MAX} more")
+    sys.stderr.write("\n".join(lines) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -1817,6 +1873,7 @@ def _coverage_data_per_taxon(
     hmm_active: bool,
     rank: str,
     overlap_tolerance: int = 0,
+    extra_ctx: Optional[Any] = None,
 ) -> tuple[dict[str, int], dict[str, list[list[int]]]]:
     """For each taxon at ``rank``, count items and gather per-spec AA lengths.
 
@@ -1832,9 +1889,12 @@ def _coverage_data_per_taxon(
     Items whose taxonomy lacks a value at ``rank`` are excluded (mirrors
     ``_taxonomic_report.txt`` behaviour). The picker chain is the same
     one used for the per-protein FASTAs and trees, so a coverage hit
-    here corresponds exactly to a record in the matching artifact.
+    here corresponds exactly to a record in the matching artifact —
+    including, for extra_protein specs (``is_cluster`` False) when
+    ``extra_ctx`` is given, the claiming + ``length_aa`` rules of
+    :func:`phylo.per_protein.pick_extra_cds`.
     """
-    from ..phylo.per_protein import pick_marker_cds
+    from ..phylo.per_protein import pick_extra_cds, pick_marker_cds
 
     taxon_totals: dict[str, int] = {}
     taxon_lengths: dict[str, list[list[int]]] = {}
@@ -1847,12 +1907,17 @@ def _coverage_data_per_taxon(
         taxon_totals[taxon] = taxon_totals.get(taxon, 0) + 1
         if taxon not in taxon_lengths:
             taxon_lengths[taxon] = [[] for _ in range(n_specs)]
-        for i, (_label, tokens, aliases, segment, _is_cluster) in enumerate(specs):
+        for i, (label, tokens, aliases, segment, is_cluster) in enumerate(specs):
             proteins = _proteins_at_segment(seq, segment)
-            cds = pick_marker_cds(
-                proteins, tokens, aliases, hmm_active,
-                overlap_tolerance=overlap_tolerance,
-            )
+            if extra_ctx is not None and not is_cluster:
+                cds, _set_aside = pick_extra_cds(
+                    proteins, label, tokens, aliases, segment, extra_ctx,
+                )
+            else:
+                cds = pick_marker_cds(
+                    proteins, tokens, aliases, hmm_active,
+                    overlap_tolerance=overlap_tolerance,
+                )
             if cds is None:
                 continue
             seq_str = cds.get("sequence") or ""
@@ -2019,6 +2084,49 @@ def _format_hmm_architecture_section(
     return lines
 
 
+def _format_extra_selection_section(
+    specs: list[tuple[str, list[str], list[str], Optional[str], bool]],
+    cfg: dict[str, Any],
+) -> list[str]:
+    """How the extra_protein specs pick their CDS: aliases, the
+    "HMM specs choose first" rule, and any ``length_aa`` bounds.
+
+    Emitted only when at least one extra_protein spec is alias-only or
+    declares ``length_aa`` — HMM-only, unbounded extra specs are fully
+    described by the architecture section above.
+    """
+    from ..phylo.per_protein import collect_extra_length_bounds, format_length_bounds
+
+    bounds = collect_extra_length_bounds(cfg)
+    rows: list[str] = []
+    for label, tokens, aliases, segment, is_cluster in specs:
+        if is_cluster:
+            continue
+        b = bounds.get((label, segment))
+        if tokens and not b:
+            continue
+        scope = f" (segment {segment})" if segment else ""
+        parts: list[str] = []
+        if not tokens:
+            parts.append("aliases " + " | ".join(f'"{a}"' for a in aliases))
+        if b:
+            parts.append(f"length_aa {format_length_bounds(b)}")
+        rows.append(f"{label}{scope}: {'; '.join(parts)}")
+    if not rows:
+        return []
+    return [
+        "== Accessory-protein (extra_protein) selection ==",
+        "",
+        "Alias-only specs match the GenBank /product label (case-insensitive "
+        "substring; the longest match wins) and never take a CDS that an HMM "
+        "spec in the same scope already selected. length_aa bounds (amino "
+        "acids, inclusive) drop out-of-range CDSes before the pick.",
+        "",
+        *rows,
+        "",
+    ]
+
+
 def write_protein_taxonomic_report(
     before_seqs: list[Sequence],
     after_seqs: list[Sequence],
@@ -2044,7 +2152,11 @@ def write_protein_taxonomic_report(
     coverage hit here corresponds exactly to a record in those
     artifacts.
     """
-    from ..phylo.per_protein import _hmm_tier_ran, overlap_tolerance_from_cfg
+    from ..phylo.per_protein import (
+        _hmm_tier_ran,
+        build_extra_pick_context,
+        overlap_tolerance_from_cfg,
+    )
 
     specs = _protein_report_specs(cfg)
     if not specs:
@@ -2055,6 +2167,7 @@ def write_protein_taxonomic_report(
 
     hmm_active = _hmm_tier_ran(cfg, after_seqs)
     tol = overlap_tolerance_from_cfg(cfg)
+    extra_ctx = build_extra_pick_context(cfg, hmm_active)
     spec_headers = [
         f"{label}{'*' if is_cluster else ''}"
         for label, _t, _a, _s, is_cluster in specs
@@ -2087,9 +2200,11 @@ def write_protein_taxonomic_report(
     for rank in _PROTEIN_REPORT_RANKS:
         b_totals, b_lengths = _coverage_data_per_taxon(
             before_seqs, specs, hmm_active, rank, overlap_tolerance=tol,
+            extra_ctx=extra_ctx,
         )
         a_totals, a_lengths = _coverage_data_per_taxon(
             after_seqs, specs, hmm_active, rank, overlap_tolerance=tol,
+            extra_ctx=extra_ctx,
         )
         n_distinct = len(b_totals)
         if n_distinct == 0:
@@ -2146,6 +2261,7 @@ def write_protein_taxonomic_report(
         lines.append("")
 
     lines.extend(_format_hmm_architecture_section(specs, cfg))
+    lines.extend(_format_extra_selection_section(specs, cfg))
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines).rstrip() + "\n")
@@ -2689,7 +2805,11 @@ def write_protein_taxonomic_report_tsv(
     — no fake zeros that would skew downstream aggregations).
     Returns False (writes nothing) when no protein specs are configured.
     """
-    from ..phylo.per_protein import _hmm_tier_ran, overlap_tolerance_from_cfg
+    from ..phylo.per_protein import (
+        _hmm_tier_ran,
+        build_extra_pick_context,
+        overlap_tolerance_from_cfg,
+    )
 
     specs = _protein_report_specs(cfg)
     if not specs:
@@ -2697,6 +2817,7 @@ def write_protein_taxonomic_report_tsv(
 
     hmm_active = _hmm_tier_ran(cfg, after_seqs)
     tol = overlap_tolerance_from_cfg(cfg)
+    extra_ctx = build_extra_pick_context(cfg, hmm_active)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fh:
@@ -2704,9 +2825,11 @@ def write_protein_taxonomic_report_tsv(
         for rank in _PROTEIN_REPORT_RANKS:
             b_totals, b_lengths = _coverage_data_per_taxon(
                 before_seqs, specs, hmm_active, rank, overlap_tolerance=tol,
+                extra_ctx=extra_ctx,
             )
             a_totals, a_lengths = _coverage_data_per_taxon(
                 after_seqs, specs, hmm_active, rank, overlap_tolerance=tol,
+                extra_ctx=extra_ctx,
             )
             for pool_label, totals, lengths in (
                 ("post_qc", b_totals, b_lengths),

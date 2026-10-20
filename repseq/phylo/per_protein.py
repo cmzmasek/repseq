@@ -235,6 +235,46 @@ def collect_marker_specs(
     return specs
 
 
+def _iter_extra_entries(
+    cfg: dict[str, Any],
+) -> list[tuple[str, list[str], list[str], Optional[str], dict]]:
+    """Every usable ``extra_protein`` entry as ``(label, tokens, aliases,
+    segment_or_None, raw_entry)``, in declaration order.
+
+    Single source for :func:`collect_extra_specs` and
+    :func:`collect_extra_length_bounds`, so the two can never disagree on
+    which entries exist or how they are labelled.
+    """
+    def _one(entry: Any, seg: Optional[str]):
+        if not isinstance(entry, dict):
+            return None
+        name = (entry.get("name") or "").strip()
+        if not name:
+            return None
+        tokens = _dedup(list(entry.get("hmms") or []))
+        aliases = _dedup(list(entry.get("aliases") or []))
+        if not tokens and not aliases:
+            return None
+        return (_sanitize(name), tokens, aliases, seg, entry)
+
+    out = []
+    segmented = bool((cfg.get("segmented", {}) or {}).get("enabled"))
+    if segmented:
+        virus = get_virus_config(cfg) or {}
+        extra = virus.get("extra_protein") or {}
+        for seg_name, entries in extra.items():
+            for entry in entries or []:
+                item = _one(entry, seg_name)
+                if item is not None:
+                    out.append(item)
+    else:
+        for entry in (cfg.get("clustering", {}) or {}).get("extra_protein", []) or []:
+            item = _one(entry, None)
+            if item is not None:
+                out.append(item)
+    return out
+
+
 def collect_extra_specs(
     cfg: dict[str, Any],
 ) -> list[tuple[str, list[str], list[str], Optional[str]]]:
@@ -252,38 +292,219 @@ def collect_extra_specs(
     is taken from the spec name verbatim (sanitised for the filesystem) —
     no segment prefix even in segmented mode, since the user's filenames
     use the name alone.
-    """
-    specs: list[tuple[str, list[str], list[str], Optional[str]]] = []
 
-    segmented = bool((cfg.get("segmented", {}) or {}).get("enabled"))
-    if segmented:
-        virus = get_virus_config(cfg) or {}
-        extra = virus.get("extra_protein") or {}
-        for seg_name, entries in extra.items():
-            for entry in entries or []:
-                if not isinstance(entry, dict):
+    The optional ``length_aa`` bounds are NOT part of this tuple (its
+    4-element shape is shared with the marker specs); read them with
+    :func:`collect_extra_length_bounds`, or pick CDSes through
+    :func:`pick_extra_cds`, which applies them.
+    """
+    return [
+        (label, tokens, aliases, seg)
+        for label, tokens, aliases, seg, _entry in _iter_extra_entries(cfg)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# extra_protein CDS picking (v0.75.0): "HMM specs choose first" + length_aa
+# ---------------------------------------------------------------------------
+#
+# An alias is a case-insensitive SUBSTRING of /product, and GenBank /product
+# labels are sometimes wrong — e.g. a tospovirus M segment whose 1,129 aa
+# glycoprotein precursor is labelled "NSm" while its real 303 aa NSm is
+# labelled "Gn/Gc" (submitter label swap). The alias picker keeps the LONGEST
+# match, so the mislabelled glycoprotein won and landed in the NSm file.
+#
+# Two guards, both applied only to ``extra_protein`` specs (never to the
+# cluster-marker specs, whose per-protein FASTA must keep showing exactly the
+# CDS that clustering used — see ``clustering.marker.select_marker_protein``):
+#
+# 1. Claiming. Within one scope (a segment; the whole sequence when
+#    non-segmented), a CDS that a declared HMM-bearing spec PICKS — a cluster
+#    marker or an HMM extra_protein spec — is withheld from alias matching.
+#    HMM evidence of identity outranks a free-text label. Only the CDS a spec
+#    actually picks is claimed (not every CDS that merely satisfies its
+#    tokens), so a shorter protein sharing a domain with the marker (the
+#    influenza PA-X / PA shape) stays available. Claiming needs the HMM tier;
+#    without it nothing is claimed and picking is exactly as before.
+# 2. ``length_aa: [min, max]`` (inclusive; either end may be null). Candidate
+#    CDSes outside the bounds are dropped BEFORE the pick, so an out-of-range
+#    longer match cannot hide an in-range one. Applies to alias and HMM
+#    extra_protein specs alike.
+
+LengthBounds = tuple[Optional[int], Optional[int]]
+
+
+def _length_bounds(raw: Any) -> Optional[LengthBounds]:
+    """``[min, max]`` → ``(min, max)``; ``None`` when absent or malformed.
+
+    Validation rejects malformed values at load; this stays defensive so a
+    hand-built cfg (tests, replay) can't crash the writers.
+    """
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        return None
+    lo, hi = raw
+    lo = lo if isinstance(lo, int) and not isinstance(lo, bool) else None
+    hi = hi if isinstance(hi, int) and not isinstance(hi, bool) else None
+    if lo is None and hi is None:
+        return None
+    return (lo, hi)
+
+
+def format_length_bounds(bounds: Optional[LengthBounds]) -> str:
+    """``(250, 400)`` → ``"[250, 400]"``; an open end renders as ``null``."""
+    if not bounds:
+        return "[null, null]"
+    lo, hi = bounds
+    return f"[{'null' if lo is None else lo}, {'null' if hi is None else hi}]"
+
+
+def _within_bounds(prot: dict, bounds: Optional[LengthBounds]) -> bool:
+    if not bounds:
+        return True
+    n = len(prot.get("sequence") or "")
+    lo, hi = bounds
+    return (lo is None or n >= lo) and (hi is None or n <= hi)
+
+
+def collect_extra_length_bounds(
+    cfg: dict[str, Any],
+) -> dict[tuple[str, Optional[str]], LengthBounds]:
+    """``{(family_label, segment_or_None): (min, max)}`` for every
+    ``extra_protein`` entry that declares ``length_aa``."""
+    out: dict[tuple[str, Optional[str]], LengthBounds] = {}
+    for label, _t, _a, seg, entry in _iter_extra_entries(cfg):
+        bounds = _length_bounds(entry.get("length_aa"))
+        if bounds is not None:
+            out[(label, seg)] = bounds
+    return out
+
+
+def _matches_any_alias(prot: dict, aliases: list[str]) -> bool:
+    product = (prot.get("product") or "").lower()
+    return any(
+        (a or "").lower().strip() and (a or "").lower().strip() in product
+        for a in aliases
+    )
+
+
+class ExtraPickContext:
+    """Per-run state for :func:`pick_extra_cds`: the HMM claimants per scope
+    and the ``length_aa`` bounds. Build once per writer with
+    :func:`build_extra_pick_context`; it memoises claimed sets, so it must
+    not outlive the Sequence objects it was used on."""
+
+    def __init__(
+        self,
+        *,
+        hmm_active: bool,
+        overlap_tolerance: int,
+        bounds: dict[tuple[str, Optional[str]], LengthBounds],
+        claimants: dict[Optional[str], list[tuple[str, list[str], Optional[LengthBounds]]]],
+    ) -> None:
+        self.hmm_active = hmm_active
+        self.overlap_tolerance = overlap_tolerance
+        self.bounds = bounds
+        self.claimants = claimants
+        self._claim_cache: dict[tuple, dict[int, str]] = {}
+
+    def claimed(self, proteins: list[dict], segment: Optional[str]) -> dict[int, str]:
+        """``{id(cds): claimant_label}`` for CDSes an HMM spec picks in scope.
+
+        Keyed on object identity: the claimant's pick comes from the same
+        protein dicts the alias spec sees. Empty when the HMM tier is off.
+        """
+        if not self.hmm_active:
+            return {}
+        with_seq = [p for p in (proteins or []) if p.get("sequence")]
+        key = (segment, tuple(id(p) for p in with_seq))
+        cached = self._claim_cache.get(key)
+        if cached is not None:
+            return cached
+        out: dict[int, str] = {}
+        for label, tokens, bounds in self.claimants.get(segment, []):
+            pool = [p for p in with_seq if _within_bounds(p, bounds)]
+            pick = pick_marker_cds(
+                pool, tokens, [], True, overlap_tolerance=self.overlap_tolerance,
+            )
+            if pick is not None:
+                out.setdefault(id(pick), label)
+        self._claim_cache[key] = out
+        return out
+
+
+def build_extra_pick_context(cfg: dict[str, Any], hmm_active: bool) -> ExtraPickContext:
+    """Collect every HMM-bearing spec (cluster markers + HMM extra_protein
+    specs) per scope, plus the extra_protein ``length_aa`` bounds."""
+    bounds = collect_extra_length_bounds(cfg)
+    claimants: dict[Optional[str], list[tuple[str, list[str], Optional[LengthBounds]]]] = {}
+    for label, tokens, _aliases, seg in collect_marker_specs(cfg):
+        if tokens:
+            claimants.setdefault(seg, []).append((label, tokens, None))
+    for label, tokens, _aliases, seg in collect_extra_specs(cfg):
+        if tokens:
+            claimants.setdefault(seg, []).append((label, tokens, bounds.get((label, seg))))
+    return ExtraPickContext(
+        hmm_active=hmm_active,
+        overlap_tolerance=overlap_tolerance_from_cfg(cfg),
+        bounds=bounds,
+        claimants=claimants,
+    )
+
+
+def pick_extra_cds(
+    proteins: list[dict],
+    family_label: str,
+    hmm_tokens: list[str],
+    aliases: list[str],
+    segment: Optional[str],
+    ctx: ExtraPickContext,
+) -> tuple[Optional[dict], list[tuple[dict, str]]]:
+    """Pick one CDS for an ``extra_protein`` spec; return ``(cds, set_aside)``.
+
+    Same chain as :func:`pick_marker_cds` (HMM-first when the spec has
+    ``hmms:`` and the tier ran, else alias) plus the two guards described
+    above. ``set_aside`` lists ``(cds, reason)`` for every CDS that WOULD
+    have been a candidate for this spec (satisfies its tokens / matches an
+    alias) but was withheld — so a caller can surface likely GenBank
+    mislabels to the user. Callers that only need the pick ignore it.
+    """
+    with_seq = [p for p in (proteins or []) if p.get("sequence")]
+    if not with_seq:
+        return None, []
+    bounds = ctx.bounds.get((family_label, segment))
+    in_bounds = [p for p in with_seq if _within_bounds(p, bounds)]
+    in_ids = {id(p) for p in in_bounds}
+    out_reason = f"outside length_aa {format_length_bounds(bounds)}"
+    set_aside: list[tuple[dict, str]] = []
+
+    if hmm_tokens and ctx.hmm_active:
+        cds = pick_marker_cds(
+            in_bounds, hmm_tokens, [], True, overlap_tolerance=ctx.overlap_tolerance,
+        )
+        if bounds:
+            for p in with_seq:
+                if id(p) in in_ids:
                     continue
-                name = (entry.get("name") or "").strip()
-                if not name:
-                    continue
-                tokens = _dedup(list(entry.get("hmms") or []))
-                aliases = _dedup(list(entry.get("aliases") or []))
-                if not tokens and not aliases:
-                    continue
-                specs.append((_sanitize(name), tokens, aliases, seg_name))
-    else:
-        for entry in (cfg.get("clustering", {}) or {}).get("extra_protein", []) or []:
-            if not isinstance(entry, dict):
-                continue
-            name = (entry.get("name") or "").strip()
-            if not name:
-                continue
-            tokens = _dedup(list(entry.get("hmms") or []))
-            aliases = _dedup(list(entry.get("aliases") or []))
-            if not tokens and not aliases:
-                continue
-            specs.append((_sanitize(name), tokens, aliases, None))
-    return specs
+                if pick_marker_cds(
+                    [p], hmm_tokens, [], True,
+                    overlap_tolerance=ctx.overlap_tolerance,
+                ) is not None:
+                    set_aside.append((p, out_reason))
+        return cds, set_aside
+
+    # Alias path: an alias-only spec, or an HMM spec on a run where the HMM
+    # tier did not run (then nothing is claimed — behaviour as before).
+    claimed = ctx.claimed(with_seq, segment)
+    pool = [p for p in in_bounds if id(p) not in claimed]
+    cds = pick_marker_cds(pool, [], aliases, False)
+    for p in with_seq:
+        if not _matches_any_alias(p, aliases):
+            continue
+        if id(p) in claimed:
+            set_aside.append((p, f"already selected by HMM spec {claimed[id(p)]}"))
+        elif id(p) not in in_ids:
+            set_aside.append((p, out_reason))
+    return cds, set_aside
 
 
 def collect_family_specs(
@@ -537,6 +758,7 @@ def _build_specs_trees(
     min_taxa: int,
     hmm_active: bool,
     basis_role: str = "marker",
+    extra_ctx: Optional[ExtraPickContext] = None,
 ) -> tuple[list[Path], list[str], list[str]]:
     """Build one tree per spec into ``sub_dir``; shared by cluster + extra.
 
@@ -547,7 +769,10 @@ def _build_specs_trees(
     Spec form: ``(family_label, hmm_tokens, aliases, segment_or_None)`` —
     same shape ``collect_marker_specs`` / ``collect_extra_specs`` return.
     CDS picking honours :func:`pick_marker_cds` (HMM-first, alias-fallback)
-    so a single tree leaf matches its FASTA-writer record.
+    so a single tree leaf matches its FASTA-writer record. For the
+    extra_protein group pass ``extra_ctx``: picks then go through
+    :func:`pick_extra_cds` (claiming + ``length_aa``), exactly as the
+    extra FASTA writer and the protein report do.
 
     Returns ``(files_written, built_labels, sparse_summaries)``. ``label``
     appears in log messages so cluster vs. extra runs are distinguishable.
@@ -562,11 +787,17 @@ def _build_specs_trees(
         bodies: dict[str, str] = {}
         leaf_protein_ids: dict[str, set[str]] = {}
         for rep in representatives:
-            cds = pick_marker_cds(
-                _segment_proteins(rep, segment),
-                tokens, aliases, hmm_active,
-                overlap_tolerance=tol,
-            )
+            if extra_ctx is not None:
+                cds, _set_aside = pick_extra_cds(
+                    _segment_proteins(rep, segment),
+                    family_label, tokens, aliases, segment, extra_ctx,
+                )
+            else:
+                cds = pick_marker_cds(
+                    _segment_proteins(rep, segment),
+                    tokens, aliases, hmm_active,
+                    overlap_tolerance=tol,
+                )
             if cds is None:
                 continue
             leaf_reps.append(rep)
@@ -729,6 +960,7 @@ def run_per_protein_phylogeny(
             min_taxa=min_taxa,
             hmm_active=hmm_active,
             basis_role="extra_protein",
+            extra_ctx=build_extra_pick_context(cfg, hmm_active),
         )
         written.extend(extra_files)
         # extra_protein trees deliberately do NOT participate in the marker

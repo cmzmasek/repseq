@@ -798,6 +798,11 @@ _AUDIT_IGNORE_KEYS: frozenset[str] = frozenset({"verbose"})
 _RENAMED_CONFIG_PATHS: frozenset[str] = frozenset({"qc.length_filter"})
 
 _ALLOWED_MARKER_KEYS: frozenset[str] = frozenset({"name", "aliases", "hmms"})
+# extra_protein entries share the marker schema plus an optional
+# ``length_aa: [min, max]`` bound on the picked CDS (v0.75.0). Kept OFF the
+# cluster markers on purpose: their per-protein FASTA must show exactly the
+# CDS clustering used, and clustering has no length bound.
+_ALLOWED_EXTRA_PROTEIN_KEYS: frozenset[str] = _ALLOWED_MARKER_KEYS | {"length_aa"}
 _ALLOWED_SEGMENT_MARKER_KEYS: frozenset[str] = frozenset({"aliases", "hmms"})
 _ALLOWED_POLYPROTEIN_SPEC_KEYS: frozenset[str] = frozenset(
     {"name", "peptides", "cut_strategy", "motif_window_aa", "min_peptides_hit"}
@@ -1066,7 +1071,35 @@ def _validate_hmm_tokens(hmms: Any, path: str) -> tuple[list[str], list[str]]:
     return errs, validated
 
 
-def _validate_marker_entry(entry: Any, path: str) -> list[str]:
+def _validate_length_aa(raw: Any, path: str) -> list[str]:
+    """Validate an extra_protein ``length_aa: [min, max]`` bound.
+
+    Two whole amino-acid counts ≥ 1, inclusive; either end may be ``null``
+    for an open bound, but not both; ``min ≤ max``. ``length_aa: null`` is
+    the same as leaving the key out.
+    """
+    if raw is None:
+        return []
+    usage = (
+        f"{path}.length_aa must be a two-item list [min, max] of whole "
+        f"amino-acid counts (use null for an open end), e.g. [250, 400]"
+    )
+    if not isinstance(raw, list) or len(raw) != 2:
+        return [usage]
+    lo, hi = raw
+    for v in (lo, hi):
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 1):
+            return [usage]
+    if lo is None and hi is None:
+        return [f"{path}.length_aa: at least one of min / max must be set"]
+    if lo is not None and hi is not None and lo > hi:
+        return [f"{path}.length_aa: min ({lo}) is larger than max ({hi})"]
+    return []
+
+
+def _validate_marker_entry(
+    entry: Any, path: str, *, allowed: frozenset[str] = _ALLOWED_MARKER_KEYS,
+) -> list[str]:
     """Validate one cluster_protein marker entry.
 
     Each entry is either a non-empty alias string (legacy, alias-only)
@@ -1075,6 +1108,10 @@ def _validate_marker_entry(entry: Any, path: str) -> list[str]:
     where a token is either a single HMM name like ``"Name"`` or a
     multidomain spec like ``"A--B"`` in N-to-C order; multiple tokens are
     alternative architectures, OR).
+
+    ``allowed`` is the key set for the entry: the marker keys by default,
+    :data:`_ALLOWED_EXTRA_PROTEIN_KEYS` for extra_protein entries (which
+    adds ``length_aa``, validated here too).
     """
     errs: list[str] = []
     if isinstance(entry, str):
@@ -1087,7 +1124,20 @@ def _validate_marker_entry(entry: Any, path: str) -> list[str]:
             "{name, aliases?, hmms?}"
         )
         return errs
-    errs.extend(_spec_unknown_key_errors(entry, _ALLOWED_MARKER_KEYS, path))
+    if "length_aa" in entry and "length_aa" not in allowed:
+        # Tailored message instead of the generic "unknown key" line.
+        errs.append(
+            f"{path}: 'length_aa' is only supported on extra_protein entries "
+            f"— a clustering marker is picked by its hmms/aliases alone, so "
+            f"its per-protein FASTA shows exactly the protein clustering used"
+        )
+        errs.extend(_spec_unknown_key_errors(
+            {k: v for k, v in entry.items() if k != "length_aa"}, allowed, path,
+        ))
+    else:
+        errs.extend(_spec_unknown_key_errors(entry, allowed, path))
+    if "length_aa" in allowed:
+        errs.extend(_validate_length_aa(entry.get("length_aa"), path))
     name = entry.get("name")
     if not isinstance(name, str) or not name.strip():
         errs.append(f"{path}: dict-form entry must include a non-empty 'name'")
@@ -1578,7 +1628,10 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                                     )
                                     continue
                                 errors.extend(
-                                    _validate_marker_entry(entry, ipath)
+                                    _validate_marker_entry(
+                                        entry, ipath,
+                                        allowed=_ALLOWED_EXTRA_PROTEIN_KEYS,
+                                    )
                                 )
                                 if isinstance(entry, dict):
                                     nm = (entry.get("name") or "").strip()
@@ -1734,7 +1787,10 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                 )
                 continue
             errors.extend(
-                _validate_marker_entry(entry, f"clustering.extra_protein[{i}]")
+                _validate_marker_entry(
+                    entry, f"clustering.extra_protein[{i}]",
+                    allowed=_ALLOWED_EXTRA_PROTEIN_KEYS,
+                )
             )
             if isinstance(entry, dict):
                 name = (entry.get("name") or "").strip()

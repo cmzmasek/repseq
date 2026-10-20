@@ -421,8 +421,11 @@ HMM-only specs emits one stderr note.
 
 #### `{prefix}_extra_protein_fasta/{prefix}_<name>.fasta` — when `extra_protein:` declares entries
 
-The **accessory-protein** analogue of the per-protein FASTA: same selection
-chain, same bracket-tag headers. Driven by `clustering.extra_protein:`
+The **accessory-protein** analogue of the per-protein FASTA: same bracket-tag
+headers and the same HMM-then-alias selection. Two extra rules apply: alias-only
+specs never take a CDS an HMM spec already selected, and an optional
+`length_aa` range filters candidates. Every CDS left out by either rule is
+listed on the console. Driven by `clustering.extra_protein:`
 (non-segmented) or `virus.extra_protein:` (segmented). Filename uses the spec's
 `name:` verbatim (no segment prefix; names must be unique). Sparse coverage is
 expected, so unsatisfied specs are silently skipped. See
@@ -2062,6 +2065,43 @@ segmented:
 (The non-segmented form is a top-level `clustering.extra_protein: [...]` list
 using the same dict shape.) Names must be unique across all `extra_protein`
 entries for a virus.
+
+### How an accessory protein's CDS is chosen
+
+For each representative, a spec with `hmms:` takes the longest CDS that matches
+its profiles (when the HMM step ran). An **alias-only** spec takes the longest
+CDS whose GenBank `/product` label *contains* one of its aliases (case-insensitive).
+Labels are sometimes wrong. A real example: a tospovirus record labels its
+1,129 aa glycoprotein precursor `NSm` and its true 303 aa NSm `Gn/Gc`. An
+`NSm` alias would pick the glycoprotein. Two rules guard against this:
+
+- **HMM specs choose first.** On the same segment (or the same sequence, in a
+  non-segmented run), any CDS that an HMM-bearing spec has already selected is
+  off-limits to alias-only specs. This covers both the clustering markers and
+  `extra_protein` specs with `hmms:`. A profile match is better evidence of what
+  a protein is than its label. Only the CDS a spec actually *selects* is taken.
+  A shorter protein that shares a domain with the marker stays available (for
+  example influenza PA-X next to PA). The rule needs the HMM step; without it,
+  alias picking is unchanged.
+- **`length_aa: [min, max]`** (optional, amino acids, inclusive; either end may
+  be `null`). CDSes outside the range are dropped *before* the pick, so a longer
+  mislabelled protein can't hide the right one. Use it when an alias is generic
+  enough to catch something else:
+
+  ```yaml
+  extra_protein:
+    M:
+      - {name: M_NSm_tospo,
+         aliases: ["NSm", "movement protein", "nonstructural protein"],
+         length_aa: [250, 400]}
+  ```
+
+Every CDS left out by either rule is listed on the console, with its accession,
+length, label, isolate, and the reason. These are usually GenBank labelling
+errors worth knowing about. `length_aa` applies only to `extra_protein`
+entries, never to clustering markers: a marker's per-protein FASTA must show
+exactly the protein that was clustered. The rules and bounds are also listed at
+the end of `{prefix}_protein_taxonomic_report.txt`.
 
 ---
 

@@ -713,6 +713,16 @@ def test_render_summary_per_protein_section_appears(make_seq, tmp_path):
     assert "<domain_architecture>" in md
 
 
+def test_render_summary_describes_extra_protein_safeguards(make_seq, tmp_path):
+    """v0.75.0: the Methods prose names both guards on accessory-protein
+    picking (HMM specs choose first; optional length_aa)."""
+    cfg = _base_cfg(tmp_path)
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "two safeguards against mislabelled GenBank `/product` annotations" in md
+    assert "never took a CDS that a profile-HMM-defined protein" in md
+    assert "(`length_aa`) excluded out-of-range candidates" in md
+
+
 def test_render_summary_per_protein_describes_linsi_mafft(make_seq, tmp_path):
     cfg = _base_cfg(tmp_path)
     cfg["phylo"] = {

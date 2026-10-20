@@ -159,7 +159,11 @@ segmented:
   #                                            #   under --per-protein-phylo also a
   #                                            #   tree into {prefix}_extra_protein/.
   #                                            #   Sparse-by-design: specs that no rep
-  #                                            #   satisfies produce no file.
+  #                                            #   satisfies produce no file. Optional
+  #                                            #   `length_aa: [min, max]`; alias-only
+  #                                            #   entries skip CDSes an HMM spec on
+  #                                            #   the segment already selected (see
+  #                                            #   clustering.extra_protein below).
   # See config/examples/influenza_a.yaml for a worked example with
   # strain-aware list-valued counts.
   viruses: {}
@@ -302,6 +306,19 @@ clustering:
   # (whitespace → "_"). Segmented runs use the same key under
   # `segmented.viruses.<v>.extra_protein:` as a per-segment dict (see
   # `segmented.viruses` block above).
+  #
+  # Two guards against mislabelled GenBank /product strings (an alias is a
+  # case-insensitive SUBSTRING of /product, and the longest match wins):
+  #   * HMM specs choose first: an alias-only entry never takes a CDS that
+  #     an HMM-bearing spec on the same segment / sequence (a clustering
+  #     marker or an `hmms:` extra_protein entry) already selected. Needs
+  #     the HMM tier; without it alias picking is unchanged.
+  #   * Optional `length_aa: [min, max]` (amino acids, inclusive; `null`
+  #     leaves an end open): CDSes outside it are dropped BEFORE the pick.
+  #     extra_protein entries only, not clustering markers. Example:
+  #       - {name: NSm, aliases: ["NSm", "nonstructural protein"],
+  #          length_aa: [250, 400]}
+  # Every CDS either guard leaves out is listed on the console.
   extra_protein: []
 
   # Diagnostic "diversity curve" reporting. For each stratum where the
