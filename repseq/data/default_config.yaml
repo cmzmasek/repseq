@@ -816,7 +816,7 @@ phylo:
       enabled: false
       mode: automated1
       extra_args: []
-  # Pre-cluster overview tree (2H): a rough single-pass FastTree over EVERY
+  # Pre-cluster overview tree: a rough single-pass FastTree over EVERY
   # post-QC sequence (one leaf per CONCAT isolate in segmented mode), built
   # BEFORE clustering, so you can see where the elected representatives land in
   # the broader diversity. Representative leaves get a "[repr] " prefix in the

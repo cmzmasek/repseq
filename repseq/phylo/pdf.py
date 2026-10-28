@@ -1,4 +1,4 @@
-"""Render a graphical PDF + PNG of every phyloXML tree built this run (2H).
+"""Render a graphical PDF + PNG of every phyloXML tree built this run (2L).
 
 This is the sibling of the plain-text Newick / annotated phyloXML outputs:
 for every ``{prefix}..._tree.xml`` a phylo step writes, draw a ladderized
@@ -19,8 +19,9 @@ support values) from the phyloXML itself, which already carries it all:
 * ``<confidence>``                                  → branch-support labels
 
 So a single end-of-run sweep over the tracked ``*_tree.xml`` files renders
-figures for every tree type — whole-genome (2E), per-protein / extra / segment
-(2F), pre-cluster, and partition — with no per-builder threading.
+figures for every tree type — whole-genome (2E), per-protein / extra (2F),
+per-segment (2K), pre-cluster (2H), and partition — with no per-builder
+threading.
 
 Hard-requires only matplotlib (the ``[viz]`` extra) and biopython (already a
 core dependency). Missing matplotlib soft-fails with a single message and

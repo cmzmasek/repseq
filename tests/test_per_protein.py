@@ -520,7 +520,7 @@ def test_raises_when_no_family_clears_min_taxa(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# run_per_segment_phylogeny (2H)
+# run_per_segment_phylogeny (2K)
 # ---------------------------------------------------------------------------
 
 
@@ -533,7 +533,7 @@ def _run_per_segment(reps, cfg, tmp_path, prefix="bunya"):
 
 def test_per_segment_builds_one_tree_per_segment(tmp_path):
     """Every declared segment with >= min_taxa carriers gets one NT tree."""
-    cfg = _seg_cfg({})  # no HMM tokens needed for 2H — it's NT, no markers
+    cfg = _seg_cfg({})  # no HMM tokens needed for 2K — it's NT, no markers
     cfg["phylo"]["tool"] = "fasttree"
     reps = [
         _concat_rep(f"iso{i}", {"S": _S_proteins(), "M": _M_proteins()})

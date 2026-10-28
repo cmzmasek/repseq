@@ -1,4 +1,4 @@
-"""Graphical tree-figure rendering (2H): phylo/pdf.py.
+"""Graphical tree-figure rendering (2L): phylo/pdf.py.
 
 The renderer reconstructs everything (leaf labels, colours, the genus legend,
 internal ranks, support values) from the phyloXML alone, so these tests build a

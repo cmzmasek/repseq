@@ -1332,7 +1332,7 @@ def run_per_segment_phylogeny(
     out_dir: Path,
     prefix: str,
 ) -> list[Path]:
-    """2H — build one **nucleotide** tree per segment, into
+    """2K — build one **nucleotide** tree per segment, into
     ``{prefix}_per_segment/``.
 
     Segmented mode only. Complements 2F (per-marker protein trees) with a
@@ -1349,12 +1349,12 @@ def run_per_segment_phylogeny(
     shared :func:`_build_tree` engine so rooting / LCA / colouring /
     phyloXML are identical to 2E and 2F. The leaf colour palette is
     keyed on the same FULL representative set so a taxon keeps the same
-    colour across 2E, 2F, and 2H.
+    colour across 2E, 2F, and 2K.
     """
     segmented = bool((cfg.get("segmented", {}) or {}).get("enabled"))
     if not segmented:
         raise PhyloError(
-            "per-segment trees (2H) only apply to segmented runs"
+            "per-segment trees only apply to segmented runs"
         )
 
     virus = get_virus_config(cfg) or {}

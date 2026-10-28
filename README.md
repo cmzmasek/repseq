@@ -63,6 +63,18 @@ brew install cd-hit                        # macOS
 conda install -c bioconda cd-hit           # Linux (conda)
 ```
 
+**HMMER (`hmmscan`)** — needed only for the HMM-based identity QC tier and
+everything built on it: marker verification, per-marker protein FASTAs and trees,
+and polyprotein peptide slicing. Without it those steps are skipped with a clear
+stderr message and the rest of the run proceeds normally (see
+[HMM-based identity QC](#hmm-based-identity-qc)). The profile databases ship with
+repseq, so this is the only thing to install.
+
+```bash
+brew install hmmer                         # macOS
+conda install -c bioconda hmmer            # Linux (conda)
+```
+
 **Plots & tree figures** — the `[viz]` extra (matplotlib only, installs
 everywhere) powers both the optional clustering scatter plot (`--plot`) and the
 graphical tree-figure PDFs/PNGs that `--phylo` renders by default. For the
@@ -84,6 +96,16 @@ clear stderr message.
 ```bash
 brew install mafft iqtree fasttree              # macOS
 conda install -c bioconda mafft iqtree fasttree # Linux (conda)
+```
+
+Optionally add **trimAl** if you want the alignment-trimming step (off by
+default; see [Alignment trimming](#alignment-trimming-trimal-optional-off-by-default)).
+A missing trimAl never costs you the tree — the run builds on the untrimmed
+alignment instead.
+
+```bash
+brew install trimal                        # macOS
+conda install -c bioconda trimal           # Linux (conda)
 ```
 
 ---
@@ -197,8 +219,10 @@ and **every one of its segments' accessions** — so a Nextclade table keyed by
 HA accession and a GenoFLU table keyed by isolate name both work.
 
 **Isolates without a label** (not in the table, or a blank cell) fall back to a
-sequence attribute or taxonomy rank of the same name if there is one, and
-otherwise form an `Unknown` group. **Isolates whose rows disagree** (e.g. the
+sequence attribute or taxonomy rank of the same name if there is one, then to
+`--field-regex` if you passed one (a regex read against the FASTA header — in a
+segmented run against each original per-segment header, not the synthetic
+concatenated one), and otherwise form an `Unknown` group. **Isolates whose rows disagree** (e.g. the
 table gives their HA and NA accessions different clades) form a `Conflict`
 group, with a warning. Both groups are sampled like any other, so nothing
 disappears silently. The run prints how many isolates took their label from the
@@ -1924,13 +1948,15 @@ gated by HMM-QC.
 
 ### Bundled vs user-supplied database
 
-`hmm.database: null` (default) uses the bundled set at
-`repseq/data/hmms/repseq_viral_core.hmm` — 26 hand-picked Pfam-A profiles covering
-the most common viral marker proteins (RdRp, nucleocapsid, glycoprotein, helicase,
-protease, the coronavirus Spike S1/S2 architectures, the small accessory proteins)
-across the main families. Pfam-A is CC0, so redistribution is unrestricted. The
-set was assembled via `scripts/build_bundled_hmms.sh`; re-run it to refresh against
-a newer Pfam release.
+`hmm.database: null` (default) uses the bundled core set at
+`repseq/data/hmms/repseq_viral_core.hmm` — around 60 hand-picked Pfam-A profiles
+covering the most common viral marker proteins (RdRp, nucleocapsid, glycoprotein,
+helicase, protease, the coronavirus Spike S1/S2 architectures, the small accessory
+proteins) across the main families. Pfam-A is CC0, so redistribution is
+unrestricted. The set was assembled via `scripts/build_bundled_hmms.sh`; re-run it
+to refresh against a newer Pfam release. `repseq doctor` prints the exact profile
+count of whichever database resolves, so use it rather than trusting a number
+quoted here.
 
 To use your own profiles, set `hmm.database` to one of:
 
@@ -1940,6 +1966,29 @@ To use your own profiles, set `hmm.database` to one of:
 - **a bare bundled-set name** — a subdirectory under `repseq/data/hmms/`, e.g.
   `hmm.database: Filoviridae` selects `repseq/data/hmms/Filoviridae/`. Drop `.hmm`
   files into such a directory to add a family-specific set.
+
+**Clade-specific sets that ship with repseq**, each tuned against the full RefSeq
+proteome of its clade and each with its own `README.md` listing the profiles and
+the marker architectures they support:
+
+| Set | Covers |
+| --- | --- |
+| `Amarillovirales` | the order (Flaviviridae, Hepaciviridae, Pestiviridae), incl. per-clade polyprotein peptide profiles |
+| `Betainfluenzavirus` | influenza B (note: **B segment numbering is reversed vs. A** — segment 1 is PB1) |
+| `Orthomyxoviridae` | influenza A (A-tuned; keeps the family name for historical reasons) |
+| `Elliovirales` | the order (Peribunyaviridae, Hantaviridae, Tospoviridae, Phasmaviridae, …) |
+| `Hareavirales` | the order (Phenuiviridae, Nairoviridae, **Arenaviridae**, …) |
+| `Phenuiviridae` | the family alone, with the `Phlebovirus_*` glycoprotein profiles |
+| `Picornaviridae` | the family, with polyprotein peptide slicing |
+| `Filoviridae` | the family |
+
+Two cautions, both learned from real runs. A profile that sounds pan-clade often
+is not: `Flavi_NS5` matches only *Orthoflavivirus*, and `Bunya_G1`/`G2` only
+*Orthobunyavirus*, so gating a whole order on one of them silently drops every
+other genus. And set membership changes what E-values mean — adding profiles
+scales every reported E-value by the size ratio, while **bit scores and therefore
+GA-cutoff decisions stay put**, so GA-gated runs are unaffected and
+`default_evalue`-gated runs are not.
 
 Whatever resolves is auto-`hmmpress`-ed on first use if its `.h3*` indexes are
 missing or stale. `repseq doctor` reports DB status (path, profile count, indexed
@@ -2435,25 +2484,45 @@ that license; it comes with **no warranty**. The full license text is in the
 
 ## Status
 
-Current: **`v0.58.0`**. All 8 selection modes; protein-alphabet clustering by
-default (`alphabet_for_clustering: protein`); MMseqs2 and cd-hit backends;
-optional protein-annotation and protein-quality QC; per-isolate
-taxonomy-consistency QC and strain-as-isolate provenance + collision detection for
-segmented viruses; **HMM-based identity QC** with multidomain-architecture token
-notation (HMMER hmmscan + a bundled 26-profile viral Pfam-A subset; user-supplied
-DB supported); **rich phyloXML output** with taxonomy-driven leaf colouring,
-partitioned-supermatrix trees for protein + IQ-TREE (default), optional trimAl
-trimming, graphical PDF/PNG tree figures (default on), per-marker
-domain-architecture trees with a pairwise Robinson-Foulds incongruence table,
-per-segment NT trees, a pre-cluster overview tree, an opt-in phylogeny-based
-taxonomy review, per-MSA conservation scoring, and an always-on per-taxon
-monophyly report; **`extra_protein`** accessory-protein and **`polyprotein`**
-mature-peptide channels (FASTAs, trees, reports); a force-keep / force-select /
-input-blocklist `overrides` system; an optional UMAP/MDS clustering plot;
-plain-English flags and a single-file HTML report; an auto-generated
+Current: **`v0.75.0`**.
+
+**Selection.** All 8 selection modes, including grouping by a column of your own
+metadata table (`--metadata-table`), so representatives can be chosen per
+influenza HA clade or GenoFLU genotype on segmented runs. Protein-alphabet
+clustering by default (`alphabet_for_clustering: protein`), optionally
+concatenating several markers; MMseqs2 and cd-hit backends; a force-keep /
+force-select / input-blocklist `overrides` system.
+
+**Cleaning.** Optional protein-annotation and protein-quality QC; per-isolate
+taxonomy-consistency QC and strain-as-isolate provenance + collision detection
+for segmented viruses; **HMM-based identity QC** with multidomain-architecture
+token notation (HMMER hmmscan against the bundled viral Pfam-A core set, eight
+clade-specific bundled sets, or your own database).
+
+**Phylogeny.** Rich phyloXML with taxonomy-driven leaf colouring shared across
+every tree of a run; partitioned-supermatrix trees for protein + IQ-TREE
+(default); optional trimAl trimming; graphical PDF/PNG tree figures (default on);
+per-marker domain-architecture trees with a pairwise Robinson-Foulds incongruence
+table; per-segment NT trees; a pre-cluster overview tree that scales to very
+large pools (leaf cap + MAFFT PartTree); an opt-in phylogeny-based taxonomy
+review; per-MSA conservation scoring; and an always-on per-taxon monophyly report
+with opt-in species rank.
+
+**Proteins.** `extra_protein` accessory-protein and `polyprotein` mature-peptide
+channels (FASTAs, trees, reports), with accessory-CDS selection guarded against
+mislabelled GenBank `/product` strings (HMM specs claim their CDS first, plus an
+optional `length_aa` bound).
+
+**Reporting.** Taxonomic, protein, nucleotide, polyprotein and serotype reports,
+each as human-readable text plus a tidy long-format TSV; a cross-tree
+segment-status matrix that localises which taxon breaks on which marker tree;
+three loud alarms for silent problems — taxa eliminated entirely by QC, a
+polyprotein peptide-coverage "wall of zeros", and the conflict tables — collected
+into plain-English flags and a single-file HTML report; an auto-generated
 Methods-section starter (`_summary.md`), a reproducibility lockfile
-(`repseq replay`), and a sanitized config snapshot on every run. **1,419 offline
-regression tests pass**; the
-NCBI-backed paths have been validated end-to-end against live influenza-A,
-peribunyaviridae, hantaviridae, and coronaviridae datasets. See `git log` for the
-full release history.
+(`repseq replay`), and a sanitized config snapshot on every run.
+
+**1,558 offline regression tests pass.** The NCBI-backed paths have been
+validated end-to-end against live influenza A and B, peribunyaviridae,
+hantaviridae, coronaviridae, amarillovirales, elliovirales and hareavirales
+datasets. See `git log` for the full release history.

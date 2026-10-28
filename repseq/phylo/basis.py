@@ -31,7 +31,7 @@ Substrate codes (stable, machine-readable — the ``substrate`` property):
 * ``segment_nt_concat``    — per-isolate concat of segment NT (2E, seg NT)
 * ``supermatrix``          — partitioned supermatrix of per-family MSAs (2E)
 * ``marker``               — a single marker CDS (2F per-protein tree)
-* ``segment_nt``           — a single segment's nucleotides (2H)
+* ``segment_nt``           — a single segment's nucleotides (2K)
 * ``accessory_protein``    — an ``extra_protein`` CDS, AA
 * ``peptide``              — a sliced polyprotein peptide, AA
 * ``overview``             — every post-QC sequence (pre-cluster overview)

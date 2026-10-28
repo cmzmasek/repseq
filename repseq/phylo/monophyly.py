@@ -38,8 +38,8 @@ well-supported intrusion still reads as para/poly. The threshold used is
 recorded in the ``min_support`` column.
 
 Computed by sweeping the retained ``*_tree.xml`` files at end of run (every
-tree repseq builds — whole-genome 2E, per-protein / extra / segment /
-polyprotein 2F, pre-cluster — ends in ``_tree.xml``), reading each leaf's
+tree repseq builds — whole-genome 2E, per-protein / extra / polyprotein 2F,
+per-segment 2K, pre-cluster 2H — ends in ``_tree.xml``), reading each leaf's
 taxonomy from the ``repseq:<rank>`` ``<property>`` ladder the phyloXML writer
 emits. Fully decoupled (no threading), same posture as the PDF and
 conservation sweeps: soft-fails to no file when there are no trees, and

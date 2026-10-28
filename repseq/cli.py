@@ -1957,12 +1957,12 @@ def _render_tree_pdfs(out_files: list, cfg: dict) -> int:
     The phyloXML side of the end-of-run sweep (cf. ``_drop_unwanted_newick``):
     keyed on the never-dropped ``*_tree.xml`` files, so a single pass renders a
     figure for every tree type built this run — whole-genome (2E), per-protein
-    / extra / segment (2F), pre-cluster, partition. The renderer reconstructs
-    leaf labels, colours, the genus legend, internal ranks, and support values
-    from the phyloXML itself, so no per-builder threading is needed. Soft:
-    missing matplotlib (one stderr line, nothing rendered) and an individual
-    unrenderable tree (warn + skip) never abort the run. Returns the number of
-    tree figures (PDFs) rendered.
+    / extra (2F), per-segment (2K), pre-cluster (2H), partition. The renderer
+    reconstructs leaf labels, colours, the genus legend, internal ranks, and
+    support values from the phyloXML itself, so no per-builder threading is
+    needed. Soft: missing matplotlib (one stderr line, nothing rendered) and an
+    individual unrenderable tree (warn + skip) never abort the run. Returns the
+    number of tree figures (PDFs) rendered.
     """
     if not (cfg.get("phylo", {}) or {}).get("pdf", True):
         return 0
@@ -2312,7 +2312,7 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
             out_files.append(flags_path)
     except Exception as exc:
         click.echo(f"[flags report skipped] {exc}", err=True)
-    # Graphical tree figures (2H). Render a PDF + PNG of every phyloXML tree
+    # Graphical tree figures (2L). Render a PDF + PNG of every phyloXML tree
     # built this run — done HERE, after every phylo step has written its
     # *_tree.xml, so one sweep covers all tree types. ON by default
     # (phylo.pdf); reads the never-dropped phyloXML, so order vs the Newick

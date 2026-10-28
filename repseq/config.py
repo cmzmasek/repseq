@@ -289,8 +289,8 @@ DEFAULTS: dict[str, Any] = {
         #   "fasttree" — always FastTree (faster; approximate-ML)
         "tool": "auto",
         # Retain the plain-text Newick (*_tree.nwk) for every tree built
-        # this run (whole-genome 2E, per-protein/extra/segment 2F,
-        # pre-cluster, partition). OFF by default to reduce output clutter:
+        # this run (whole-genome 2E, per-protein/extra 2F, per-segment 2K,
+        # pre-cluster 2H, partition). OFF by default to reduce output clutter:
         # the annotated phyloXML (*_tree.xml) is a topological superset, and
         # the short-id *_tree_id_map.tsv (which decodes the retained
         # *_msa.fasta leaves) is kept regardless. The Newick is still
@@ -299,8 +299,9 @@ DEFAULTS: dict[str, Any] = {
         # the end unless this is true. CLI: --newick / --no-newick.
         "newick": False,
         # Render a graphical PDF + PNG of every phyloXML tree built this run
-        # (whole-genome 2E, per-protein/extra/segment 2F, pre-cluster,
-        # partition). ON by default. Each {prefix}..._tree.xml gets a sibling
+        # (whole-genome 2E, per-protein/extra 2F, per-segment 2K,
+        # pre-cluster 2H, partition). ON by default. Each
+        # {prefix}..._tree.xml gets a sibling
         # {prefix}..._tree.pdf and {prefix}..._tree.png — a ladderized
         # rectangular phylogram (matplotlib + Bio.Phylo) with taxonomy-coloured
         # leaf labels, a genus/subfamily legend, and branch-support labels,
