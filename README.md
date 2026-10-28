@@ -2484,7 +2484,7 @@ that license; it comes with **no warranty**. The full license text is in the
 
 ## Status
 
-Current: **`v0.75.0`**.
+Current: **`v0.75.1`**.
 
 **Selection.** All 8 selection modes, including grouping by a column of your own
 metadata table (`--metadata-table`), so representatives can be chosen per
