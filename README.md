@@ -242,6 +242,67 @@ Things to know:
 - **Checking a table first.** `--dry-run` loads the table and checks the
   column names, without running the pipeline.
 
+### Carrying a clade into the output of *any* run (`--annotate-table`)
+
+Grouping by a clade and *labelling* records with it are different jobs. A
+panel run is usually `global` at a threshold, and it should still say which
+clade each representative belongs to. `--annotate-table` attaches one or more
+columns of the same kind of table to every sequence **without** affecting
+which sequences are selected, in every mode:
+
+```bash
+# a global panel that still carries the clade of each representative
+repseq global -c cfg.yaml -i flu.fasta --segmented -T 0.97 \
+    --annotate-table nextclade.tsv --annotate-field clade --phylo
+```
+
+Each attached label is emitted in three places:
+
+- **Protein FASTA headers** — a `[clade=2.3.4.4b]` tag beside `[subtype=...]`,
+  in the all-protein, per-protein and `extra_protein` files. The **nucleotide**
+  FASTA headers are deliberately left exactly as they are (they pass the
+  GenBank header through verbatim), so anything that parses those files keeps
+  working.
+- **Every tree** — a `repseq:clade` `<property>` on each phyloXML leaf, which
+  Archaeopteryx can display and colour by. Leaf *labels* are unchanged, so no
+  figure or MSA header changes shape.
+- **The monophyly report and the segment-status matrix**, if you also name the
+  field in
+  [`phylo.monophyly.extra_keys`](#per-taxon-monophyly--prefix_monophylytsv) —
+  this is what turns the clade into a reassortment readout. Spell it however
+  you like there: both ends normalise the name the same way, so `HA clade`,
+  `ha_clade` and `HA.clade` all refer to the same label.
+
+```yaml
+annotate:
+  table: nextclade.tsv
+  fields: [clade]            # column names, matched ignoring case
+```
+
+Rows are matched exactly as under `--field` above, so a table keyed by HA
+accession still reaches a whole segmented isolate. Two deliberate
+differences from the grouping path:
+
+- **No fallback.** A tag says what the *table* said, so an unmatched sequence
+  is labelled `Unknown` and one whose rows disagree `Conflict`, with no
+  substitution from a sequence attribute, a taxonomy rank or a regex.
+- **A column named after metadata repseq already writes is refused at
+  startup** — `species`, `host`, `strain`, `subtype`, `isolate`, `length` and
+  the rest of the bracket-tag / tree-property set. Such a label can't be
+  emitted (it would shadow the real value on one surface and not another), so
+  the run stops and tells you to rename the column instead of dropping it
+  silently. Two columns differing only in case or punctuation (`HA clade` and
+  `HA-clade`) are refused for the same reason: both become `ha_clade`.
+- **A table that matches nothing warns instead of stopping the run.** Keying a
+  *grouping* table wrong would silently collapse your selection into one
+  group, which has to be an error; a mis-keyed annotation table costs a
+  metadata tag and nothing else — and that is only detectable after isolate
+  assembly, which on a large run is hours in.
+
+A `custom --field clade` run needs no second table: its grouping value is
+emitted the same way. `--dry-run` checks the path and the column names in
+seconds.
+
 Two diagnostic/utility subcommands:
 
 | Command | What it does |
@@ -293,6 +354,13 @@ your FASTA file(s)
         ▼
   (segmented mode only)
     fetch the marker protein per segment, concatenate per isolate
+        │
+        ▼
+  attach external labels                (only with annotate.table /
+                                         --annotate-table)
+    label every record from a column of your metadata table — a clade,
+    a genotype — for the FASTA headers, the tree leaves and the
+    monophyly report; selection is unaffected
         │
         ▼
   group by your chosen mode (rank / host / decade / similarity / …)
@@ -431,7 +499,12 @@ carry NCBI-style bracket tags so each protein stays self-describing:
 Empty fields are omitted; bracket characters in values are scrubbed so
 organism names like `Foo virus [strain X]` can't break the tag syntax. A
 `[subtype=H5N1]` tag is added after `[host=...]` when the GenBank `/serotype`
-qualifier is present. **This is usually "the" output file for protein-centric
+qualifier is present, and a `[clade=2.3.4.4b]`-style tag after it for each
+external label from
+[`annotate.fields`](#carrying-a-clade-into-the-output-of-any-run---annotate-table)
+(a label whose name collides with metadata the header already carries, such
+as `host` from a `custom --field host` run, is dropped rather than
+duplicated — and `annotate.fields` refuses such a column outright). **This is usually "the" output file for protein-centric
 workflows** — pre-curated and pre-annotated, ready for BLAST/DIAMOND/HMMER/MMseqs2.
 
 #### `{prefix}_per_protein_fasta/{prefix}_<family>.fasta` — one file per declared marker
@@ -1006,7 +1079,9 @@ phyloXML with rich, browseable annotation:
   a `<sequence>` block with the GenBank accession + title, and one
   repseq-namespaced `<property>` per leaf attribute (host, subtype,
   collection_date, country, strain, isolate_id, year, plus the full 9-rank
-  ladder — empties dropped).
+  ladder — empties dropped), plus one `repseq:<field>` per external label when
+  [`annotate.fields`](#carrying-a-clade-into-the-output-of-any-run---annotate-table)
+  is used (`repseq:clade`).
 - Leaf labels are **coloured by taxonomy** (default on, by genus): each carries a
   `<property ref="style:font_color">` hex colour. Configure under
   `phylo.coloring` — one rank gives each value a distinct hue; two ranks
@@ -1338,6 +1413,35 @@ species), so species rows are off by default. Set
 which **intra-genus reassortment** and most **misannotation** live: a species
 monophyletic on the whole-genome tree but broken on a single marker tree is the
 localised reassortant call that the coarser ranks cannot see.
+
+**Non-rank groupings — `phylo.monophyly.extra_keys`.** Rank rows say nothing
+about a virus whose taxonomy is flat. A global *Alphainfluenzavirus* run
+resolves to **one species**, so every rank row is trivially monophyletic and
+the segment-status matrix below comes out empty — while influenza A is the
+most reassortment-prone virus there is, because its reassortment is between
+**subtypes** and **HA clades**, which repseq carries as metadata rather than
+as a taxonomic rank. Name those groupings here and each is assessed exactly
+like a rank, appearing in the `rank` column with its rows sorted above the
+real ranks:
+
+```yaml
+phylo:
+  monophyly:
+    extra_keys: [subtype]      # any serotyped virus; needs no extra input
+    # extra_keys: [clade]      # with annotate.fields: [clade]
+```
+
+If a key matches no leaf property on any tree — a typo, or a label that was
+never attached — the run says so by name, with a did-you-mean, instead of
+writing an empty report. An entry is any `repseq:<name>` leaf property the
+trees carry: a label from
+[`annotate.fields`](#carrying-a-clade-into-the-output-of-any-run---annotate-table)
+(`clade`, `genotype`) or a metadata property repseq always emits (`subtype`,
+`host`, `country`). With `extra_keys: [clade]` on a segmented run, "clade
+2.3.4.4b is monophyletic on the genome tree but breaks on segment 6" becomes a
+reported line rather than something you have to eyeball across eight trees.
+**An empty segment-status matrix must never be read as "no reassortment"** —
+check the distinct taxa per rank first, and set this key.
 
 **Why it's useful.** A taxon monophyletic on the whole-genome tree but **not** on
 a marker tree is the per-marker **reassortment / recombination** signal — the
@@ -1823,6 +1927,13 @@ clustering:
   # cd-hit options (only used when backend == cdhit) live under
   # `clustering.cdhit:` — see that block in your generated config (it's
   # there with comments) for the full set.
+
+# External per-sequence labels (a clade, a genotype) from a table another tool
+# wrote. Works in EVERY mode and does not affect selection — see
+# "Carrying a clade into the output of any run".
+annotate:
+  table: null                     # path to a TSV/CSV
+  fields: []                      # column names, e.g. [clade]
 
 representative:
   # Ordered preference for picking each cluster's "best" sequence: the first
@@ -2663,11 +2774,13 @@ that license; it comes with **no warranty**. The full license text is in the
 
 ## Status
 
-Current: **`v0.77.0`**.
+Current: **`v0.78.0`**.
 
 **Selection.** All 8 selection modes, including grouping by a column of your own
 metadata table (`--metadata-table`), so representatives can be chosen per
-influenza HA clade or GenoFLU genotype on segmented runs. Protein-alphabet
+influenza HA clade or GenoFLU genotype on segmented runs — and, in **every**
+mode, `--annotate-table` to carry such a label into the protein FASTA headers,
+the tree leaves and the monophyly report without affecting selection. Protein-alphabet
 clustering by default (`alphabet_for_clustering: protein`), optionally
 concatenating several markers; MMseqs2 and cd-hit backends; a force-keep /
 force-select / input-blocklist `overrides` system.
@@ -2704,7 +2817,7 @@ into plain-English flags and a single-file HTML report; an auto-generated
 Methods-section starter (`_summary.md`), a reproducibility lockfile
 (`repseq replay`), and a sanitized config snapshot on every run.
 
-**1,677 offline regression tests pass.** The NCBI-backed paths have been
+**1,719 offline regression tests pass.** The NCBI-backed paths have been
 validated end-to-end against live influenza A and B, peribunyaviridae,
 hantaviridae, coronaviridae, amarillovirales, elliovirales and hareavirales
 datasets. See `git log` for the full release history.

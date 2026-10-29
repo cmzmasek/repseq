@@ -80,6 +80,39 @@ def _shared_options(fn):
                       help="Enable segmented virus mode.")(fn)
     fn = click.option("--dry-run", is_flag=True, default=False,
                       help="Validate inputs and config without running.")(fn)
+    fn = click.option(
+        "--annotate-table", default=None,
+        help=(
+            "TSV/CSV of external per-sequence labels (Nextclade HA clades, a "
+            "GenoFLU genotype, a curated sheet) to attach to every sequence "
+            "(config annotate.table). Name the column(s) with "
+            "--annotate-field. Rows bind by accession, id, isolate name or "
+            "strain, so a table keyed by HA accession reaches a whole "
+            "segmented isolate. Works in EVERY mode — unlike "
+            "custom/hybrid --metadata-table it only labels, it does not "
+            "group, so a global panel run can carry clade tags too. Each "
+            "label becomes a [<field>=<value>] tag in the protein FASTA "
+            "headers and a repseq:<field> property on every tree leaf; the "
+            "nucleotide FASTA headers are unchanged. Validated at startup, "
+            "so a wrong path or column fails in seconds and under --dry-run."
+        ),
+    )(fn)
+    fn = click.option(
+        "--annotate-field", "annotate_field", multiple=True, default=(),
+        help=(
+            "Column of --annotate-table to attach (config annotate.fields). "
+            "Repeat for several, e.g. --annotate-field clade "
+            "--annotate-field genotype. Matched case-insensitively. A "
+            "sequence no row matches is labelled 'Unknown', one whose rows "
+            "disagree 'Conflict' — the tag says what the table said, with no "
+            "fallback to GenBank metadata. A column named after metadata "
+            "repseq already writes (species, host, strain, subtype, …) is "
+            "refused at startup, since the label could not be emitted "
+            "without shadowing the real value. Add the same name to "
+            "phylo.monophyly.extra_keys for per-label monophyly rows (either "
+            "spelling works: both ends normalise 'HA clade' to ha_clade)."
+        ),
+    )(fn)
     fn = click.option("--no-resolve", is_flag=True, default=False,
                       help="Skip database metadata resolution.")(fn)
     fn = click.option("--overflow", type=click.Choice(["keep", "trim"]), default="keep",
@@ -332,7 +365,8 @@ def _shared_options(fn):
 def _load_and_validate(config_path, output_dir, prefix, threads, seed,
                        alphabet_for_clustering=None, concatenate_markers=None,
                        fast=False, verbose=False, protect_ids=None,
-                       pin_ids=None, exclude_ids=None, newick=None, pdf=None) -> dict:
+                       pin_ids=None, exclude_ids=None, newick=None, pdf=None,
+                       annotate_table=None, annotate_field=()) -> dict:
     cfg = load_config(config_path)
     if output_dir:
         cfg["output"]["dir"] = output_dir
@@ -364,6 +398,17 @@ def _load_and_validate(config_path, output_dir, prefix, threads, seed,
     # --exclude-ids merges into the dedicated overrides.exclude block (not
     # the shared keep/pin id list) and flips overrides.exclude.enabled on.
     _merge_exclude_id_file(cfg, exclude_ids)
+    # --annotate-table / --annotate-field: an explicit request on the command
+    # line replaces the table the config named and unions the field list, the
+    # same shape as the override id flags above.
+    if annotate_table is not None:
+        cfg.setdefault("annotate", {})["table"] = annotate_table
+    if annotate_field:
+        ann = cfg.setdefault("annotate", {})
+        existing = list(ann.get("fields") or [])
+        ann["fields"] = existing + [
+            f for f in annotate_field if f not in existing
+        ]
     errors = validate_config(cfg)
     if errors:
         for e in errors:
@@ -372,6 +417,13 @@ def _load_and_validate(config_path, output_dir, prefix, threads, seed,
     if fast:
         _apply_fast_overrides(cfg)
     _resolve_overrides(cfg)
+    # Loads + validates annotate.table now, so a wrong path or an unknown
+    # column fails in seconds (and under --dry-run) rather than after the
+    # metadata fetch. Raises InputError, rendered without a traceback at the
+    # CLI boundary.
+    from .annotate import resolve_annotate_config
+
+    resolve_annotate_config(cfg)
     _check_output_dir(cfg)
     return cfg
 
@@ -2036,6 +2088,21 @@ def _setup_protein_alphabet(sequences, cfg, qc_report, ncbi):
     return sequences
 
 
+def _annotate_sequences(sequences, cfg) -> None:
+    """Attach ``annotate.fields`` labels from ``annotate.table`` (step 9b).
+
+    Sits after ``_handle_segmented`` because a segmented run labels the
+    assembled CONCAT isolates — and through ``annotate.set_labels`` their
+    segment records too, since the protein-FASTA writer sees the segment as
+    the parent. Everything downstream (rep FASTAs, trees, monophyly) then
+    reads the labels off the sequence, with no extra threading. No-op unless
+    a table is configured.
+    """
+    from .annotate import annotate_sequences
+
+    annotate_sequences(sequences, cfg)
+
+
 def _populate_genbank_isolate_segment(sequences, cfg, ncbi):
     """Populate seq.isolate_id / seq.segment / seq.strain from the GenBank
     source feature, when segmented mode is on and the toggle is enabled.
@@ -2643,10 +2710,14 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
         mono_cfg = (cfg.get("phylo", {}) or {}).get("monophyly", {}) or {}
         min_support = mono_cfg.get("min_support", 70)
         include_species = bool(mono_cfg.get("include_species", False))
+        # Non-rank groupings (subtype, an annotate.fields label): the only
+        # way this report says anything on a flat-taxonomy virus.
+        extra_keys = tuple(mono_cfg.get("extra_keys") or ())
         mono_tsv = write_monophyly_report(
             out_dir, prefix,
             min_support=min_support,
             include_species=include_species,
+            extra_keys=extra_keys,
         )
         if mono_tsv is not None:
             out_files.append(mono_tsv)
@@ -3225,14 +3296,15 @@ def run_doctor_cmd(config_path, no_network):
 @click.option("--n-select", "-n", default=None, type=int,
               help="Number of representative sequences to select.")
 def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,threshold, n_select):
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf, annotate_table, annotate_field,threshold, n_select):
     """Global mode: cluster at a threshold or select N diverse sequences."""
     if threshold is None and n_select is None:
         raise click.UsageError("Provide --threshold or --n-select.")
 
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf,
+                             annotate_table=annotate_table, annotate_field=annotate_field)
     if segmented:
         cfg["segmented"]["enabled"] = True
 
@@ -3252,6 +3324,7 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    _annotate_sequences(sequences, cfg)
     click.echo(qc_report.summary())
 
     from .modes.global_mode import GlobalMode
@@ -3273,11 +3346,12 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-group", "-n", required=True, type=int,
               help="Target representatives per taxonomic group.")
 def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,rank, n_per_group):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf, annotate_table, annotate_field,rank, n_per_group):
     """Taxonomic mode 1: N representatives per taxonomic rank group."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf,
+                             annotate_table=annotate_table, annotate_field=annotate_field)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -3296,6 +3370,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    _annotate_sequences(sequences, cfg)
     click.echo(qc_report.summary())
 
     from .modes.taxonomic1 import TaxonomicMode1
@@ -3315,7 +3390,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--rank-levels", "-r", required=True,
               help='JSON list of {rank, n_per_group} dicts. E.g. \'[{"rank":"family","n_per_group":20},{"rank":"genus","n_per_group":5}]\'')
 def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,rank_levels):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf, annotate_table, annotate_field,rank_levels):
     """Taxonomic mode 2: hierarchical multi-rank nested clustering."""
     import json as _json
     try:
@@ -3325,7 +3400,8 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
 
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf,
+                             annotate_table=annotate_table, annotate_field=annotate_field)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -3344,6 +3420,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    _annotate_sequences(sequences, cfg)
     click.echo(qc_report.summary())
 
     from .modes.taxonomic2 import TaxonomicMode2
@@ -3363,11 +3440,12 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-host", "-n", required=True, type=int,
               help="Target representatives per host organism.")
 def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,n_per_host):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf, annotate_table, annotate_field,n_per_host):
     """Host-stratified mode: N representatives per host organism."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf,
+                             annotate_table=annotate_table, annotate_field=annotate_field)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -3386,6 +3464,7 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    _annotate_sequences(sequences, cfg)
     click.echo(qc_report.summary())
 
     from .modes.host_mode import HostMode
@@ -3407,11 +3486,12 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--window", default="year",
               help='Time window: "year", "decade", or a number (e.g. "5" for 5-year bins).')
 def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
-             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,n_per_window, window):
+             segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf, annotate_table, annotate_field,n_per_window, window):
     """Time-stratified mode: N representatives per time window."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf,
+                             annotate_table=annotate_table, annotate_field=annotate_field)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -3430,6 +3510,7 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    _annotate_sequences(sequences, cfg)
     click.echo(qc_report.summary())
 
     from .modes.time_mode import TimeMode
@@ -3449,11 +3530,12 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--n-per-country", "-n", required=True, type=int,
               help="Target representatives per country.")
 def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
-                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,n_per_country):
+                   segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf, annotate_table, annotate_field,n_per_country):
     """Geographic mode: N representatives per country."""
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf,
+                             annotate_table=annotate_table, annotate_field=annotate_field)
     if segmented:
         cfg["segmented"]["enabled"] = True
     if dry_run:
@@ -3472,6 +3554,7 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    _annotate_sequences(sequences, cfg)
     click.echo(qc_report.summary())
 
     from .modes.geographic_mode import GeographicMode
@@ -3511,7 +3594,7 @@ _METADATA_TABLE_HELP = (
               help="Regex to extract the field value from FASTA headers "
                    "(segmented: the original per-segment headers).")
 def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,field, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf, annotate_table, annotate_field,field, n_per_group,
                metadata_table, field_regex):
     """Custom metadata mode: group by any field or metadata table column.
 
@@ -3528,7 +3611,8 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
     """
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf,
+                             annotate_table=annotate_table, annotate_field=annotate_field)
     if segmented:
         cfg["segmented"]["enabled"] = True
 
@@ -3557,6 +3641,7 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    _annotate_sequences(sequences, cfg)
     click.echo(qc_report.summary())
 
     result = mode.run(sequences)
@@ -3578,7 +3663,7 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
 @click.option("--metadata-table", default=None,
               help=_METADATA_TABLE_HELP)
 def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
-               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf,fields, n_per_group,
+               segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf, annotate_table, annotate_field,fields, n_per_group,
                metadata_table):
     """Hybrid mode: multi-dimensional stratification (e.g. genus × host × year).
 
@@ -3589,7 +3674,8 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
     field_list = [f.strip() for f in fields.split(",")]
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
-                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf)
+                             verbose=verbose, protect_ids=protect_ids, pin_ids=pin_ids, exclude_ids=exclude_ids, newick=newick, pdf=pdf,
+                             annotate_table=annotate_table, annotate_field=annotate_field)
     if segmented:
         cfg["segmented"]["enabled"] = True
 
@@ -3616,6 +3702,7 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
+    _annotate_sequences(sequences, cfg)
     click.echo(qc_report.summary())
 
     result = mode.run(sequences)

@@ -781,6 +781,24 @@ phylo:
     # the rank at which a taxon that is monophyletic on the whole-genome tree
     # but broken on a single marker tree localises the reassortment signal.
     include_species: false
+    # Assess NON-rank groupings as well as the taxonomic ranks. Each entry is
+    # a leaf-property name the trees carry: an `annotate.fields` label
+    # (clade, genotype) or a metadata property repseq always emits (subtype,
+    # host, country). Each key appears in the report's `rank` column and in
+    # {prefix}_segment_status_matrix.tsv, with its rows sorted above the rank
+    # rows.
+    #
+    # THIS IS WHAT MAKES THE REPORT WORK ON A FLAT-TAXONOMY VIRUS. A global
+    # Alphainfluenzavirus run resolves to ONE species, so every rank row is
+    # trivially monophyletic and the segment-status matrix comes out empty —
+    # yet influenza A is the most reassortment-prone virus there is, because
+    # its reassortment is between SUBTYPES and HA CLADES, which repseq
+    # carries as metadata, not as a taxonomic rank. An empty matrix must
+    # never be read as "no reassortment": check the report's distinct taxa
+    # per rank first, and set extra_keys here.
+    #   extra_keys: [subtype]          # influenza A/B, any serotyped virus
+    #   extra_keys: [clade]            # with annotate.fields: [clade]
+    extra_keys: []
   phyloxml:
     # <confidence> element's type= attribute. "auto" picks "sh_like" for
     # FastTree and "ufboot" for IQ-TREE (which matches the default tree
@@ -905,6 +923,47 @@ phylo:
     # rough overview anyway. With the default max_leaves: 5000 cap this
     # never triggers; it only matters when max_leaves: 0 uncaps the pool.
     parttree_threshold: 10000
+
+# External per-sequence labels from a table another tool wrote — Nextclade HA
+# clades, a GenoFLU genotype, a curated spreadsheet. Available to EVERY mode,
+# because labelling records is independent of choosing them: a global panel run
+# can carry clade tags while still spending its budget on diversity.
+#
+# Each named column is attached to every sequence and then emitted as:
+#   * a [<field>=<value>] tag in the protein FASTA headers (all-protein,
+#     per-protein and extra_protein files), beside [subtype=...];
+#   * a repseq:<field> <property> on every phyloXML tree leaf, so a viewer
+#     such as Archaeopteryx can show and colour by it;
+#   * per-label monophyly rows, when the field is also named in
+#     phylo.monophyly.extra_keys.
+# The nucleotide FASTA headers are left exactly as they are, so anything
+# parsing those files keeps working.
+#
+# A column named after metadata repseq itself writes (species, host, strain,
+# subtype, isolate, length, …) is REFUSED at startup: the label could not be
+# emitted without shadowing the real value, so renaming the column beats
+# dropping it silently. Two columns that differ only in case or punctuation
+# are refused for the same reason — both would become the same tag key.
+#
+# Rows are bound by accession, sequence id, isolate name or strain — the same
+# matching `custom --field` uses, so a table keyed by HA accession reaches a
+# whole segmented isolate. A sequence no row matches is labelled `Unknown` and
+# one whose rows disagree `Conflict`: the tag always says what the table said,
+# with no fallback to GenBank metadata. A table that binds NOTHING is a loud
+# warning, not an error — it costs a metadata tag, and the run's selection is
+# unaffected.
+#
+# A `custom --field clade --metadata-table ...` run needs nothing here: the
+# stratification labels are emitted the same way.
+annotate:
+  # Path to a TSV / CSV (delimiter sniffed; an Excel BOM is tolerated).
+  table: null
+  # Column names to attach. Matched case-insensitively against the header.
+  # The tag / property key is the name lowercased with punctuation turned to
+  # `_` ("HA clade" -> ha_clade), and phylo.monophyly.extra_keys normalises
+  # its entries the same way, so either spelling works there.
+  #   fields: [clade]
+  fields: []
 
 output:
   dir: ./repseq_output

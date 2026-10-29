@@ -548,9 +548,26 @@ DEFAULTS: dict[str, Any] = {
         # reassortment / misannotation analysis, where species is the rank at
         # which a taxon broken on a marker tree but clean on the genome tree
         # localises the signal.
+        # ``extra_keys`` assesses NON-rank groupings alongside the
+        # taxonomic ranks — any repseq:<name> property the tree leaves
+        # carry, i.e. an annotate.fields label ("clade", "genotype") or a
+        # metadata property repseq already emits ("subtype", "host",
+        # "country"). This is what makes the report usable on a virus whose
+        # taxonomy is flat: a global Alphainfluenzavirus run resolves to ONE
+        # species, so every rank row is trivially monophyletic and the
+        # segment-status matrix comes out empty — while the reassortment the
+        # run exists to find is between SUBTYPES and HA CLADES, which repseq
+        # carries as metadata rather than as a rank. With
+        # extra_keys: [subtype] (or [clade] on an annotated run) each key
+        # becomes a `rank` value in {prefix}_monophyly.tsv and a row in the
+        # segment-status matrix, so "clade 2.3.4.4b is monophyletic on the
+        # genome tree but breaks on segment 6" becomes a reported line.
+        # Rows for these keys sort ABOVE the rank rows, since on such a
+        # dataset they are the only informative ones.
         "monophyly": {
             "min_support": 70,
             "include_species": False,
+            "extra_keys": [],
         },
         # PhyloXML writer knobs.
         "phyloxml": {
@@ -688,6 +705,18 @@ DEFAULTS: dict[str, Any] = {
         "ncbi_email": None,
         "ncbi_api_key": None,
         "cache_ttl_days": 90,
+    },
+    # External per-sequence labels from a table some other tool wrote
+    # (Nextclade HA clades, a GenoFLU genotype, a curated spreadsheet).
+    # Available to EVERY mode, because labelling records is independent of
+    # choosing them: a global panel run can carry clade tags while still
+    # spending its budget on diversity. Each named column becomes a
+    # [<field>=<value>] tag in the protein FASTA headers and a
+    # repseq:<field> property on every tree leaf; name it in
+    # phylo.monophyly.extra_keys to get per-label monophyly rows too.
+    "annotate": {
+        "table": None,
+        "fields": [],
     },
     "output": {
         "dir": "./repseq_output",
@@ -2185,6 +2214,25 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         mono_cfg["include_species"], bool
     ):
         errors.append("phylo.monophyly.include_species must be a boolean")
+    extra_keys = mono_cfg.get("extra_keys", [])
+    if not isinstance(extra_keys, list) or any(
+        not isinstance(k, str) or not k.strip() for k in extra_keys
+    ):
+        errors.append(
+            "phylo.monophyly.extra_keys must be a list of leaf-property "
+            "names, e.g. [subtype] or [clade]"
+        )
+
+    ann = cfg.get("annotate", {}) or {}
+    if ann.get("table") is not None and not isinstance(ann.get("table"), str):
+        errors.append("annotate.table must be a path string (or null)")
+    ann_fields = ann.get("fields", [])
+    if not isinstance(ann_fields, list) or any(
+        not isinstance(f, str) or not f.strip() for f in ann_fields
+    ):
+        errors.append(
+            "annotate.fields must be a list of column names, e.g. [clade]"
+        )
 
     pc_cfg = phylo_cfg.get("pre_cluster_tree", {}) or {}
     if "enabled" in pc_cfg and not isinstance(pc_cfg["enabled"], bool):

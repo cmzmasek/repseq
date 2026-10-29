@@ -479,6 +479,29 @@ def _serialise_leaf(
         )
         prop.text = str(value)
 
+    # External label <property> elements (annotate.fields / a custom-mode
+    # stratification field): repseq:clade, repseq:genotype, … Emitted beside
+    # the metadata properties and under the same namespace, so a viewer can
+    # show and colour by them and `phylo.monophyly.extra_keys` can assess
+    # them as a non-rank grouping — the only way a flat-taxonomy virus like
+    # influenza A gets a usable monophyly report. Keys already emitted above
+    # are skipped, so a label field named after real metadata (`host`) never
+    # contradicts the metadata property of the same name.
+    # No skip list to pass: `label_items` always refuses a key some surface
+    # already emits (models.RESERVED_LABEL_KEYS), which is both prefix-proof
+    # and identical to what the FASTA writers do.
+    for ref, value in seq.label_items():
+        prop = ET.SubElement(
+            clade,
+            "property",
+            {
+                "ref": f"repseq:{ref}",
+                "datatype": "xsd:string",
+                "applies_to": "clade",
+            },
+        )
+        prop.text = value
+
     # Representative flag (pre-cluster overview tree only). The pre-cluster
     # tree is the one tree whose leaves are the FULL post-QC pool, so "is
     # this leaf an elected representative?" is a real, filterable question

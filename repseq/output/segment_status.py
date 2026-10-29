@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 from .flags import _read_tsv, _short_tree
-from ..phylo.monophyly import _RANK_INDEX
+from ..phylo.monophyly import group_sort_index
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ def write_segment_status_matrix(out_dir: Path, prefix: str) -> Optional[Path]:
     # (so the candidate calls surface at the top), then by taxon.
     out_rows.sort(
         key=lambda r: (
-            _RANK_INDEX.get(r["rank"], 99),
+            group_sort_index(r["rank"]),
             r["single_marker_break"] == "",
             r["taxon"],
         )

@@ -376,6 +376,44 @@ def _fasta_safe(value: Any) -> str:
     return _FASTA_HEADER_UNSAFE_RE.sub(" ", str(value)).strip()
 
 
+def _identity_tag_specs(
+    parent_seq: Sequence, isolate_id: Optional[str],
+) -> list[tuple[str, Any]]:
+    """The shared head of both protein-FASTA tag ladders.
+
+    Identity (organism + the 9-rank taxonomy ladder) → biological context
+    (isolate, segment, host, subtype) → the record's external labels
+    (`annotate.fields`: clade, genotype). ONE function because
+    :func:`_write_protein_fasta_record` and
+    :func:`_write_sliced_peptide_record` are near-verbatim copies of each
+    other: the 2026-10-29 review found the label block added to the first
+    only, so a polyprotein's whole-ORF FASTA carried `[clade=...]` while
+    every per-peptide file beside it in the same directory did not. Each
+    writer appends its own tail (length/hmmscan vs peptide/cut_method).
+
+    Labels come last in this head, after the serotype they refine, and
+    `Sequence.label_items` refuses any key some surface already emits — so a
+    label can never shadow a real tag here nor diverge from the tree.
+    """
+    # Ranks are read via TaxonomyInfo.get_rank() so they include the
+    # sub-ranks that only exist in the lineage map.
+    tax = parent_seq.taxonomy
+    specs: list[tuple[str, Any]] = [
+        ("organism", parent_seq.organism),
+        ("ncbi_taxon_id", tax.taxid if tax else None),
+    ]
+    if tax:
+        specs.extend((rank, tax.get_rank(rank)) for rank in _TAX_RANKS)
+    specs.extend([
+        ("isolate", isolate_id),
+        ("segment", parent_seq.segment),
+        ("host", parent_seq.host),
+        ("subtype", parent_seq.subtype),
+    ])
+    specs.extend(parent_seq.label_items())
+    return specs
+
+
 def _write_protein_fasta_record(
     fh,
     prot: dict,
@@ -389,8 +427,9 @@ def _write_protein_fasta_record(
 
         >{protein_id} {product} [organism=...] [ncbi_taxon_id=...]
         [species=...] [genus=...] [family=...] [order=...] [class=...]
-        [isolate=...] [segment=...] [host=...] [subtype=...] [country=...]
-        [collection_date=...] [length=...] [parent={parent_accession}]
+        [isolate=...] [segment=...] [host=...] [subtype=...]
+        [<annotate_field>=...] [country=...] [collection_date=...]
+        [length=...] [parent={parent_accession}]
 
     Tags are NCBI-style ``[key=value]`` and only emitted when the value is
     populated; empty fields are skipped to keep headers short on
@@ -405,24 +444,14 @@ def _write_protein_fasta_record(
     pid = prot.get("protein_id") or "unknown"
     product = prot.get("product") or ""
     parent_acc = parent_seq.accession or parent_seq.id
-    tax = parent_seq.taxonomy
 
-    # Tag order is deliberate; see docstring. Taxonomy ranks are read
-    # via TaxonomyInfo.get_rank() so they include the sub-ranks that
-    # only exist in the lineage map.
-    tag_specs: list[tuple[str, Any]] = [
-        ("organism", parent_seq.organism),
-        ("ncbi_taxon_id", tax.taxid if tax else None),
-    ]
-    if tax:
-        tag_specs.extend(
-            (rank, tax.get_rank(rank)) for rank in _TAX_RANKS
-        )
+    # Tag order is deliberate; see docstring. The identity + context head
+    # (taxonomy ladder, isolate/segment/host/subtype, external labels) is
+    # shared with the sliced-peptide writer.
+    tag_specs: list[tuple[str, Any]] = _identity_tag_specs(
+        parent_seq, isolate_id
+    )
     tag_specs.extend([
-        ("isolate", isolate_id),
-        ("segment", parent_seq.segment),
-        ("host", parent_seq.host),
-        ("subtype", parent_seq.subtype),
         ("country", parent_seq.country),
         ("collection_date", parent_seq.collection_date),
         ("length", prot.get("length")),
@@ -757,9 +786,11 @@ def _write_sliced_peptide_record(
 ) -> None:
     """Emit one FASTA record for a mature peptide.
 
-    Headers reuse the existing protein-FASTA bracket-tag set
-    (organism + 9-rank taxonomy + isolate + segment + host + subtype +
-    country + collection_date + length + parent) and append polyprotein-specific
+    Headers reuse the existing protein-FASTA bracket-tag set — the same
+    :func:`_identity_tag_specs` head the all-protein writer builds from
+    (organism + 9-rank taxonomy + isolate + segment + host + subtype + any
+    external ``annotate.fields`` label) plus country + collection_date +
+    length + parent — and append polyprotein-specific
     tags so a downstream consumer can grep them: ``[polyprotein=...]``,
     ``[peptide=...]``, ``[peptide_range_aa=from-to]``, ``[cut_method=...]``.
     The ``>{header_id}`` is built as ``<parent_protein_id>:<peptide_name>``
@@ -770,21 +801,13 @@ def _write_sliced_peptide_record(
     parent_pid = sliced.parent_protein_id or "unknown"
     pep_name = sliced.peptide_name or "peptide"
     parent_acc = sliced.parent_accession or parent_seq.accession or parent_seq.id
-    tax = parent_seq.taxonomy
 
-    tag_specs: list[tuple[str, Any]] = [
-        ("organism", parent_seq.organism),
-        ("ncbi_taxon_id", tax.taxid if tax else None),
-    ]
-    if tax:
-        tag_specs.extend(
-            (rank, tax.get_rank(rank)) for rank in _TAX_RANKS
-        )
+    # Same identity + context head as the all-protein writer, labels
+    # included, so a peptide record and its parent ORF agree tag for tag.
+    tag_specs: list[tuple[str, Any]] = _identity_tag_specs(
+        parent_seq, isolate_id
+    )
     tag_specs.extend([
-        ("isolate", isolate_id),
-        ("segment", parent_seq.segment),
-        ("host", parent_seq.host),
-        ("subtype", parent_seq.subtype),
         ("country", parent_seq.country),
         ("collection_date", parent_seq.collection_date),
         ("length", sliced.length_aa),

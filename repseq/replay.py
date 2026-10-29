@@ -39,6 +39,7 @@ from typing import Any, Optional
 import click
 
 from . import __version__ as REPSEQ_VERSION
+from .annotate import set_labels
 from .lockfile import LockfileVersionError, compute_sha256, read_lockfile
 from .models import (
     Cluster,
@@ -254,6 +255,10 @@ def _build_replay_result(
                 isolate_id=isolate_id,
             )
             concat.concat_segments = seg_records
+            # External labels are not in the record, so they come back from
+            # the lockfile (set_labels also pushes them onto the segment
+            # records, which is what the protein-FASTA writer reads).
+            set_labels(concat, rep_entry.get("group_labels") or {})
             representatives.append(concat)
             complete_isolates[isolate_id] = seg_records
             if any_missing:
@@ -270,6 +275,7 @@ def _build_replay_result(
                 acc, body, rep_entry.get("organism"),
                 source_meta.get(acc),
             )
+            set_labels(seq, rep_entry.get("group_labels") or {})
             representatives.append(seq)
 
     result = RunResult(

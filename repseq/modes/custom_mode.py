@@ -12,6 +12,7 @@ import click
 
 from ..clustering import compute_diversity_curve
 from ..errors import InputError
+from ..annotate import set_labels
 from ..models import Cluster, GroupStat, RunResult, Sequence
 from ..overrides import _norm_id, _strip_version
 from .base import BaseMode
@@ -231,18 +232,41 @@ def _identifiers(seq: Sequence) -> list[tuple[str, str, Optional[str]]]:
     return out
 
 
-def _table_value(seq: Sequence, column: str, table: MetadataTable) -> Optional[FieldValue]:
-    found: list[tuple[str, str, str]] = []  # (value, kind, where)
+def matched_rows(
+    seq: Sequence, table: MetadataTable,
+) -> list[tuple[int, str, str]]:
+    """``(row index, identifier kind, where)`` for every table row this
+    sequence's identifiers reach, in identifier order, de-duplicated.
+
+    Split out so a MULTI-column lookup derives the sequence's identifiers and
+    walks the index ONCE: a segmented CONCAT offers ~34 identifier strings
+    (isolate, strain, and every segment's accession/id/isolate/strain), each
+    normalised through ``_norm_id`` / ``_strip_version``, so resolving two
+    annotate columns per isolate used to do all of that twice for rows it had
+    already found (2026-10-29 review). ``resolve_field`` and
+    :func:`_table_value` go through here too, so there is one implementation.
+    """
+    out: list[tuple[int, str, str]] = []
     seen_rows: set[int] = set()
     for kind, raw, segment in _identifiers(seq):
         for i in table.rows_for(raw):
             if i in seen_rows:
                 continue
             seen_rows.add(i)
-            value = (table.rows[i].get(column) or "").strip()
-            if value:
-                where = raw if segment is None else f"{raw} (segment {segment})"
-                found.append((value, kind, where))
+            where = raw if segment is None else f"{raw} (segment {segment})"
+            out.append((i, kind, where))
+    return out
+
+
+def value_from_rows(
+    rows: list[tuple[int, str, str]], column: str, table: MetadataTable,
+) -> Optional[FieldValue]:
+    """One column's :class:`FieldValue` off rows from :func:`matched_rows`."""
+    found: list[tuple[str, str, str]] = []  # (value, kind, where)
+    for i, kind, where in rows:
+        value = (table.rows[i].get(column) or "").strip()
+        if value:
+            found.append((value, kind, where))
     if not found:
         return None
     if len({v for v, _, _ in found}) == 1:
@@ -252,6 +276,13 @@ def _table_value(seq: Sequence, column: str, table: MetadataTable) -> Optional[F
         CONFLICT_GROUP, "conflict",
         "; ".join(f"{where}={value}" for value, _, where in found),
     )
+
+
+def _table_value(
+    seq: Sequence, column: str, table: MetadataTable,
+) -> Optional[FieldValue]:
+    """One column's value for one sequence (the single-column shorthand)."""
+    return value_from_rows(matched_rows(seq, table), column, table)
 
 
 def _regex_group(m: re.Match) -> str:
@@ -493,9 +524,35 @@ class CustomMode(BaseMode):
             )
         groups: dict[str, list[Sequence]] = {}
         assignments: list[dict[str, str]] = []
+        relabelled: list[str] = []
         for seq, fv in zip(sequences, values):
             groups.setdefault(fv.value, []).append(seq)
             assignments.append(assignment_row(seq, self.field, fv, fv.value))
+            # The stratification value is also an external label, so a
+            # `--field clade` run gets [clade=...] FASTA tags and
+            # repseq:clade tree properties without a second table through
+            # annotate.table. A field naming metadata the output already
+            # carries (`--field host`) is dropped at emission by
+            # Sequence.label_items, never duplicated. overwrite=True because
+            # THIS is the value that chose the representatives: if an
+            # annotate table labelled the same field first, the audit file
+            # and the headers would otherwise disagree.
+            relabelled += set_labels(
+                seq, {self.field: fv.value}, overwrite=True,
+            )
+
+        # An annotate table had labelled the same field with a different
+        # value; the stratification value replaced it, because that is what
+        # chose the representatives. Say so rather than letting the two
+        # sources disagree silently.
+        for fname in dict.fromkeys(relabelled):
+            click.echo(
+                f"[annotate] '{fname}' was labelled by both annotate.table "
+                f"and the selection field; the selection value is the one "
+                f"emitted, so the FASTA tags and tree properties match "
+                "{prefix}_group_assignments.tsv.",
+                err=True,
+            )
 
         all_reps: list[Sequence] = []
         all_clusters: list[Cluster] = []

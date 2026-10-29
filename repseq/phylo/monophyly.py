@@ -53,10 +53,13 @@ The most informative power-pairing is with ``{prefix}_incongruence.tsv``
 
 from __future__ import annotations
 
+import difflib
 import logging
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional
+
+from ..models import sanitize_label_key
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +84,19 @@ _RANK_SET = frozenset(_RANKS_WITH_SPECIES)
 _RANK_INDEX = {r: i for i, r in enumerate(_RANKS_WITH_SPECIES)}
 
 
+def group_sort_index(key: str) -> int:
+    """Sort position of a grouping key: taxonomic ranks fine→coarse, and any
+    NON-rank key (``phylo.monophyly.extra_keys``: subtype, clade, genotype …)
+    ABOVE them all.
+
+    Deliberate: on the datasets where extra keys are configured the taxonomy
+    is flat — a global influenza A run is one species — so the rank rows are
+    trivially monophyletic noise and the extra-key rows are the whole point.
+    Shared with ``output.segment_status`` so the report and its pivot agree.
+    """
+    return _RANK_INDEX.get(key, -1)
+
+
 class _Node:
     __slots__ = ("children", "leaves", "support")
 
@@ -90,12 +106,24 @@ class _Node:
         self.support: Optional[float] = None  # internal-node branch support
 
 
-def _parse_tree(path: Path) -> Optional[tuple[_Node, list[dict[str, str]]]]:
+def _parse_tree(
+    path: Path,
+    extra_keys: tuple[str, ...] = (),
+    seen_properties: Optional[set[str]] = None,
+) -> Optional[tuple[_Node, list[dict[str, str]]]]:
     """Parse a phyloXML into ``(root, leaf_taxa)``.
 
-    ``leaf_taxa[i]`` is leaf *i*'s ``{rank: taxon}`` map (read from its
-    ``repseq:<rank>`` properties); ``root.leaves`` etc. carry the set of leaf
-    indices below each node. Returns None on a malformed / non-phyloXML file.
+    ``leaf_taxa[i]`` is leaf *i*'s ``{key: value}`` map, read from its
+    ``repseq:<key>`` properties: every taxonomic rank, plus each name in
+    ``extra_keys`` (a ``annotate.fields`` label such as ``clade``, or a
+    metadata property repseq always emits such as ``subtype``). Only
+    CONFIGURED extra keys are captured, so an unrelated property —
+    ``collection_date``, ``is_representative`` — can never be mistaken for a
+    grouping. ``root.leaves`` etc. carry the set of leaf indices below each
+    node. ``seen_properties``, when given, collects every ``repseq:<name>``
+    suffix encountered on a leaf, so the caller can tell a key that matched
+    nothing from a key that is simply misspelled. Returns None on a malformed
+    / non-phyloXML file.
     """
     try:
         root_el = ET.parse(path).getroot()
@@ -131,7 +159,9 @@ def _parse_tree(path: Path) -> Optional[tuple[_Node, list[dict[str, str]]]]:
                 if ref.startswith("repseq:"):
                     rank = ref.split(":", 1)[1]
                     text = (prop.text or "").strip()
-                    if rank in _RANK_SET and text:
+                    if seen_properties is not None:
+                        seen_properties.add(rank)
+                    if (rank in _RANK_SET or rank in extra_keys) and text:
                         taxa[rank] = text
             leaf_taxa.append(taxa)
             node.leaves = frozenset({idx})
@@ -330,6 +360,7 @@ def write_monophyly_report(
     prefix: str,
     min_support: float = 0,
     include_species: bool = False,
+    extra_keys: tuple[str, ...] = (),
 ) -> Optional[Path]:
     """Sweep every ``*_tree.xml`` under *out_dir* into ``{prefix}_monophyly.tsv``.
 
@@ -340,6 +371,16 @@ def write_monophyly_report(
     species-rank rows — the rank where intra-genus reassortment and most
     misannotation live, but also the noisiest, hence opt-in.
 
+    ``extra_keys`` (``phylo.monophyly.extra_keys``) assesses non-rank
+    groupings as well: each name is a ``repseq:<name>`` leaf property —
+    an ``annotate.fields`` label (``clade``, ``genotype``) or a metadata
+    property repseq always emits (``subtype``, ``host``). They appear in the
+    ``rank`` column like any rank, sorted above the real ranks. Without them
+    this report says nothing at all about a virus whose taxonomy is flat: a
+    global *Alphainfluenzavirus* run is ONE species, so every rank row is
+    trivially monophyletic — while its reassortment, the thing the run exists
+    to find, is between subtypes and HA clades.
+
     Returns the written path, or None when there are no trees / nothing to
     report. Soft by construction — the caller wraps it so a parse failure
     never voids the trees that were already built.
@@ -348,11 +389,25 @@ def write_monophyly_report(
     if not xmls:
         return None
 
-    ranks = _RANKS_WITH_SPECIES if include_species else _RANKS
+    # Sanitised the same way the phyloXML writer sanitises a label field,
+    # or the spelling the user is told to reuse (`--annotate-field 'HA clade'`
+    # → property `repseq:ha_clade`) would silently match nothing — an empty
+    # report that reads as "no reassortment", the exact misreading this key
+    # exists to prevent (2026-10-29 review).
+    base = _RANKS_WITH_SPECIES if include_species else _RANKS
+    extra = tuple(
+        k for k in dict.fromkeys(
+            sanitize_label_key(k) for k in extra_keys if k
+        ) if k and k not in base
+    )
+    ranks = base + extra
+    seen_properties: set[str] = set()
     rows_out: list[dict] = []
     for path in xmls:
         rel = path.relative_to(out_dir)
-        parsed = _parse_tree(path)
+        parsed = _parse_tree(
+            path, extra_keys=extra, seen_properties=seen_properties,
+        )
         if parsed is None:
             continue
         root, leaf_taxa = parsed
@@ -362,11 +417,28 @@ def write_monophyly_report(
             row["tree"] = str(rel)
             rows_out.append(row)
 
+    # A key that matched no leaf property yields no rows, which is
+    # indistinguishable from "nothing to report" — and this report exists
+    # precisely so an empty result is not misread. Name it, with a hint from
+    # the properties the trees DO carry.
+    for key in extra:
+        if key not in seen_properties:
+            close = difflib.get_close_matches(
+                key, sorted(seen_properties), n=1
+            )
+            hint = f" Did you mean '{close[0]}'?" if close else ""
+            logger.warning(
+                "[monophyly] phylo.monophyly.extra_keys names '%s', but no "
+                "tree leaf carries that property, so it produced no rows.%s "
+                "A label needs annotate.fields (or a custom/hybrid "
+                "selection field) of the same name.", key, hint,
+            )
+
     if not rows_out:
         return None
 
     rows_out.sort(
-        key=lambda r: (r["tree"], _RANK_INDEX.get(r["rank"], 99), r["taxon"])
+        key=lambda r: (r["tree"], group_sort_index(r["rank"]), r["taxon"])
     )
     path = out_dir / f"{prefix}_monophyly.tsv"
     with open(path, "w") as fh:

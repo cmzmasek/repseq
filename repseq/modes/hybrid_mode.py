@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import click
+
+from ..annotate import set_labels
 from ..clustering import compute_diversity_curve
 from ..errors import InputError
 from ..models import Cluster, GroupStat, RunResult, Sequence
@@ -104,12 +107,35 @@ class HybridMode(BaseMode):
 
         groups: dict[tuple[str, ...], list[Sequence]] = {}
         assignments: list[dict[str, str]] = []
+        relabelled: list[str] = []
         for seq, vals in zip(sequences, resolved):
             key = tuple(v.value for v in vals)
             groups.setdefault(key, []).append(seq)
             label = "|".join(f"{f}={v}" for f, v in zip(self.fields, key))
             for field, fv in zip(self.fields, vals):
                 assignments.append(assignment_row(seq, field, fv, label))
+            # Every stratification field is also an external label — the
+            # reason Sequence.group_labels is a dict: `--fields clade,host`
+            # emits [clade=...] and keeps [host=...] as the metadata tag it
+            # already was. overwrite=True: these values chose the
+            # representatives, so they outrank an annotate table's.
+            relabelled += set_labels(
+                seq, {f: fv.value for f, fv in zip(self.fields, vals)},
+                overwrite=True,
+            )
+
+        # An annotate table had labelled the same field with a different
+        # value; the stratification value replaced it, because that is what
+        # chose the representatives. Say so rather than letting the two
+        # sources disagree silently.
+        for fname in dict.fromkeys(relabelled):
+            click.echo(
+                f"[annotate] '{fname}' was labelled by both annotate.table "
+                f"and the selection field; the selection value is the one "
+                f"emitted, so the FASTA tags and tree properties match "
+                "{prefix}_group_assignments.tsv.",
+                err=True,
+            )
 
         all_reps: list[Sequence] = []
         all_clusters: list[Cluster] = []

@@ -126,24 +126,35 @@ def _representative_entry(rep: Sequence) -> dict[str, Any]:
     accessions so a replay can refetch each segment and rebuild the
     CONCAT. Non-segmented reps just carry an accession.
     """
+    # External labels (annotate.fields / a custom-mode stratification field).
+    # Recorded because they are NOT recoverable from the record: they came
+    # from a user table, so a replay without them would silently write
+    # headers and trees missing the [clade=...] tags the original run had,
+    # against replay's promise of byte-identical output. An OPTIONAL key, so
+    # a lockfile written before this release replays unchanged.
+    labels = dict(rep.group_labels) if rep.group_labels else None
     if rep.concat_segments:
         seg_accessions: dict[str, Optional[str]] = {}
         for seg in rep.concat_segments:
             if seg.segment:
                 seg_accessions[seg.segment] = seg.accession
-        return {
+        entry = {
             "id": rep.id,
             "kind": "isolate",
             "isolate_id": rep.isolate_id,
             "organism": rep.organism,
             "segment_accessions": seg_accessions,
         }
-    return {
-        "id": rep.id,
-        "kind": "sequence",
-        "accession": rep.accession,
-        "organism": rep.organism,
-    }
+    else:
+        entry = {
+            "id": rep.id,
+            "kind": "sequence",
+            "accession": rep.accession,
+            "organism": rep.organism,
+        }
+    if labels:
+        entry["group_labels"] = labels
+    return entry
 
 
 def build_lockfile(

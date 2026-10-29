@@ -2,9 +2,63 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
+
+
+def sanitize_label_key(name: str) -> str:
+    """A metadata-table column name as a FASTA tag key / phyloXML property.
+
+    Table columns come from whatever the user's tool wrote, so they can carry
+    spaces, dots or mixed case (Nextclade's ``clade``, a hand-made
+    ``HA clade``). Both emission surfaces need one stable token: a FASTA
+    ``[key=value]`` tag must not contain whitespace or brackets, and a
+    phyloXML property ``ref`` is an XML QName after the ``repseq:`` prefix.
+    Lowercases, maps every run of non-alphanumerics to ``_``, trims those from
+    the ends, and drops a leading digit run so the result can never start a
+    QName illegally. Returns ``""`` when nothing usable is left, which callers
+    skip.
+    """
+    key = re.sub(r"[^A-Za-z0-9]+", "_", str(name or "")).strip("_").lower()
+    return re.sub(r"^[0-9_]+", "", key)
+
+
+#: Keys an external label may NOT take, because some output surface already
+#: emits them: the protein-FASTA bracket tags (both the all-protein and the
+#: sliced-peptide ladders) and the phyloXML leaf properties.
+#:
+#: ONE set for every emitter, deliberately. Deriving each surface's skip list
+#: from the tags it happens to build was the 2026-10-29 review's finding:
+#: `--annotate-field species` landed a table value in the `[species=...]`
+#: slot of the documented NCBI 9-rank ladder on exactly those records whose
+#: taxonomy had failed to resolve (the rank tags are only added when
+#: `taxonomy` is populated), while `--annotate-field strain` reached the FASTA
+#: header but never the tree. A label that could shadow a real field on one
+#: surface and not another is worse than one that is simply refused.
+#:
+#: `tests/test_annotate_labels.py` asserts this covers what the two emitters
+#: actually write, so adding a tag or a leaf property there without adding it
+#: here fails the suite rather than silently reopening the hole.
+RESERVED_LABEL_KEYS: frozenset[str] = frozenset(
+    # The 9-rank taxonomy ladder (output.report._TAX_RANKS / phyloXML
+    # _TAXONOMY_RANKS — the same ladder under both names).
+    ("species", "subgenus", "genus", "subfamily", "family",
+     "suborder", "order", "subclass", "class")
+    # Identity + provenance tags of the protein FASTA writers.
+    + ("organism", "ncbi_taxon_id", "isolate", "segment", "length",
+       "hmmscan", "parent")
+    # Sliced-peptide tags (output.report._write_sliced_peptide_record).
+    + ("polyprotein", "peptide", "peptide_range_aa", "cut_method",
+       "matched_arch")
+    # Collection metadata, emitted by both surfaces.
+    + ("host", "subtype", "collection_date", "country")
+    # phyloXML-only leaf properties.
+    + ("strain", "isolate_id", "year", "is_representative",
+       "nuc_acc", "protein_acc", "protein_names")
+)
 
 
 class SequenceType(Enum):
@@ -122,6 +176,25 @@ class Sequence:
     # single "segment", and the writer reads from ``seq`` directly.
     concat_segments: Optional[list["Sequence"]] = None
 
+    # External per-sequence labels, ``{field_name: value}`` — an influenza HA
+    # clade, a GenoFLU genotype, any column of a user metadata table. A dict
+    # rather than one string because `hybrid` stratifies on SEVERAL fields at
+    # once and each keeps its own label. Populated by
+    # ``annotate.annotate_sequences`` (``annotate.table`` / ``--annotate-table``,
+    # available to every mode) and by the ``custom`` / ``hybrid`` stratification
+    # itself, so a per-clade run needs no second table. The sentinels
+    # ``Unknown`` / ``Conflict`` are REAL values here, not absences: a sequence
+    # the table did not bind is labelled, so a missing tag downstream means
+    # "this run had no labels" rather than "this record was not in the table".
+    # Set on a segmented CONCAT and on each of its ``concat_segments``, because
+    # the protein-FASTA writer receives the SEGMENT record as the parent.
+    # Emitted as ``[<field>=<value>]`` FASTA tags and ``repseq:<field>``
+    # phyloXML properties via :meth:`label_items`; never as a TSV column, since
+    # the representative tables' schema is harmonised across modes and a column
+    # named after whatever field was passed would break that
+    # (``{prefix}_group_assignments.tsv`` carries it instead).
+    group_labels: Optional[dict[str, str]] = None
+
     # QC state
     qc_passed: bool = True
     qc_fail_reason: Optional[str] = None
@@ -129,6 +202,34 @@ class Sequence:
     @property
     def length(self) -> int:
         return len(self.sequence)
+
+    def label_items(
+        self, skip: Collection[str] = (),
+    ) -> list[tuple[str, str]]:
+        """``group_labels`` as sanitised ``(key, value)`` pairs to emit.
+
+        ONE source of truth for every emitter (protein FASTA tags, phyloXML
+        properties), so a label cannot appear under one spelling in a header
+        and another in a tree. Keys are sanitised with
+        :func:`sanitize_label_key`, and a key in :data:`RESERVED_LABEL_KEYS`
+        is ALWAYS dropped — a field named after metadata some surface already
+        emits (``--annotate-field host``, ``--field genus``) must not shadow
+        the real value anywhere. ``skip`` adds further keys for a caller with
+        extra tags of its own. Declaration order is kept.
+        """
+        if not self.group_labels:
+            return []
+        taken = set(RESERVED_LABEL_KEYS) | {
+            sanitize_label_key(k) for k in skip
+        }
+        out: list[tuple[str, str]] = []
+        for name, value in self.group_labels.items():
+            key = sanitize_label_key(name)
+            if not key or key in taken or value in (None, ""):
+                continue
+            taken.add(key)
+            out.append((key, str(value)))
+        return out
 
     @property
     def ambiguous_fraction(self) -> float:

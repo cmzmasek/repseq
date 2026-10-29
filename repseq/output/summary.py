@@ -1022,7 +1022,10 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
             "`{prefix}_force_selected.tsv`."
         )
 
-    group_sentence = _group_assignment_sentence(result, segmented)
+    group_sentence = (
+        _group_assignment_sentence(result, segmented)
+        + _annotate_sentence(cfg, segmented)
+    )
 
     hmm_sentence = ""
     hmm_rt = cfg.get("_hmm_runtime", {}) or {}
@@ -1137,6 +1140,79 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
         f"under `--per-protein-phylo` a separate tree per entry is also "
         f"emitted into `{{prefix}}_extra_protein/`.\n"
     )
+
+
+def _extra_keys_note(cfg: dict) -> str:
+    """Prose for ``phylo.monophyly.extra_keys`` — the non-rank groupings.
+
+    Worth its own sentence in Methods because it changes what the report
+    MEANS: without it, a one-species dataset produces rows that are all
+    trivially monophyletic, and an empty segment-status matrix that must not
+    be read as "no reassortment".
+    """
+    keys = [
+        str(k) for k in
+        ((cfg.get("phylo", {}) or {}).get("monophyly", {}) or {}).get(
+            "extra_keys"
+        ) or [] if str(k).strip()
+    ]
+    if not keys:
+        return ""
+    names = ", ".join(f"`{k}`" for k in keys)
+    return (
+        f"Alongside the taxonomic ranks, the non-rank grouping(s) {names} "
+        f"were assessed in the same way (`phylo.monophyly.extra_keys`), each "
+        f"appearing in the report's `rank` column: for a virus whose "
+        f"taxonomy is flat — a single species across the whole dataset — "
+        f"these are the groupings in which reassortment is actually "
+        f"visible, and the rank rows alone would be uninformative. "
+    )
+
+
+def _annotate_sentence(cfg: dict, segmented: bool) -> str:
+    """Methods prose for ``annotate.table`` labels: which columns were
+    attached, how many records they bound, and where they are emitted.
+
+    Separate from :func:`_group_assignment_sentence` because annotation and
+    stratification are different claims: one says what the records were
+    labelled, the other says how they were chosen.
+    """
+    from ..annotate import ANNOTATE_RUNTIME, annotate_stats
+
+    stats = annotate_stats(cfg)
+    if not stats:
+        return ""
+    runtime = (cfg.get(ANNOTATE_RUNTIME) or {})
+    name = Path(str(runtime.get("table", ""))).name
+    unit = "isolates" if segmented else "sequences"
+    out = ""
+    for field, c in stats.items():
+        out += (
+            f" External labels for `{field}` were attached from a "
+            f"user-supplied metadata table (`{name}`): "
+            f"**{_fmt_int(c['bound'])} of {_fmt_int(c['n'])}** {unit} matched "
+            f"a table row (by accession, id, isolate name or strain, ignoring "
+            f"case and accession version"
+            + ("; an isolate is matched through any of its segments' "
+               "accessions" if segmented else "")
+            + ")."
+        )
+        if c.get("unknown"):
+            out += (
+                f" {_fmt_int(c['unknown'])} matched no row and were labelled "
+                f"`Unknown`."
+            )
+        if c.get("conflict"):
+            out += (
+                f" {_fmt_int(c['conflict'])} whose rows disagreed were "
+                f"labelled `Conflict`."
+            )
+    out += (
+        " These labels did not affect which sequences were selected; they "
+        "are emitted as `[<field>=<value>]` tags in the protein FASTA "
+        "headers and as `repseq:<field>` properties on every tree leaf."
+    )
+    return out
 
 
 def _group_assignment_sentence(result: RunResult, segmented: bool) -> str:
@@ -1694,7 +1770,7 @@ def _render_phylo(cfg: dict, result: RunResult, phylo_ran: bool,
             "support-aware by default (`phylo.monophyly.min_support`, default "
             "70): branches below that support are collapsed before judging, so "
             "a taxon broken only by weakly-supported branches is not flagged. "
-            f"{species_note}"
+            f"{species_note}{_extra_keys_note(cfg)}"
             "These conflict "
             "signals (with the incongruence table and any taxonomy review) are "
             "distilled into a plain-English `{prefix}_flags.txt`, and the whole "
