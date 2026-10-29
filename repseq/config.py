@@ -712,7 +712,8 @@ DEFAULTS: dict[str, Any] = {
     # Matching is by accession (non-segmented) / isolate_id (segmented),
     # case- and version-insensitive. `protect_stages` is "all" or a subset
     # of the QC stage tokens (duplicates, length, ambiguous, annotation,
-    # protein_count, taxonomy_consistency, protein_quality, hmm). Kept
+    # protein_count, taxonomy_consistency, protein_quality, hmm,
+    # marker_length). Kept
     # sequences are recorded in {prefix}_overrides.tsv and the run summary —
     # protection is never silent. Default off (empty id list = no-op).
     "overrides": {
@@ -799,12 +800,20 @@ _AUDIT_IGNORE_KEYS: frozenset[str] = frozenset({"verbose"})
 _RENAMED_CONFIG_PATHS: frozenset[str] = frozenset({"qc.length_filter"})
 
 _ALLOWED_MARKER_KEYS: frozenset[str] = frozenset({"name", "aliases", "hmms"})
-# extra_protein entries share the marker schema plus an optional
-# ``length_aa: [min, max]`` bound on the picked CDS (v0.75.0). Kept OFF the
-# cluster markers on purpose: their per-protein FASTA must show exactly the
-# CDS clustering used, and clustering has no length bound.
+# ``length_aa: [min, max]`` bounds the CDS a spec may pick. On extra_protein
+# entries (v0.75.0) an out-of-range protein is simply absent for that
+# record. On cluster markers (v0.76.0: non-segmented clustering.cluster_protein
+# entries and segmented segment_markers) it is a QC requirement enforced in
+# EVERY picker, clustering included, so a marker's per-protein FASTA still
+# shows exactly the CDS clustering used; a record with no in-range marker is
+# dropped by the marker-length QC stage. The legacy per-segment
+# ``cluster_protein`` form keeps _ALLOWED_MARKER_KEYS (no bound) — its entries
+# are merged per segment, so a per-entry bound would be ambiguous.
 _ALLOWED_EXTRA_PROTEIN_KEYS: frozenset[str] = _ALLOWED_MARKER_KEYS | {"length_aa"}
-_ALLOWED_SEGMENT_MARKER_KEYS: frozenset[str] = frozenset({"aliases", "hmms"})
+_ALLOWED_CLUSTER_MARKER_KEYS: frozenset[str] = _ALLOWED_MARKER_KEYS | {"length_aa"}
+_ALLOWED_SEGMENT_MARKER_KEYS: frozenset[str] = frozenset(
+    {"aliases", "hmms", "length_aa"}
+)
 _ALLOWED_POLYPROTEIN_SPEC_KEYS: frozenset[str] = frozenset(
     {"name", "peptides", "cut_strategy", "motif_window_aa", "min_peptides_hit"}
 )
@@ -1073,7 +1082,8 @@ def _validate_hmm_tokens(hmms: Any, path: str) -> tuple[list[str], list[str]]:
 
 
 def _validate_length_aa(raw: Any, path: str) -> list[str]:
-    """Validate an extra_protein ``length_aa: [min, max]`` bound.
+    """Validate a ``length_aa: [min, max]`` bound (extra_protein entries,
+    non-segmented cluster markers, segment_markers).
 
     Two whole amino-acid counts ≥ 1, inclusive; either end may be ``null``
     for an open bound, but not both; ``min ≤ max``. ``length_aa: null`` is
@@ -1110,9 +1120,10 @@ def _validate_marker_entry(
     multidomain spec like ``"A--B"`` in N-to-C order; multiple tokens are
     alternative architectures, OR).
 
-    ``allowed`` is the key set for the entry: the marker keys by default,
-    :data:`_ALLOWED_EXTRA_PROTEIN_KEYS` for extra_protein entries (which
-    adds ``length_aa``, validated here too).
+    ``allowed`` is the key set for the entry: the marker keys by default
+    (legacy per-segment ``cluster_protein``), or
+    :data:`_ALLOWED_CLUSTER_MARKER_KEYS` / :data:`_ALLOWED_EXTRA_PROTEIN_KEYS`
+    (both add ``length_aa``, validated here too).
     """
     errs: list[str] = []
     if isinstance(entry, str):
@@ -1126,11 +1137,13 @@ def _validate_marker_entry(
         )
         return errs
     if "length_aa" in entry and "length_aa" not in allowed:
-        # Tailored message instead of the generic "unknown key" line.
+        # Tailored message instead of the generic "unknown key" line. Only the
+        # legacy per-segment cluster_protein form lands here.
         errs.append(
-            f"{path}: 'length_aa' is only supported on extra_protein entries "
-            f"— a clustering marker is picked by its hmms/aliases alone, so "
-            f"its per-protein FASTA shows exactly the protein clustering used"
+            f"{path}: 'length_aa' is not supported on the per-segment "
+            f"cluster_protein form. Declare this segment's marker under "
+            f"segment_markers instead, e.g. "
+            f"segment_markers: {{<segment>: {{hmms: [...], length_aa: [min, max]}}}}"
         )
         errs.extend(_spec_unknown_key_errors(
             {k: v for k, v in entry.items() if k != "length_aa"}, allowed, path,
@@ -1163,8 +1176,9 @@ def _validate_segment_markers(
 ) -> list[str]:
     """Validate per-virus segment_markers block.
 
-    Shape: ``{segment_name: {aliases: [...], hmms: [...]}}``. Each
-    segment-spec must define at least one of aliases / hmms. Coexists
+    Shape: ``{segment_name: {aliases: [...], hmms: [...], length_aa?:
+    [min, max]}}``. Each segment-spec must define at least one of
+    aliases / hmms. Coexists
     with the legacy per-segment ``cluster_protein`` block; when both
     define a marker for the same segment, ``segment_markers`` wins.
     """
@@ -1190,6 +1204,7 @@ def _validate_segment_markers(
         errs.extend(
             _spec_unknown_key_errors(spec, _ALLOWED_SEGMENT_MARKER_KEYS, prefix)
         )
+        errs.extend(_validate_length_aa(spec.get("length_aa"), prefix))
         aliases = spec.get("aliases", [])
         if not isinstance(aliases, list) or not all(
             isinstance(a, str) and a.strip() for a in aliases
@@ -1766,7 +1781,10 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     else:
         for i, entry in enumerate(cluster_protein_global):
             errors.extend(
-                _validate_marker_entry(entry, f"clustering.cluster_protein[{i}]")
+                _validate_marker_entry(
+                    entry, f"clustering.cluster_protein[{i}]",
+                    allowed=_ALLOWED_CLUSTER_MARKER_KEYS,
+                )
             )
 
     extra_protein_global = cfg.get("clustering", {}).get("extra_protein", [])

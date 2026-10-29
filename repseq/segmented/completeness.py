@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import Any, Iterator, Optional
 
 from ..clustering.marker import (
     MarkerFailure,
     _format_failure_reason,
+    describe_length_miss,
     select_marker_protein,
 )
 from ..models import QCReport, Sequence
@@ -105,6 +107,9 @@ def identify_segment(
     """Return the canonical segment name for a sequence.
 
     Resolution order:
+      0. seq.segment equal to a canonical name (case-insensitive) — so a
+         config naming its segments "2", "3" maps GenBank "2" to "2", not
+         to the second name
       1. seq.segment as a numeric index (e.g. "4" → segment_names[3])
       2. seq.segment as a canonical name or alias (case-insensitive)
       3. custom segment_regex applied to the header
@@ -115,8 +120,12 @@ def identify_segment(
     Returns None if nothing matches.
     """
     alias_to_canonical = _build_alias_map(segment_names, segment_aliases)
+    canonical_lc = {name.lower(): name for name in segment_names}
 
     if seq.segment:
+        exact = canonical_lc.get(seq.segment.lower())
+        if exact is not None:
+            return exact
         if seq.segment.isdigit():
             idx = int(seq.segment) - 1
             if 0 <= idx < len(segment_names):
@@ -136,6 +145,8 @@ def identify_segment(
                 if m.lastindex:
                     raw = m.group(1)
             if raw:
+                if raw.lower() in canonical_lc:
+                    return canonical_lc[raw.lower()]
                 if raw.isdigit():
                     idx = int(raw) - 1
                     if 0 <= idx < len(segment_names):
@@ -163,6 +174,99 @@ def identify_segment(
             return segment_names[idx]
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Isolate assembly keys — shared by assembly and the isolate-level QC gates
+# ---------------------------------------------------------------------------
+
+def resolve_record_key(
+    seq: Sequence, virus_cfg: dict[str, Any],
+) -> tuple[Optional[str], Optional[str]]:
+    """``(isolate_key, canonical_segment)`` for one record, exactly as
+    :func:`filter_complete_isolates` will resolve them. Does not mutate.
+
+    ``isolate_key`` is the normalised isolate id (GenBank ``/isolate`` or
+    ``/strain``, else ``isolate_regex`` on the header); ``None`` when neither
+    yields one. ``canonical_segment`` maps GenBank's ``/segment`` (e.g.
+    ``"5"``) or an alias onto the configured segment name (e.g. ``"NP"``).
+    """
+    regex = virus_cfg.get("isolate_regex")
+    if not seq.isolate_id and not regex:
+        # No regex configured (validation requires one; hand-built cfgs may
+        # lack it): an empty pattern would match every header.
+        return None, None
+    isolate_raw = extract_isolate_id(seq, regex or "")
+    if isolate_raw is None:
+        return None, None
+    seg = identify_segment(
+        seq,
+        list(virus_cfg.get("segments") or []),
+        virus_cfg.get("segment_regex"),
+        virus_cfg.get("segment_aliases"),
+    )
+    return _normalise_isolate_id(isolate_raw), seg
+
+
+def prefer_record(candidate: Sequence, existing: Sequence) -> bool:
+    """The duplicate-segment rule: when an isolate has two records for one
+    segment, assembly keeps the one with the longer nucleotide sequence (the
+    first one seen wins a tie)."""
+    return candidate.length > existing.length
+
+
+@dataclass
+class IsolateRecords:
+    """One isolate as assembly will see it.
+
+    ``records`` is every record of the isolate in input order, paired with
+    its canonical segment (``None`` when unidentifiable). ``kept`` maps each
+    segment to the ONE record assembly will use — a duplicate that loses to
+    :func:`prefer_record` is discarded there, so a QC gate must judge only
+    ``kept`` or a partial duplicate would remove an isolate that also has a
+    good record for that segment.
+    """
+
+    records: list[tuple[Sequence, Optional[str]]] = field(default_factory=list)
+    kept: dict[str, Sequence] = field(default_factory=dict)
+
+    def judged(self) -> Iterator[tuple[str, Sequence]]:
+        """``(segment, record)`` for each kept record, in input order."""
+        for seq, seg in self.records:
+            if seg is not None and self.kept.get(seg) is seq:
+                yield seg, seq
+
+    def sequences(self) -> list[Sequence]:
+        return [seq for seq, _ in self.records]
+
+    def has_all(self, expected: list[str]) -> bool:
+        return set(expected) <= set(self.kept)
+
+
+def group_isolate_records(
+    sequences: list[Sequence], virus_cfg: dict[str, Any],
+) -> dict[str, IsolateRecords]:
+    """Group records into isolates the way :func:`filter_complete_isolates`
+    does — same isolate key, same canonical segment, same duplicate rule —
+    so the isolate-level QC gates (HMM identity, marker length) judge
+    exactly the records assembly will keep. Records whose isolate cannot be
+    resolved are left out; assembly drops them as unidentifiable.
+    """
+    groups: dict[str, IsolateRecords] = {}
+    for seq in sequences:
+        key, seg = resolve_record_key(seq, virus_cfg)
+        if key is None:
+            continue
+        grp = groups.get(key)
+        if grp is None:
+            grp = groups[key] = IsolateRecords()
+        grp.records.append((seq, seg))
+        if seg is None:
+            continue
+        existing = grp.kept.get(seg)
+        if existing is None or prefer_record(seq, existing):
+            grp.kept[seg] = seq
+    return groups
 
 
 # ---------------------------------------------------------------------------
@@ -267,9 +371,10 @@ def filter_complete_isolates(
 
         isolate_key = _normalise_isolate_id(isolate_raw)
         if seg in isolate_map[isolate_key]:
-            # Keep the longer sequence if duplicated segment
+            # Duplicated segment: keep the record prefer_record picks (the
+            # QC gates judge the same record via group_isolate_records).
             existing = isolate_map[isolate_key][seg]
-            if seq.length > existing.length:
+            if prefer_record(seq, existing):
                 isolate_map[isolate_key][seg] = seq
         else:
             isolate_map[isolate_key][seg] = seq
@@ -460,6 +565,77 @@ def segment_length_filter(
     return kept
 
 
+def resolve_segment_marker(
+    seg_name: str,
+    segment_markers: Optional[dict],
+    cluster_protein_per_seg: Optional[dict],
+) -> tuple[Optional[str], list[str], list[str]]:
+    """``(name, hmm_tokens, aliases)`` for one segment's marker.
+
+    ``segment_markers`` wins over the legacy ``cluster_protein`` form. When
+    ``segment_markers[seg]`` exists but declares no ``hmms:`` (alias-only),
+    the ``hmms:`` of any ``cluster_protein[seg]`` dict entries are pulled in
+    (and their aliases merged), so a config that split aliases and HMMs
+    across the two maps still gets its HMM gate. For the legacy form,
+    plain-string entries are aliases. The single resolver for clustering,
+    the QC gates and the output pickers.
+    """
+    segment_markers = segment_markers or {}
+    cluster_protein_per_seg = cluster_protein_per_seg or {}
+    sm_name: Optional[str] = None
+    sm_tokens: list[str] = []
+    sm_aliases: list[str] = []
+    if seg_name in segment_markers:
+        spec = segment_markers[seg_name] or {}
+        sm_name = spec.get("name")
+        sm_tokens = list(spec.get("hmms") or [])
+        sm_aliases = list(spec.get("aliases") or [])
+        if sm_tokens:
+            return sm_name, sm_tokens, sm_aliases
+        # Fall through to cluster_protein for HMMs (and any extra aliases).
+    if seg_name in cluster_protein_per_seg:
+        tokens: list[str] = list(sm_tokens)
+        aliases: list[str] = list(sm_aliases)
+        name: Optional[str] = sm_name
+        for entry in cluster_protein_per_seg[seg_name] or []:
+            if isinstance(entry, str):
+                aliases.append(entry)
+            elif isinstance(entry, dict):
+                name = name or entry.get("name")
+                tokens.extend(entry.get("hmms") or [])
+                aliases.extend(entry.get("aliases") or [])
+        return name, tokens, aliases
+    return sm_name, sm_tokens, sm_aliases
+
+
+def segment_marker_specs(
+    seg_name: str,
+    segment_markers: Optional[dict[str, dict]],
+    cluster_protein: Optional[dict[str, Any]],
+) -> list:
+    """The marker spec list ``select_marker_protein`` gets for one segment.
+
+    ``segment_markers[seg]`` wins: one spec named after the segment,
+    carrying its ``length_aa``, with tokens and aliases from
+    :func:`resolve_segment_marker` (so an alias-only entry picks up
+    ``cluster_protein[seg]``'s ``hmms:``, exactly as the HMM gate and the
+    output pickers resolve it). Otherwise the legacy ``cluster_protein[seg]``
+    list. Shared by isolate assembly and the marker-length QC stage so both
+    judge a segment by the same spec.
+    """
+    sm = segment_markers or {}
+    if seg_name in sm:
+        spec = sm[seg_name] or {}
+        _name, tokens, aliases = resolve_segment_marker(seg_name, sm, cluster_protein)
+        return [{
+            "name": seg_name,
+            "aliases": aliases,
+            "hmms": tokens,
+            "length_aa": spec.get("length_aa"),
+        }]
+    return (cluster_protein or {}).get(seg_name) or []
+
+
 def build_concatenated_sequences(
     complete_isolates: dict[str, list[Sequence]],
     segment_names: Optional[list[str]] = None,
@@ -518,16 +694,7 @@ def build_concatenated_sequences(
                     )
                     break
                 # segment_markers wins over cluster_protein for the same segment.
-                if seg_name in sm:
-                    spec = sm[seg_name]
-                    # Wrap as a one-element marker_specs list keyed by segment.
-                    marker_specs = [{
-                        "name": seg_name,
-                        "aliases": list(spec.get("aliases") or []),
-                        "hmms": list(spec.get("hmms") or []),
-                    }]
-                else:
-                    marker_specs = cp.get(seg_name) or []
+                marker_specs = segment_marker_specs(seg_name, sm, cp)
                 marker, failure = select_marker_protein(
                     seg.proteins,
                     marker_specs,
@@ -535,6 +702,35 @@ def build_concatenated_sequences(
                     ga_cutoffs=ga_cutoffs,
                     hmm_cfg=hmm_cfg,
                 )
+                if (
+                    marker is None
+                    and failure is not None
+                    and failure.reason == "length_out_of_bounds"
+                    and policy is not None
+                    and policy.protects_any(segs, "marker_length")
+                ):
+                    # Protected against the marker-length stage: pick as if
+                    # no bound existed, exactly like the output pickers do
+                    # for this isolate. The QC stage already recorded the
+                    # protection for isolates it saw; record it here only
+                    # for the rare isolate that reached assembly without
+                    # passing through that stage (no isolate_id upstream).
+                    marker, _ = select_marker_protein(
+                        seg.proteins, marker_specs,
+                        hmm_active=hmm_active, ga_cutoffs=ga_cutoffs,
+                        hmm_cfg=hmm_cfg, ignore_bounds=True,
+                    )
+                    if marker is not None:
+                        if report is not None and not any(
+                            pr["stage"] == "marker_length"
+                            and pr["id"] in {s.id for s in segs}
+                            for pr in report.protected
+                        ):
+                            report.add_protected(
+                                seg.id, "marker_length",
+                                _format_failure_reason(failure),
+                            )
+                        failure = None
                 if marker is None:
                     # Force-keep whitelist: this isolate was protected
                     # against the `hmm` stage upstream, but the marker
@@ -550,9 +746,22 @@ def build_concatenated_sequences(
                         and policy is not None
                         and policy.protects_any(segs, "hmm")
                     ):
-                        marker, _ = select_marker_protein(
+                        # The HMM-off pick still honours length_aa, unless
+                        # the isolate is protected against that stage too.
+                        marker, retry_failure = select_marker_protein(
                             seg.proteins, marker_specs, hmm_active=False,
+                            ignore_bounds=policy.protects_any(
+                                segs, "marker_length"
+                            ),
                         )
+                        if (
+                            marker is None
+                            and retry_failure is not None
+                            and retry_failure.reason == "length_out_of_bounds"
+                        ):
+                            # HMM protection rescued the identity, but the
+                            # protein is outside its range: a length drop.
+                            failure = retry_failure
                         if marker is not None:
                             if report is not None:
                                 report.add_protected(
@@ -576,6 +785,34 @@ def build_concatenated_sequences(
                         failure_info is not None
                         and failure_info.reason == "hmm_failed"
                     )
+                    is_length = (
+                        failure_info is not None
+                        and failure_info.reason == "length_out_of_bounds"
+                    )
+                    if is_length:
+                        # Same reason shape as the marker-length QC stage;
+                        # one isolate, first failing segment (this backstop
+                        # only sees isolates the stage could not group).
+                        detail = describe_length_miss(
+                            failure_info.length_aa, failure_info.bounds
+                        )
+                        report.removed_marker_length += 1
+                        report.removed_marker_length_by_marker[failed_segment] = (
+                            report.removed_marker_length_by_marker.get(
+                                failed_segment, 0) + 1
+                        )
+                        for seq in segs:
+                            if seq.segment == failed_segment:
+                                reason = f"marker_length:{failed_segment}:{detail}"
+                            else:
+                                reason = (
+                                    f"marker_length_sibling:{failed_segment}:"
+                                    f"{detail}"
+                                )
+                            seq.qc_passed = False
+                            seq.qc_fail_reason = reason
+                            report.add_removed(seq.id, reason)
+                        continue
                     if is_hmm:
                         sub = _format_failure_reason(failure_info)
                         reason = f"incomplete_isolate:{sub}:{failed_segment}"

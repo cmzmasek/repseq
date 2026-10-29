@@ -240,6 +240,19 @@ class QCReport:
     # ``name`` (e.g. ``{"L": 8, "M": 4}``). Used by the live stderr
     # line and the QC Summary breakdown.
     removed_hmm_by_marker: dict = field(default_factory=dict)
+    # Isolates (segmented) / sequences (non-segmented) dropped because a
+    # marker spec's protein was present (HMM-verified, or alias-matched) but
+    # only outside the spec's ``length_aa`` range — the marker-length QC
+    # stage, run right after the HMM gate. Kept apart from
+    # ``removed_hmm_failed`` so "this isolate's NP is partial" never reads as
+    # "this isolate has no NP". Each isolate counts ONCE here.
+    removed_marker_length: int = 0
+    # Per-marker breakdown, keyed by segment (segmented) or spec name
+    # (non-segmented). Unlike ``removed_hmm_by_marker`` this counts EVERY
+    # failing marker, so an isolate partial on two segments appears under
+    # both and the breakdown can sum to more than ``removed_marker_length``
+    # — the point is to show which bound bites.
+    removed_marker_length_by_marker: dict = field(default_factory=dict)
     # Whole-pool length filter is skipped in segmented mode (the input is a
     # mix of segments of very different lengths; per-segment bounds are
     # applied later via segmented.viruses.<v>.segment_lengths instead).
@@ -430,6 +443,7 @@ class QCReport:
              f"ambiguous protein residues "
              f"(>{self._pct(d.get('protein_quality_pct', 0.05))} X)"),
             (self.removed_hmm_failed, "marker fails HMM identity"),
+            (self.removed_marker_length, "marker protein outside length range"),
         ]
         for removed, label in stages:
             if not removed:
@@ -474,7 +488,10 @@ class QCReport:
         # "segments entering assembly" ground-truth line below.
         pq = self.removed_protein_quality
         hmm_pre = d.get("hmm_isolates_pre_assembly", self.removed_hmm_failed)
-        if pq or hmm_pre:
+        len_pre = d.get(
+            "length_isolates_pre_assembly", self.removed_marker_length
+        )
+        if pq or hmm_pre or len_pre:
             lines.append("")
             lines.append(
                 "  isolate-level identity gates — a failure drops the whole "
@@ -486,9 +503,27 @@ class QCReport:
                     f"ambiguous protein residues "
                     f"(>{self._pct(d.get('protein_quality_pct', 0.05))} X)",
                     "", "−" + n(pq) + " isolates"))
+            nseg_all = d.get("n_segments")
+
+            def _complete(key: str) -> str:
+                # How many of the removed isolates still had every segment —
+                # the rest were incomplete and would have been dropped at
+                # assembly anyway. Absent for reports built without the gate.
+                c = d.get(key)
+                if c is None:
+                    return ""
+                seg_txt = f"all {nseg_all} segments" if nseg_all else "every segment"
+                return f" ({n(c)} with {seg_txt})"
+
             if hmm_pre:
                 gate_rows.append(
-                    ("marker fails HMM identity", "", "−" + n(hmm_pre) + " isolates"))
+                    ("marker fails HMM identity", "",
+                     "−" + n(hmm_pre) + " isolates" + _complete("hmm_complete_isolates")))
+            if len_pre:
+                gate_rows.append(
+                    ("marker protein outside length range", "",
+                     "−" + n(len_pre) + " isolates"
+                     + _complete("length_complete_isolates")))
             # Reconcile the isolate-gate removals back to the segment pool.
             # Only meaningful here — with no gates the Phase-1 subtotal already
             # is the pool entering assembly, so the line would be redundant.
@@ -520,7 +555,11 @@ class QCReport:
         cm = d.get("concat_marker_isolates", 0)
         if cm:
             hmm_c = d.get("concat_hmm_isolates", 0)
-            note = f" ({n(hmm_c)} via HMM)" if hmm_c else ""
+            len_c = d.get("concat_length_isolates", 0)
+            vias = [f"{n(hmm_c)} via HMM"] if hmm_c else []
+            if len_c:
+                vias.append(f"{n(len_c)} via length")
+            note = f" ({', '.join(vias)})" if vias else ""
             p2.append(("marker lost at concatenation", "",
                        "−" + n(cm) + " isolates" + note))
         dup = d.get("duplicate_isolates", 0)

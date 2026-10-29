@@ -60,10 +60,11 @@ from .mafft import MafftError, run_mafft
 from . import trimal as trimal_mod
 from .trimal import maybe_trim
 from .per_protein import (
-    _best_satisfying_cds_any,
     _hmm_tier_ran,
     _segment_proteins,
+    build_marker_bounds_context,
     collect_family_specs,
+    overlap_tolerance_from_cfg,
 )
 from .pipeline import (
     PhyloError,
@@ -294,6 +295,10 @@ def build_partitioned_phylogeny(
     # families carried by >= 2 reps (a partition needs >= 2 sequences to be
     # alignable / informative).
     fam_bodies: list[tuple[str, dict[str, str]]] = []
+    # The marker's length_aa (and marker_length protection) hold here too, so
+    # each supermatrix block carries exactly the CDS clustering used.
+    marker_ctx = build_marker_bounds_context(cfg)
+    overlap_tol = overlap_tolerance_from_cfg(cfg)
     for family_label, tokens, segment in specs:
         parsed_tokens: list[list[str]] = []
         for token in tokens:
@@ -305,8 +310,11 @@ def build_partitioned_phylogeny(
             continue
         bodies: dict[str, str] = {}
         for rep in representatives:
-            cds = _best_satisfying_cds_any(
-                _segment_proteins(rep, segment), parsed_tokens
+            # The same picker as the per-protein FASTAs and trees (bounds,
+            # marker_length protection, and hmm.multidomain_overlap_tolerance).
+            cds = marker_ctx.pick(
+                rep, _segment_proteins(rep, segment), family_label, tokens, [],
+                segment, True, overlap_tol,
             )
             if cds and cds.get("sequence"):
                 bodies[rep.id] = cds["sequence"]

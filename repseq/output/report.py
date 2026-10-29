@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from collections import Counter
+from functools import partial
 from pathlib import Path
 from typing import Any, Optional
 
@@ -515,6 +516,8 @@ def _pick_marker_cds(
     hmm_active: bool,
     *,
     overlap_tolerance: int = 0,
+    bounds=None,
+    exempt=False,
 ) -> Optional[dict]:
     """Back-compat shim; delegates to :func:`phylo.per_protein.pick_marker_cds`.
 
@@ -524,7 +527,7 @@ def _pick_marker_cds(
     from ..phylo.per_protein import pick_marker_cds
     return pick_marker_cds(
         proteins, hmm_tokens, aliases, hmm_active,
-        overlap_tolerance=overlap_tolerance,
+        overlap_tolerance=overlap_tolerance, bounds=bounds, exempt=exempt,
     )
 
 
@@ -559,6 +562,7 @@ def _write_specs_to_fastas(
         _hmm_tier_ran,
         _segment_proteins,
         build_extra_pick_context,
+        build_marker_bounds_context,
         overlap_tolerance_from_cfg,
         pick_extra_cds,
     )
@@ -577,6 +581,9 @@ def _write_specs_to_fastas(
         return []
 
     extra_ctx = build_extra_pick_context(cfg, hmm_active) if extra else None
+    # Cluster markers: same length_aa + protection rule clustering applied,
+    # so each record is exactly the CDS clustering used.
+    marker_ctx = None if extra else build_marker_bounds_context(cfg)
 
     written: list[Path] = []
     for family_label, hmm_tokens, aliases, segment in specs:
@@ -608,12 +615,13 @@ def _write_specs_to_fastas(
             if extra_ctx is not None:
                 cds, set_aside = pick_extra_cds(
                     proteins, family_label, hmm_tokens, aliases, segment, extra_ctx,
+                    partial(extra_ctx.exempt, rep),
                 )
                 set_aside_rows.extend((isolate_id, p, why) for p, why in set_aside)
             else:
-                cds = _pick_marker_cds(
-                    proteins, hmm_tokens, aliases, hmm_active,
-                    overlap_tolerance=tol,
+                cds = marker_ctx.pick(
+                    rep, proteins, family_label, hmm_tokens, aliases, segment,
+                    hmm_active, tol,
                 )
             if cds is None:
                 continue
@@ -1892,9 +1900,12 @@ def _coverage_data_per_taxon(
     here corresponds exactly to a record in the matching artifact —
     including, for extra_protein specs (``is_cluster`` False) when
     ``extra_ctx`` is given, the claiming + ``length_aa`` rules of
-    :func:`phylo.per_protein.pick_extra_cds`.
+    :func:`phylo.per_protein.pick_extra_cds`, and for cluster markers the
+    marker ``length_aa`` + protection rule carried on ``extra_ctx``.
     """
     from ..phylo.per_protein import pick_extra_cds, pick_marker_cds
+
+    marker_ctx = getattr(extra_ctx, "marker_ctx", None)
 
     taxon_totals: dict[str, int] = {}
     taxon_lengths: dict[str, list[list[int]]] = {}
@@ -1912,6 +1923,12 @@ def _coverage_data_per_taxon(
             if extra_ctx is not None and not is_cluster:
                 cds, _set_aside = pick_extra_cds(
                     proteins, label, tokens, aliases, segment, extra_ctx,
+                    partial(extra_ctx.exempt, seq),
+                )
+            elif marker_ctx is not None:
+                cds = marker_ctx.pick(
+                    seq, proteins, label, tokens, aliases, segment,
+                    hmm_active, overlap_tolerance,
                 )
             else:
                 cds = pick_marker_cds(

@@ -383,12 +383,26 @@ def test_validate_rejects_malformed_length_aa():
             assert any(needle in e for e in errs), (bounds, errs)
 
 
-def test_validate_rejects_length_aa_on_a_cluster_marker():
+def test_validate_rejects_length_aa_on_legacy_per_segment_cluster_protein():
+    """v0.76.0: cluster markers take length_aa (see test_marker_length.py),
+    but NOT the legacy per-segment cluster_protein form, whose entries are
+    merged per segment — the message points at segment_markers instead."""
     cfg = load_config(None)
-    cfg["clustering"]["cluster_protein"] = [
-        {"name": "L", "hmms": ["RdRP_1"], "length_aa": [100, 200]},
-    ]
+    cfg["segmented"] = {
+        "enabled": True, "virus": "T",
+        "viruses": {"T": {
+            "expected_segments": 1, "segments": ["L"],
+            "isolate_regex": r"(?P<isolate>X)",
+            "cluster_protein": {
+                "L": [{"name": "L", "hmms": ["RdRP_1"], "length_aa": [100, 200]}],
+            },
+        }},
+    }
     errs = validate_config(cfg)
-    assert any("'length_aa' is only supported on extra_protein entries" in e for e in errs)
+    assert any(
+        "'length_aa' is not supported on the per-segment cluster_protein form" in e
+        and "segment_markers" in e
+        for e in errs
+    ), errs
     # Tailored message replaces the generic one — no duplicate line.
     assert not any("unknown key 'length_aa'" in e for e in errs)

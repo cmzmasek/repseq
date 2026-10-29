@@ -41,12 +41,21 @@ from __future__ import annotations
 
 import logging
 import re
+from functools import partial
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Union
 
+from ..clustering.marker import (
+    LengthBounds,
+    format_length_bounds,
+    parse_length_bounds,
+    within_length_bounds,
+)
 from ..config import get_virus_config
 from ..hmm.runner import cds_satisfies_token, parse_hmm_token
 from ..models import Sequence
+from ..overrides import ProtectionPolicy
+from ..segmented.completeness import resolve_segment_marker
 from .coloring import build_color_scheme
 from .pipeline import PhyloError, _build_tree
 
@@ -146,60 +155,30 @@ def _resolve_segment_marker_full(
     segment_markers: dict,
     cluster_protein_per_seg: dict,
 ) -> tuple[Optional[str], list[str], list[str]]:
-    """Like :func:`_resolve_segment_marker` but also returns ``aliases``.
+    """``(name, hmm_tokens, aliases)`` for one segment's marker.
 
-    Returns ``(name, hmm_tokens, aliases)``. ``segment_markers`` wins over
-    ``cluster_protein`` (legacy); for the legacy form (a list of strings or
-    dicts) plain-string entries are treated as alias strings, and each
-    dict entry contributes its ``aliases:`` / ``hmms:`` lists. When
-    ``segment_markers[seg]`` exists but its ``hmms:`` is empty (alias-only),
-    we additionally pull ``hmms:`` from any ``cluster_protein[seg]`` dict
-    entries so a split alias/HMM config still gets a usable HMM gate —
-    ``segment_markers``'s own aliases are preserved and merged with any
-    from ``cluster_protein``.
+    Delegates to :func:`repseq.segmented.completeness.resolve_segment_marker`,
+    the one resolver clustering, the QC gates and these output pickers share
+    (``segment_markers`` wins; an alias-only entry pulls ``hmms:`` from
+    ``cluster_protein[seg]``).
     """
-    sm_name: Optional[str] = None
-    sm_tokens: list[str] = []
-    sm_aliases: list[str] = []
-    if seg_name in segment_markers:
-        spec = segment_markers[seg_name] or {}
-        sm_name = spec.get("name")
-        sm_tokens = list(spec.get("hmms") or [])
-        sm_aliases = list(spec.get("aliases") or [])
-        if sm_tokens:
-            return sm_name, sm_tokens, sm_aliases
-        # Fall through to cluster_protein for HMMs (and any extra aliases).
-    if seg_name in cluster_protein_per_seg:
-        tokens: list[str] = list(sm_tokens)
-        aliases: list[str] = list(sm_aliases)
-        name: Optional[str] = sm_name
-        for entry in cluster_protein_per_seg[seg_name] or []:
-            if isinstance(entry, str):
-                aliases.append(entry)
-            elif isinstance(entry, dict):
-                name = name or entry.get("name")
-                tokens.extend(entry.get("hmms") or [])
-                aliases.extend(entry.get("aliases") or [])
-        return name, tokens, aliases
-    return sm_name, sm_tokens, sm_aliases
+    return resolve_segment_marker(seg_name, segment_markers, cluster_protein_per_seg)
 
 
-def collect_marker_specs(
+def _iter_marker_entries(
     cfg: dict[str, Any],
-) -> list[tuple[str, list[str], list[str], Optional[str]]]:
-    """Return ``[(family_label, hmm_tokens, aliases, segment_or_None), …]``.
+) -> list[tuple[str, list[str], list[str], Optional[str], Optional[LengthBounds]]]:
+    """Every usable cluster-marker spec as ``(label, tokens, aliases,
+    segment_or_None, length_bounds)``, in declaration order.
 
-    Like :func:`collect_family_specs` but also includes alias-only specs
-    (those declaring ``aliases:`` without ``hmms:``) — used by the
-    always-on per-protein FASTA writer (``{prefix}_per_protein_fasta/``).
-    Specs with neither aliases nor tokens are skipped.
-
-    For each spec, downstream callers can pick the satisfying CDS via the
-    HMM gate (when ``hmm_tokens`` is non-empty and the HMM tier ran) and
-    fall back to alias matching against ``/product`` otherwise — same
-    chain :func:`repseq.clustering.marker.select_marker_protein` uses.
+    Single source for :func:`collect_marker_specs` and
+    :func:`collect_marker_length_bounds`, so the two can never disagree on
+    which specs exist or how they are labelled. ``length_bounds`` comes from
+    ``segment_markers[seg].length_aa`` (segmented; the legacy per-segment
+    ``cluster_protein`` form takes no bound) or the
+    ``clustering.cluster_protein`` entry's ``length_aa`` (non-segmented).
     """
-    specs: list[tuple[str, list[str], list[str], Optional[str]]] = []
+    out: list[tuple[str, list[str], list[str], Optional[str], Optional[LengthBounds]]] = []
 
     segmented = bool((cfg.get("segmented", {}) or {}).get("enabled"))
     if segmented:
@@ -218,9 +197,11 @@ def collect_marker_specs(
             aliases = _dedup(aliases)
             if not tokens and not aliases:
                 continue
-            specs.append(
-                (_family_label(name, tokens, seg), tokens, aliases, seg)
-            )
+            raw = (segment_markers.get(seg) or {}).get("length_aa")
+            out.append((
+                _family_label(name, tokens, seg), tokens, aliases, seg,
+                parse_length_bounds(raw),
+            ))
     else:
         for entry in (cfg.get("clustering", {}) or {}).get("cluster_protein", []) or []:
             if not isinstance(entry, dict):
@@ -229,10 +210,109 @@ def collect_marker_specs(
             aliases = _dedup(list(entry.get("aliases") or []))
             if not tokens and not aliases:
                 continue
-            specs.append(
-                (_family_label(entry.get("name"), tokens, None), tokens, aliases, None)
-            )
-    return specs
+            out.append((
+                _family_label(entry.get("name"), tokens, None), tokens, aliases,
+                None, parse_length_bounds(entry.get("length_aa")),
+            ))
+    return out
+
+
+def collect_marker_specs(
+    cfg: dict[str, Any],
+) -> list[tuple[str, list[str], list[str], Optional[str]]]:
+    """Return ``[(family_label, hmm_tokens, aliases, segment_or_None), …]``.
+
+    Like :func:`collect_family_specs` but also includes alias-only specs
+    (those declaring ``aliases:`` without ``hmms:``) — used by the
+    always-on per-protein FASTA writer (``{prefix}_per_protein_fasta/``).
+    Specs with neither aliases nor tokens are skipped.
+
+    For each spec, downstream callers can pick the satisfying CDS via the
+    HMM gate (when ``hmm_tokens`` is non-empty and the HMM tier ran) and
+    fall back to alias matching against ``/product`` otherwise — same
+    chain :func:`repseq.clustering.marker.select_marker_protein` uses.
+    The spec's ``length_aa`` is not in this tuple; pick through
+    :class:`MarkerBoundsContext`, which applies it.
+    """
+    return [(l, t_, a, s) for l, t_, a, s, _b in _iter_marker_entries(cfg)]
+
+
+def collect_marker_length_bounds(
+    cfg: dict[str, Any],
+) -> dict[tuple[str, Optional[str]], LengthBounds]:
+    """``{(family_label, segment_or_None): (min, max)}`` for every cluster
+    marker spec that declares ``length_aa``."""
+    return {
+        (l, s): b for l, _t, _a, s, b in _iter_marker_entries(cfg) if b is not None
+    }
+
+
+#: ``exempt`` arguments take a bool or a zero-argument callable. The callable
+#: form defers the protection lookup (``ProtectionPolicy.protects_any`` over a
+#: rep and all its segments) until a bounded pick actually misses, which is
+#: rare; the coverage report calls the pickers millions of times.
+Exempt = Union[bool, Callable[[], bool]]
+
+
+def _is_exempt(exempt: Exempt) -> bool:
+    return bool(exempt()) if callable(exempt) else bool(exempt)
+
+
+class MarkerBoundsContext:
+    """What an output-side picker needs to take EXACTLY the CDS clustering
+    took for a cluster marker: each spec's ``length_aa`` and the
+    ``marker_length`` protection policy.
+
+    Clustering (``clustering.marker.select_marker_protein``) picks the
+    longest satisfying CDS inside the bound; an isolate protected against
+    the ``marker_length`` QC stage is picked as if unbounded. Every
+    per-protein FASTA / tree / supermatrix / coverage pick goes through
+    :meth:`pick` (or :func:`pick_marker_cds` with :meth:`bounds_for` and
+    :meth:`exempt`) so the same rule holds there.
+    """
+
+    def __init__(
+        self,
+        bounds: dict[tuple[str, Optional[str]], LengthBounds],
+        policy: Optional[ProtectionPolicy] = None,
+    ) -> None:
+        self.bounds = bounds
+        self.policy = policy
+
+    def bounds_for(self, label: str, segment: Optional[str]) -> Optional[LengthBounds]:
+        return self.bounds.get((label, segment))
+
+    def exempt(self, rep: Sequence) -> bool:
+        if not self.bounds or self.policy is None:
+            return False
+        return self.policy.protects_any(
+            [rep, *(rep.concat_segments or [])], "marker_length"
+        )
+
+    def pick(
+        self,
+        rep: Sequence,
+        proteins: list[dict],
+        label: str,
+        tokens: list[str],
+        aliases: list[str],
+        segment: Optional[str],
+        hmm_active: bool,
+        overlap_tolerance: int,
+    ) -> Optional[dict]:
+        return pick_marker_cds(
+            proteins, tokens, aliases, hmm_active,
+            overlap_tolerance=overlap_tolerance,
+            bounds=self.bounds_for(label, segment),
+            exempt=lambda: self.exempt(rep),
+        )
+
+
+def build_marker_bounds_context(cfg: dict[str, Any]) -> MarkerBoundsContext:
+    """Cluster-marker ``length_aa`` bounds + the protection policy, once per writer."""
+    return MarkerBoundsContext(
+        collect_marker_length_bounds(cfg), ProtectionPolicy.from_cfg(cfg or {}),
+    )
 
 
 def _iter_extra_entries(
@@ -314,9 +394,10 @@ def collect_extra_specs(
 # labelled "Gn/Gc" (submitter label swap). The alias picker keeps the LONGEST
 # match, so the mislabelled glycoprotein won and landed in the NSm file.
 #
-# Two guards, both applied only to ``extra_protein`` specs (never to the
-# cluster-marker specs, whose per-protein FASTA must keep showing exactly the
-# CDS that clustering used — see ``clustering.marker.select_marker_protein``):
+# Two guards for ``extra_protein`` specs. (Cluster-marker specs take a
+# ``length_aa`` too since v0.76.0, but theirs is a QC requirement enforced in
+# every picker — clustering included — so a marker's per-protein FASTA keeps
+# showing exactly the CDS clustering used; see :class:`MarkerBoundsContext`.)
 #
 # 1. Claiming. Within one scope (a segment; the whole sequence when
 #    non-segmented), a CDS that a declared HMM-bearing spec PICKS — a cluster
@@ -331,39 +412,11 @@ def collect_extra_specs(
 #    longer match cannot hide an in-range one. Applies to alias and HMM
 #    extra_protein specs alike.
 
-LengthBounds = tuple[Optional[int], Optional[int]]
-
-
-def _length_bounds(raw: Any) -> Optional[LengthBounds]:
-    """``[min, max]`` → ``(min, max)``; ``None`` when absent or malformed.
-
-    Validation rejects malformed values at load; this stays defensive so a
-    hand-built cfg (tests, replay) can't crash the writers.
-    """
-    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
-        return None
-    lo, hi = raw
-    lo = lo if isinstance(lo, int) and not isinstance(lo, bool) else None
-    hi = hi if isinstance(hi, int) and not isinstance(hi, bool) else None
-    if lo is None and hi is None:
-        return None
-    return (lo, hi)
-
-
-def format_length_bounds(bounds: Optional[LengthBounds]) -> str:
-    """``(250, 400)`` → ``"[250, 400]"``; an open end renders as ``null``."""
-    if not bounds:
-        return "[null, null]"
-    lo, hi = bounds
-    return f"[{'null' if lo is None else lo}, {'null' if hi is None else hi}]"
-
-
-def _within_bounds(prot: dict, bounds: Optional[LengthBounds]) -> bool:
-    if not bounds:
-        return True
-    n = len(prot.get("sequence") or "")
-    lo, hi = bounds
-    return (lo is None or n >= lo) and (hi is None or n <= hi)
+# The bound helpers are shared with the clustering picker (one definition,
+# so clustering and every output-side picker read a bound identically). The
+# private aliases keep this module's historical names working.
+_length_bounds = parse_length_bounds
+_within_bounds = within_length_bounds
 
 
 def collect_extra_length_bounds(
@@ -399,55 +452,96 @@ class ExtraPickContext:
         hmm_active: bool,
         overlap_tolerance: int,
         bounds: dict[tuple[str, Optional[str]], LengthBounds],
-        claimants: dict[Optional[str], list[tuple[str, list[str], Optional[LengthBounds]]]],
+        claimants: dict[
+            Optional[str],
+            list[tuple[str, list[str], Optional[LengthBounds], bool]],
+        ],
+        marker_ctx: Optional["MarkerBoundsContext"] = None,
     ) -> None:
         self.hmm_active = hmm_active
         self.overlap_tolerance = overlap_tolerance
         self.bounds = bounds
+        # (label, tokens, bounds, is_cluster_marker) per scope.
         self.claimants = claimants
+        self.marker_ctx = marker_ctx
         self._claim_cache: dict[tuple, dict[int, str]] = {}
 
-    def claimed(self, proteins: list[dict], segment: Optional[str]) -> dict[int, str]:
+    def exempt(self, rep: Sequence) -> bool:
+        """True when ``rep`` is protected against the ``marker_length`` QC
+        stage, so its cluster markers are picked as if unbounded."""
+        return self.marker_ctx is not None and self.marker_ctx.exempt(rep)
+
+    def claimed(
+        self, proteins: list[dict], segment: Optional[str], exempt: Exempt = False,
+    ) -> dict[int, str]:
         """``{id(cds): claimant_label}`` for CDSes an HMM spec picks in scope.
 
         Keyed on object identity: the claimant's pick comes from the same
         protein dicts the alias spec sees. Empty when the HMM tier is off.
+        A cluster-marker claimant claims exactly the CDS the marker picker
+        takes — inside its ``length_aa``, or (``exempt``: the rep is protected
+        against ``marker_length``) its unbounded pick when nothing is in range.
+        ``exempt`` is only evaluated when a bounded marker claimant misses.
         """
         if not self.hmm_active:
             return {}
         with_seq = [p for p in (proteins or []) if p.get("sequence")]
-        key = (segment, tuple(id(p) for p in with_seq))
+        ids = tuple(id(p) for p in with_seq)
+        bounded = self._claims(segment, ids, with_seq, unbounded_markers=False)
+        if not bounded[1] or not _is_exempt(exempt):
+            return bounded[0]
+        return self._claims(segment, ids, with_seq, unbounded_markers=True)[0]
+
+    def _claims(
+        self, segment, ids, with_seq, *, unbounded_markers: bool,
+    ) -> tuple[dict[int, str], bool]:
+        """``(claims, a_bounded_marker_missed)``, memoised per scope."""
+        key = (segment, unbounded_markers, ids)
         cached = self._claim_cache.get(key)
         if cached is not None:
             return cached
         out: dict[int, str] = {}
-        for label, tokens, bounds in self.claimants.get(segment, []):
-            pool = [p for p in with_seq if _within_bounds(p, bounds)]
+        missed = False
+        for label, tokens, bounds, is_marker in self.claimants.get(segment, []):
             pick = pick_marker_cds(
-                pool, tokens, [], True, overlap_tolerance=self.overlap_tolerance,
+                with_seq, tokens, [], True,
+                overlap_tolerance=self.overlap_tolerance,
+                bounds=bounds, exempt=(unbounded_markers and is_marker),
             )
+            if pick is None and bounds and is_marker:
+                missed = True
             if pick is not None:
                 out.setdefault(id(pick), label)
-        self._claim_cache[key] = out
-        return out
+        self._claim_cache[key] = (out, missed)
+        return out, missed
 
 
 def build_extra_pick_context(cfg: dict[str, Any], hmm_active: bool) -> ExtraPickContext:
     """Collect every HMM-bearing spec (cluster markers + HMM extra_protein
-    specs) per scope, plus the extra_protein ``length_aa`` bounds."""
+    specs) per scope, plus the extra_protein ``length_aa`` bounds. Cluster
+    markers claim with their own ``length_aa`` so the claimed CDS is exactly
+    the one the marker picked."""
     bounds = collect_extra_length_bounds(cfg)
-    claimants: dict[Optional[str], list[tuple[str, list[str], Optional[LengthBounds]]]] = {}
+    marker_ctx = build_marker_bounds_context(cfg)
+    claimants: dict[
+        Optional[str], list[tuple[str, list[str], Optional[LengthBounds], bool]]
+    ] = {}
     for label, tokens, _aliases, seg in collect_marker_specs(cfg):
         if tokens:
-            claimants.setdefault(seg, []).append((label, tokens, None))
+            claimants.setdefault(seg, []).append(
+                (label, tokens, marker_ctx.bounds_for(label, seg), True)
+            )
     for label, tokens, _aliases, seg in collect_extra_specs(cfg):
         if tokens:
-            claimants.setdefault(seg, []).append((label, tokens, bounds.get((label, seg))))
+            claimants.setdefault(seg, []).append(
+                (label, tokens, bounds.get((label, seg)), False)
+            )
     return ExtraPickContext(
         hmm_active=hmm_active,
         overlap_tolerance=overlap_tolerance_from_cfg(cfg),
         bounds=bounds,
         claimants=claimants,
+        marker_ctx=marker_ctx,
     )
 
 
@@ -458,8 +552,13 @@ def pick_extra_cds(
     aliases: list[str],
     segment: Optional[str],
     ctx: ExtraPickContext,
+    exempt: Exempt = False,
 ) -> tuple[Optional[dict], list[tuple[dict, str]]]:
     """Pick one CDS for an ``extra_protein`` spec; return ``(cds, set_aside)``.
+
+    ``exempt`` (from :meth:`ExtraPickContext.exempt`; a bool, or a
+    zero-argument callable evaluated only when needed) only changes which
+    CDS the cluster markers claim — see :meth:`ExtraPickContext.claimed`.
 
     Same chain as :func:`pick_marker_cds` (HMM-first when the spec has
     ``hmms:`` and the tier ran, else alias) plus the two guards described
@@ -494,7 +593,7 @@ def pick_extra_cds(
 
     # Alias path: an alias-only spec, or an HMM spec on a run where the HMM
     # tier did not run (then nothing is claimed — behaviour as before).
-    claimed = ctx.claimed(with_seq, segment)
+    claimed = ctx.claimed(with_seq, segment, exempt)
     pool = [p for p in in_bounds if id(p) not in claimed]
     cds = pick_marker_cds(pool, [], aliases, False)
     for p in with_seq:
@@ -647,8 +746,42 @@ def pick_marker_cds(
     hmm_active: bool,
     *,
     overlap_tolerance: int = 0,
+    bounds: Optional[LengthBounds] = None,
+    exempt: Exempt = False,
 ) -> Optional[dict]:
     """Pick one CDS to represent a marker spec on one sequence/segment.
+
+    ``bounds`` (the spec's ``length_aa``) restricts the candidates before
+    the pick, exactly as the clustering picker does. ``exempt`` (the rep is
+    protected against the ``marker_length`` QC stage) falls back to the
+    unbounded pick when nothing is in range — again matching clustering.
+    """
+    with_seq = [p for p in (proteins or []) if p.get("sequence")]
+    if not with_seq:
+        return None
+    if bounds:
+        pick = _pick_marker_cds_core(
+            [p for p in with_seq if within_length_bounds(p, bounds)],
+            hmm_tokens, aliases, hmm_active, overlap_tolerance,
+        )
+        if pick is None and _is_exempt(exempt):
+            pick = _pick_marker_cds_core(
+                with_seq, hmm_tokens, aliases, hmm_active, overlap_tolerance,
+            )
+        return pick
+    return _pick_marker_cds_core(
+        with_seq, hmm_tokens, aliases, hmm_active, overlap_tolerance,
+    )
+
+
+def _pick_marker_cds_core(
+    with_seq: list[dict],
+    hmm_tokens: list[str],
+    aliases: list[str],
+    hmm_active: bool,
+    overlap_tolerance: int,
+) -> Optional[dict]:
+    """The unbounded marker pick (body of :func:`pick_marker_cds`).
 
     Mirrors :func:`repseq.clustering.marker.select_marker_protein`'s chain:
     if the spec declares ``hmms:`` AND the HMM tier ran, prefer the longest
@@ -661,7 +794,6 @@ def pick_marker_cds(
     the ``--per-protein-phylo`` tree builder so the artifact set is
     coherent (the FASTA's CDS is the tree's CDS).
     """
-    with_seq = [p for p in (proteins or []) if p.get("sequence")]
     if not with_seq:
         return None
 
@@ -781,6 +913,7 @@ def _build_specs_trees(
     built_labels: list[str] = []
     sparse: list[str] = []
     tol = overlap_tolerance_from_cfg(cfg)
+    marker_ctx = build_marker_bounds_context(cfg) if extra_ctx is None else None
 
     for family_label, tokens, aliases, segment in specs:
         leaf_reps: list[Sequence] = []
@@ -791,12 +924,12 @@ def _build_specs_trees(
                 cds, _set_aside = pick_extra_cds(
                     _segment_proteins(rep, segment),
                     family_label, tokens, aliases, segment, extra_ctx,
+                    partial(extra_ctx.exempt, rep),
                 )
             else:
-                cds = pick_marker_cds(
-                    _segment_proteins(rep, segment),
-                    tokens, aliases, hmm_active,
-                    overlap_tolerance=tol,
+                cds = marker_ctx.pick(
+                    rep, _segment_proteins(rep, segment),
+                    family_label, tokens, aliases, segment, hmm_active, tol,
                 )
             if cds is None:
                 continue

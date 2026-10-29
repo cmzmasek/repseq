@@ -146,6 +146,19 @@ segmented:
   #                                            #   chosen if alphabet=protein. See the
   #                                            #   top-level `hmm:` block for gate
   #                                            #   behaviour and cutoffs.
+  #         length_aa: [<min>, <max>]          # optional: the marker protein must be
+  #                                            #   min..max amino acids (inclusive;
+  #                                            #   null leaves an end open). An isolate
+  #                                            #   whose marker is present but outside
+  #                                            #   the range is DROPPED by the
+  #                                            #   marker-length QC step (reason
+  #                                            #   marker_length:<seg>:481aa_below_485
+  #                                            #   in _qc_removed.tsv), and the same
+  #                                            #   range decides which CDS clustering,
+  #                                            #   the per-protein FASTAs and the trees
+  #                                            #   use. Derive ranges from your data:
+  #                                            #   a percentage of the median can cut
+  #                                            #   real alleles (influenza NS1 217/219).
   #     extra_protein:                         # optional accessory proteins per segment
   #       <segment_name>:                      #   to extract / phylogenize but NOT use
   #         - {name: ..., aliases: [...], hmms: [<token>]}   # for clustering. Same dict
@@ -160,10 +173,12 @@ segmented:
   #                                            #   tree into {prefix}_extra_protein/.
   #                                            #   Sparse-by-design: specs that no rep
   #                                            #   satisfies produce no file. Optional
-  #                                            #   `length_aa: [min, max]`; alias-only
-  #                                            #   entries skip CDSes an HMM spec on
-  #                                            #   the segment already selected (see
-  #                                            #   clustering.extra_protein below).
+  #                                            #   `length_aa: [min, max]` (here an
+  #                                            #   out-of-range protein is just absent
+  #                                            #   for that isolate, nothing dropped);
+  #                                            #   alias-only entries skip CDSes an HMM
+  #                                            #   spec on the segment already selected
+  #                                            #   (see clustering.extra_protein below).
   # See config/examples/influenza_a.yaml for a worked example with
   # strain-aware list-valued counts.
   viruses: {}
@@ -265,6 +280,19 @@ clustering:
   # one spec's token list it is OR (alternative architectures). Specs that
   # only define `aliases:` (no `hmms:`) are advisory selection hints; they
   # do not gate QC.
+  #
+  # LENGTH BOUNDS: a dict entry may add `length_aa: [min, max]` (amino
+  # acids, inclusive; `null` leaves an end open), e.g.
+  #   - {name: N, hmms: ["CoV_nucleocap"], length_aa: [350, 450]}
+  # The marker protein must then lie inside the range. A sequence whose
+  # marker is present but outside it is dropped by the marker-length QC step
+  # (after the HMM gate; reason `marker_length:<name>:300aa_below_350` in
+  # _qc_removed.tsv); with several bounded entries EVERY one must hold. The
+  # same range decides which CDS clustering, the per-protein FASTAs, the
+  # trees and the partitioned supermatrix use, so they always agree. A
+  # bounded alias-only entry never falls back to "the longest CDS".
+  # Protect a reference strain from this step with overrides.protect_stages
+  # token `marker_length`.
   cluster_protein: []
 
   # Non-segmented multi-marker clustering. When false (default) the
@@ -315,7 +343,10 @@ clustering:
   #     the HMM tier; without it alias picking is unchanged.
   #   * Optional `length_aa: [min, max]` (amino acids, inclusive; `null`
   #     leaves an end open): CDSes outside it are dropped BEFORE the pick.
-  #     extra_protein entries only, not clustering markers. Example:
+  #     On an extra_protein entry nothing is ever dropped from the run — an
+  #     out-of-range protein is simply absent for that record. (The same key
+  #     on a clustering marker is a QC requirement; see cluster_protein.)
+  #     Example:
   #       - {name: NSm, aliases: ["NSm", "nonstructural protein"],
   #          length_aa: [250, 400]}
   # Every CDS either guard leaves out is listed on the console.
@@ -908,7 +939,10 @@ overrides:
   # protect_stages: which QC removal stages to protect against. Either the
   # string "all", or a list naming any of:
   #   duplicates, length, ambiguous, annotation, protein_count,
-  #   taxonomy_consistency, protein_quality, hmm
+  #   taxonomy_consistency, protein_quality, hmm, marker_length
+  # (`length` is the nucleotide length filter; `marker_length` is the
+  # marker-protein length_aa check — a protected record keeps its real,
+  # out-of-range protein in clustering and in every per-protein output.)
   # (Segmented completeness is NOT protectable — protection cannot
   # synthesize a missing segment, so an incomplete isolate still drops.)
   protect_stages: all

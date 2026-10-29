@@ -441,3 +441,25 @@ def test_run_phylogeny_skips_partition_for_fasttree(tmp_path):
 
     # FastTree can't partition → concat path, no NEXUS.
     assert not (tmp_path / "test_partition.nex").exists()
+
+
+def test_build_partitioned_honours_marker_length_bounds(tmp_path):
+    """v0.76.0: a marker's ``length_aa`` holds in the supermatrix too, so each
+    block carries exactly the CDS clustering used — here the in-range 200 aa
+    nucleoprotein, not the longer 300 aa fusion beside it."""
+    reps = _three_reps()
+    s_seg = next(s for s in reps[0].concat_segments if s.segment == "S")
+    s_seg.proteins = s_seg.proteins + [
+        _prot("S_Nfused", "nucleoprotein", "M" * 300, [_hit("Bunya_nucleocap")]),
+    ]
+    markers = {
+        "S": {"hmms": ["Bunya_nucleocap"], "length_aa": [150, 250]},
+        "M": {"hmms": ["Bunya_G2--Bunya_G1"]},
+    }
+    with patch("repseq.phylo.partition.run_mafft", side_effect=_stub_mafft), \
+         patch("repseq.phylo.partition.run_iqtree", side_effect=_stub_iqtree):
+        files = build_partitioned_phylogeny(reps, _cfg(markers), tmp_path, "test")
+    assert files is not None
+    s_msa = read_msa(tmp_path / "test_msa_S_Bunya_nucleocap.fasta")
+    # Width = longest in-range body (202 aa); the 300 aa fusion never entered.
+    assert {len(v) for v in s_msa.values()} == {202}

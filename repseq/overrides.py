@@ -63,6 +63,10 @@ QC_PROTECT_STAGES: tuple[str, ...] = (
     "taxonomy_consistency",
     "protein_quality",
     "hmm",
+    # v0.76.0: a protected isolate keeps its marker even when that protein
+    # falls outside the spec's length_aa range, and every picker (clustering,
+    # FASTA, trees, supermatrix) then uses that real protein for it.
+    "marker_length",
 )
 
 _WS = re.compile(r"\s+")

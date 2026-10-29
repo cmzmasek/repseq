@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .. import __version__ as REPSEQ_VERSION
+from ..clustering.marker import parse_length_bounds
+from ..config import get_virus_config
 from ..models import QCReport, RunResult
 
 
@@ -655,6 +657,72 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
             f"had to cover ≥ {rel:.0%} of the HMM model length. Top "
             f"reasons: {breakdown}."
         )
+        hmm_complete = _complete_isolates_removed(
+            qc_report, cfg, "hmm_complete_isolates",
+            qc_report.removed_hmm_failed, "hmm_isolates_pre_assembly",
+        )
+        if hmm_complete:
+            extra_lines.append(hmm_complete)
+
+    length_bits = _marker_length_bound_bits(cfg)
+    skipped = bool((getattr(qc_report, "display", None) or {}).get(
+        "marker_length_skipped"
+    ))
+    if length_bits and skipped:
+        extra_lines.append(
+            f"Length ranges were configured for the marker proteins "
+            f"({'; '.join(length_bits)}) but were **not applied** in this "
+            f"run: the check needs the GenBank coding-sequence translations, "
+            f"which were not fetched (`--no-resolve`)."
+        )
+    elif length_bits:
+        segmented = bool(cfg.get("segmented", {}).get("enabled"))
+        unit = "isolates" if segmented else "sequences"
+        whole = "the whole isolate" if segmented else "the sequence"
+        sentence = (
+            f"Marker proteins were additionally required to fall within "
+            f"configured length ranges (amino acids, inclusive): "
+            f"{'; '.join(length_bits)}. A marker protein that was identified "
+            f"but lay outside its range removed {whole}"
+        )
+        n_len = qc_report.removed_marker_length
+        if n_len:
+            by = ", ".join(
+                f"`{k}` ({_fmt_int(v)})"
+                for k, v in sorted(
+                    qc_report.removed_marker_length_by_marker.items(),
+                    key=lambda kv: (-kv[1], str(kv[0])),
+                )
+            )
+            sentence += (
+                f"; **{_fmt_int(n_len)}** {unit} were removed this way "
+                f"(failing markers: {by}; a record outside the range on "
+                f"several markers is listed under each)."
+            )
+            len_complete = _complete_isolates_removed(
+                qc_report, cfg, "length_complete_isolates",
+                n_len, "length_isolates_pre_assembly",
+            )
+            if len_complete:
+                sentence += " " + len_complete
+        else:
+            sentence += f"; no {unit} were removed this way."
+        alphabet = (cfg.get("clustering", {}) or {}).get(
+            "alphabet_for_clustering", "protein"
+        )
+        if alphabet == "nucleotide":
+            sentence += (
+                " Clustering itself used nucleotide sequences; the same "
+                "ranges decided which coding sequence represented each "
+                "marker in the per-protein FASTA files and in the trees."
+            )
+        else:
+            sentence += (
+                " The same ranges decided which coding sequence represented "
+                "each marker in clustering, in the per-protein FASTA files "
+                "and in the trees."
+            )
+        extra_lines.append(sentence)
 
     if qc_report.protected:
         n_ids = len({p["id"] for p in qc_report.protected})
@@ -670,6 +738,72 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
 
     extra_block = ("\n\n" + " ".join(extra_lines)) if extra_lines else ""
     return f"## Quality control\n\n{basic}{extra_block}\n"
+
+
+def _complete_isolates_removed(
+    qc_report: QCReport, cfg: dict, gate_key: str, total: int, pre_key: str,
+) -> str:
+    """Sentence saying how many isolates an isolate-level gate removed while
+    they still had every expected segment ("" when not applicable).
+
+    The gate runs before isolate assembly, so part of its total were already
+    incomplete. Isolates removed later by the same rule at assembly (the
+    backstop) are complete by construction and are added back in. Reads only
+    ``qc_report.display`` (with defaults) so it never fails on a report that
+    lacks the figures.
+    """
+    if not (cfg.get("segmented", {}) or {}).get("enabled") or not total:
+        return ""
+    d = getattr(qc_report, "display", None) or {}
+    gate_complete = d.get(gate_key)
+    if gate_complete is None:
+        return ""
+    gate_total = d.get(pre_key, total)
+    complete = gate_complete + max(0, total - gate_total)
+    virus = get_virus_config(cfg) or {}
+    nseg = len(virus.get("segments") or [])
+    seg_txt = f"all {nseg} expected segments" if nseg else "every expected segment"
+    return (
+        f"Of these {_fmt_int(total)} isolates, **{_fmt_int(complete)}** "
+        f"carried {seg_txt}; the others were already missing a segment and "
+        f"would have been removed at isolate assembly regardless."
+    )
+
+
+def _marker_length_bound_bits(cfg: dict) -> list[str]:
+    """``["segment `5` 485–510 aa", ...]`` for every cluster marker that
+    declares ``length_aa`` (segment_markers / clustering.cluster_protein).
+    Parsed with the pickers' own ``parse_length_bounds``, so the prose can
+    never describe a range the pipeline read differently."""
+    def _range(raw) -> Optional[str]:
+        bounds = parse_length_bounds(raw)
+        if bounds is None:
+            return None
+        lo, hi = bounds
+        if lo is not None and hi is not None:
+            return f"{lo}–{hi} aa"
+        if lo is not None:
+            return f"≥ {lo} aa"
+        return f"≤ {hi} aa"
+
+    bits: list[str] = []
+    if (cfg.get("segmented", {}) or {}).get("enabled"):
+        virus = get_virus_config(cfg) or {}
+        sm = virus.get("segment_markers") or {}
+        segments = list(virus.get("segments") or [])
+        for seg in segments + [s for s in sm if s not in segments]:
+            r = _range((sm.get(seg) or {}).get("length_aa"))
+            if r:
+                bits.append(f"segment `{seg}` {r}")
+    else:
+        for entry in (cfg.get("clustering", {}) or {}).get("cluster_protein", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            r = _range(entry.get("length_aa"))
+            if r:
+                name = entry.get("name") or ",".join(entry.get("hmms") or entry.get("aliases") or [])
+                bits.append(f"`{name}` {r}")
+    return bits
 
 
 def _render_segmented(cfg: dict, qc_report: QCReport,
@@ -717,12 +851,19 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
         tool_name = "MMseqs2"
         tool_cite = _CITATIONS["mmseqs"]
 
+    bounded = bool(_marker_length_bound_bits(cfg))
+    in_range = (
+        ", restricted to the marker's configured length range" if bounded else ""
+    )
+    hmm_in_range = (
+        " and lying inside the marker's configured length range" if bounded else ""
+    )
     if alphabet == "protein" and segmented:
         input_desc = (
             f"**{_fmt_int(n_input_to_clust)} per-isolate concatenated "
             f"marker-protein sequences** (one marker per segment — longest "
-            f"CDS by default, overridable via `cluster_protein` aliases — "
-            f"joined in canonical segment order)"
+            f"CDS by default, overridable via `cluster_protein` aliases"
+            f"{in_range} — joined in canonical segment order)"
         )
     elif alphabet == "protein" and cluster_cfg.get("concatenate_markers"):
         input_desc = (
@@ -734,7 +875,7 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
         input_desc = (
             f"**{_fmt_int(n_input_to_clust)} marker-protein sequences** "
             f"(longest CDS per record by default, overridable via "
-            f"`cluster_protein` aliases)"
+            f"`cluster_protein` aliases{in_range})"
         )
     elif segmented:
         input_desc = (
@@ -832,7 +973,8 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
             f"control section above for the per-marker drop breakdown. "
             f"When `alphabet_for_clustering=protein`, the marker CDS for "
             f"each surviving sequence/segment is then chosen as the "
-            f"longest CDS satisfying any of the configured HMM tokens."
+            f"longest CDS satisfying any of the configured HMM tokens"
+            f"{hmm_in_range}."
         )
         if cluster_cfg.get("concatenate_markers") and not segmented:
             hmm_sentence += (

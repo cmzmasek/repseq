@@ -284,6 +284,11 @@ your FASTA file(s)
     fails the whole isolate)
         │
         ▼
+  marker-protein length check                               (when any marker has length_aa:)
+    drop isolates/sequences whose marker protein is there but
+    shorter or longer than its allowed range (a partial record)
+        │
+        ▼
   (segmented mode only)
     fetch the marker protein per segment, concatenate per isolate
         │
@@ -433,7 +438,9 @@ Unaligned protein FASTA, one file per marker spec under
 `clustering.cluster_protein` (non-segmented) or `segment_markers` /
 `cluster_protein` (segmented). Each holds **one record per representative
 carrying that marker** — the CDS that satisfied the marker's HMM (or the alias
-chain if no `hmms:` is declared). `<family>` is the spec's `name:`
+chain if no `hmms:` is declared). When the marker declares a `length_aa`
+range, only a CDS inside it qualifies, exactly as for clustering, so each record
+is the protein that was actually clustered. `<family>` is the spec's `name:`
 (e.g. `Spike`), else the single token (`Bunya_nucleocap`), else the first token
 + `_altN`; segment-prefixed in segmented mode (`M_Spike`).
 
@@ -585,6 +592,9 @@ Every sequence dropped during cleaning, with the reason. Columns: `accession`,
 - `taxonomy_mismatch:<rank>` — segments of one isolate disagreed at the configured rank
 - `strain_collision:<segment>` — distinct accessions shared a strain-derived isolate id (when `strain_collision_action: drop`)
 - `hmm_failed:<seg>:<token>` — no CDS satisfied the marker's tokens (HMM-QC)
+- `marker_length:<seg>:<n>aa_below_<min>` (or `_above_<max>`) — the marker
+  protein is there but outside its `length_aa` range, usually a partial record;
+  the isolate's other segments appear as `marker_length_sibling:...`
 
 **Check this file first when more was dropped than expected.** Sort by `reason`
 to see which filter did the damage; the same info is summarised in `_run.log`.
@@ -1516,9 +1526,13 @@ any `overrides.ids` / `overrides.ids_file`, and turns its flag on for that run.
   match on accession.
 - **`protect_stages`** is `all` or a list naming any of: `duplicates`, `length`,
   `ambiguous`, `annotation`, `protein_count`, `taxonomy_consistency`,
-  `protein_quality`, `hmm`. Per-stage on purpose: you can keep a slightly noisy
-  reference through the `hmm` identity gate while still dropping it if its
-  translation is genuine garbage (`protein_quality`).
+  `protein_quality`, `hmm`, `marker_length`. Per-stage on purpose: you can keep a
+  slightly noisy reference through the `hmm` identity gate while still dropping it
+  if its translation is genuine garbage (`protein_quality`). `length` is the
+  nucleotide length filter; `marker_length` is the marker-protein
+  [length range](#marker-protein-length-ranges-length_aa). A record protected
+  from `marker_length` keeps its real protein everywhere: in clustering, in the
+  per-protein FASTA and in the trees.
 - **Segmented completeness is deliberately *not* protectable.** Protection can't
   synthesize a missing segment, so a protected isolate missing a segment still
   drops (it can't be concatenated or treed) — with a distinct message rather than
@@ -1939,12 +1953,24 @@ For a marker spec that includes `hmms: [<token>, ...]`:
 4. If a marker has no satisfying CDS, the segment fails. In segmented mode the
    whole isolate is dropped (one bad segment fails the isolate, counted under
    `removed_hmm_failed`, the reason naming the unmatched alternatives joined with
-   `|`). In non-segmented mode the single sequence is dropped.
+   `|`). In non-segmented mode the single sequence is dropped. When an isolate
+   has two records for the same segment (a resubmission, say), only the one
+   repseq will keep for that isolate is judged: the longer nucleotide sequence.
+   A bad duplicate that would have been discarded anyway cannot remove the
+   isolate.
 5. For protein-alphabet clustering, the marker CDS of each survivor is the
    **longest** CDS satisfying any token in the spec.
 
 Markers WITHOUT an `hmms:` list keep the legacy alias → longest chain and are not
 gated by HMM-QC.
+
+**Reading the HMM count in segmented runs.** The gate runs before isolates are
+assembled, so some of the isolates it removes were already missing a segment and
+would have been dropped at assembly anyway. The console summary and
+`{prefix}_summary.md` therefore also say how many of the removed isolates still
+had every segment, in the form `−<removed> isolates (<n> with all 8 segments)`.
+That second number is what the gate actually cost you. The marker-length check
+reports the same figure.
 
 ### Bundled vs user-supplied database
 
@@ -2042,6 +2068,75 @@ segmented:
 
 When both `segment_markers` and the legacy `cluster_protein` define a marker for
 the same segment, `segment_markers` wins.
+
+### Marker-protein length ranges (`length_aa`)
+
+The HMM gate tells you a protein **is** NP. It does not tell you the NP is
+**complete**. GenBank holds plenty of partial records, and a 481-residue NP sitting
+among 498-residue ones adds a gap block to every alignment and can drag
+conservation scores down. A marker can therefore carry an allowed length range in
+amino acids:
+
+```yaml
+segment_markers:
+  '3': {hmms: ["Flu_PA"],  length_aa: [705, 740]}
+  '5': {hmms: ["Flu_NP"],  length_aa: [485, 510]}
+  '6': {hmms: ["Neur"],    length_aa: [435, 480]}   # keeps the real 449 aa N1
+```
+
+For non-segmented runs the same key goes on a `clustering.cluster_protein` entry,
+for example `{name: N, hmms: ["CoV_nucleocap"], length_aa: [350, 450]}`. Either
+end may be `null` to leave it open.
+
+What happens:
+
+- **A record whose marker is outside its range is dropped** by a check that runs
+  right after the HMM gate. One partial segment drops the whole isolate, just as a
+  failed HMM segment does. The reason in `{prefix}_qc_removed.tsv` names the
+  segment, the length found and the limit, e.g. `marker_length:5:481aa_below_485`.
+  A record with no NP at all is still reported by the HMM gate, so "partial" and
+  "missing" never get mixed up.
+- **Only the record repseq keeps is judged.** When an isolate has two records for
+  one segment, repseq keeps the one with the longer nucleotide sequence, and that
+  is the one this check (and the HMM gate) looks at. An older partial
+  resubmission therefore cannot remove an isolate that also has a complete
+  record for that segment.
+- **The same range decides which protein is used everywhere.** Clustering, the
+  per-protein FASTA, the per-protein trees, the partitioned supermatrix and the
+  protein taxonomic report all take the longest matching CDS *inside* the range.
+  They therefore always show the same protein.
+- **Counting.** The console summary and `{prefix}_summary.md` count each removed
+  isolate once. The per-marker breakdown counts every marker that failed, so an
+  isolate partial on both PA and NP is listed under each. That shows you which
+  range is doing the work.
+- **Most removals may be isolates you would have lost anyway.** The check runs
+  before isolates are assembled, and many partial records come from submissions
+  that sequenced only one or two segments. Both summaries therefore also say how
+  many removed isolates still had every segment. On a global influenza A H5N1
+  run, 72 % of the failing markers belonged to isolates that were already
+  incomplete, and for HA it was 423 of 437.
+- **A bounded marker defined by aliases alone never falls back** to "the longest
+  protein on the record". Without a range, an alias-only marker that matches
+  nothing quietly takes the longest CDS. With a range, that could be an unrelated
+  protein that happens to fit, so it is not used. If the aliases matched a
+  protein that is outside the range, this check drops the record. If they matched
+  nothing at all, the marker counts as missing, not as partial: protein-alphabet
+  clustering then drops the record for having no marker.
+- **To keep a reference strain anyway**, list it under `overrides` and include
+  `marker_length` in `protect_stages`.
+
+**Choose ranges from your own data, not from a rule of thumb.** Look at the
+`length_aa` column of `{prefix}_isolate_proteins.tsv` (or
+`{prefix}_sequence_proteins.tsv`) from an earlier run and find where real
+variants end and the scattered partial tail begins. A floor at 95 % of the median
+sounds safe but is not: influenza NS1 has common, genuine 217 and 219 residue
+forms next to the 230 residue one, and such a floor would discard about 6 % of
+all isolates. Real length variants show up in many independent submissions;
+partial records tend to come in one batch of consecutive accessions.
+
+`length_aa` also exists on `extra_protein` entries, with a softer effect: an
+accessory protein outside its range is simply absent for that record, and nothing
+is dropped. See [Accessory proteins](#accessory-proteins-extra_protein).
 
 ### HMM-related config keys
 
@@ -2147,10 +2242,12 @@ Labels are sometimes wrong. A real example: a tospovirus record labels its
 
 Every CDS left out by either rule is listed on the console, with its accession,
 length, label, isolate, and the reason. These are usually GenBank labelling
-errors worth knowing about. `length_aa` applies only to `extra_protein`
-entries, never to clustering markers: a marker's per-protein FASTA must show
-exactly the protein that was clustered. The rules and bounds are also listed at
-the end of `{prefix}_protein_taxonomic_report.txt`.
+errors worth knowing about. On an `extra_protein` entry, `length_aa` never drops
+anything from the run: an out-of-range accessory protein is just absent for that
+record. The same key on a clustering marker is stricter, because it is a QC
+requirement; see [Marker-protein length ranges](#marker-protein-length-ranges-length_aa).
+The rules and bounds are also listed at the end of
+`{prefix}_protein_taxonomic_report.txt`.
 
 ---
 
@@ -2484,7 +2581,7 @@ that license; it comes with **no warranty**. The full license text is in the
 
 ## Status
 
-Current: **`v0.75.1`**.
+Current: **`v0.76.0`**.
 
 **Selection.** All 8 selection modes, including grouping by a column of your own
 metadata table (`--metadata-table`), so representatives can be chosen per
@@ -2497,7 +2594,9 @@ force-select / input-blocklist `overrides` system.
 taxonomy-consistency QC and strain-as-isolate provenance + collision detection
 for segmented viruses; **HMM-based identity QC** with multidomain-architecture
 token notation (HMMER hmmscan against the bundled viral Pfam-A core set, eight
-clade-specific bundled sets, or your own database).
+clade-specific bundled sets, or your own database), plus optional marker-protein
+**length ranges** (`length_aa`) that drop partial records and decide which protein
+clustering, the FASTAs and the trees all use.
 
 **Phylogeny.** Rich phyloXML with taxonomy-driven leaf colouring shared across
 every tree of a run; partitioned-supermatrix trees for protein + IQ-TREE
@@ -2522,7 +2621,7 @@ into plain-English flags and a single-file HTML report; an auto-generated
 Methods-section starter (`_summary.md`), a reproducibility lockfile
 (`repseq replay`), and a sanitized config snapshot on every run.
 
-**1,558 offline regression tests pass.** The NCBI-backed paths have been
+**1,633 offline regression tests pass.** The NCBI-backed paths have been
 validated end-to-end against live influenza A and B, peribunyaviridae,
 hantaviridae, coronaviridae, amarillovirales, elliovirales and hareavirales
 datasets. See `git log` for the full release history.

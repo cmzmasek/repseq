@@ -313,17 +313,30 @@ def test_segmented_qc_mixed_isolates(make_seq):
     assert qc.removed_hmm_failed == 2  # two isolates dropped
 
 
-def test_segmented_qc_no_op_when_no_isolate_id(make_seq):
-    """Sequences without isolate_id are not gated here — the regex
-    fallback in _handle_segmented can still group them later, and
-    build_concatenated_sequences applies its own backstop gate."""
-    cfg = _segmented_cfg()
+def test_segmented_qc_no_op_when_isolate_unresolvable(make_seq):
+    """A record whose isolate neither GenBank nor isolate_regex can name is
+    left alone here; assembly drops it as unidentifiable."""
+    cfg = _segmented_cfg()  # no isolate_regex
     seq = make_seq("orphan", "ACGT", segment="S")  # no isolate_id
     _attach_proteins(seq, [_cds("N", "M" * 300, hmm_hits=[])])
     qc = QCReport()
     kept = _run_hmm_qc_segmented([seq], cfg, qc)
     assert kept == [seq]
     assert qc.removed_hmm_failed == 0
+
+
+def test_segmented_qc_gates_isolates_grouped_by_the_regex_fallback(make_seq):
+    """Records with no GenBank isolate id are grouped by isolate_regex,
+    exactly as assembly will group them, and gated here — in every
+    alphabet, not only at the protein-alphabet assembly backstop."""
+    cfg = _segmented_cfg()
+    cfg["segmented"]["viruses"]["test_virus"]["isolate_regex"] = r"^(\w+)_"
+    seq = make_seq("orph1_S", "ACGT", segment="S")  # no isolate_id
+    _attach_proteins(seq, [_cds("N", "M" * 300, hmm_hits=[])])
+    qc = QCReport()
+    assert _run_hmm_qc_segmented([seq], cfg, qc) == []
+    assert qc.removed_hmm_failed == 1
+    assert seq.qc_fail_reason == "hmm_failed:S:Bunya_nucleocap"
 
 
 # ---------------------------------------------------------------------------
