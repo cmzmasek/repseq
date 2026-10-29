@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .. import __version__ as REPSEQ_VERSION
-from ..clustering.marker import parse_length_bounds
+from ..clustering.marker import parse_length_bounds, require_met_start_from_cfg
 from ..config import get_virus_config
 from ..models import QCReport, RunResult
 
@@ -724,6 +724,77 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
             )
         extra_lines.append(sentence)
 
+    # 5'-completeness of the marker proteins (qc.marker_completeness).
+    # The CONFIGURED value, not `require_met_start_active`: when the stage
+    # skipped the check this prose has to say so (next branch), which it
+    # cannot do if the helper reports the requirement as absent.
+    if require_met_start_from_cfg(cfg):
+        display = getattr(qc_report, "display", None) or {}
+        segmented = bool(cfg.get("segmented", {}).get("enabled"))
+        unit = "isolates" if segmented else "sequences"
+        whole = "the whole isolate" if segmented else "the sequence"
+        if display.get("marker_completeness_skipped"):
+            extra_lines.append(
+                "Marker proteins were configured to be required 5'-complete "
+                "but the check was **not applied** in this run: it needs the "
+                "GenBank coding-sequence translations, which were not fetched "
+                "(`--no-resolve`)."
+            )
+        else:
+            sentence = (
+                "Marker proteins were additionally required to be "
+                "**5'-complete**: a complete coding sequence translates from "
+                "an initial methionine, so a marker whose translation began "
+                "elsewhere was treated as a 5'-partial record and removed "
+                f"{whole} (`qc.marker_completeness.require_met_start`). This "
+                "catches truncations a length range cannot, because a short "
+                "N-terminal truncation still falls inside the range"
+            )
+            n_mc = qc_report.removed_marker_completeness
+            also = display.get("marker_completeness_also_length", 0)
+            if n_mc:
+                by = ", ".join(
+                    f"`{k}` ({_fmt_int(v)})"
+                    for k, v in sorted(
+                        qc_report.removed_marker_completeness_by_marker.items(),
+                        key=lambda kv: (-kv[1], str(kv[0])),
+                    )
+                )
+                sentence += (
+                    f"; **{_fmt_int(n_mc)}** {unit} were removed this way "
+                    f"(failing markers: {by})."
+                )
+                mc_complete = _complete_isolates_removed(
+                    qc_report, cfg, "completeness_complete_isolates",
+                    n_mc, "completeness_isolates_pre_assembly",
+                )
+                if mc_complete:
+                    sentence += " " + mc_complete
+                if also:
+                    sentence += (
+                        f" A further **{_fmt_int(also)}** {unit} carried a "
+                        f"5'-partial marker but also fell outside a length "
+                        f"range, and are counted under the ranges above."
+                    )
+            elif also:
+                # Length takes precedence in the counters, so a run whose
+                # truncated records all break a range too would otherwise
+                # read as "this check removed nothing".
+                sentence += (
+                    f"; no {unit} were removed by this check alone — the "
+                    f"**{_fmt_int(also)}** that carried a 5'-partial marker "
+                    f"also fell outside a length range and are counted under "
+                    f"the ranges above."
+                )
+            else:
+                sentence += f"; no {unit} were removed this way."
+            sentence += (
+                " The same requirement decided which coding sequence "
+                "represented each marker in clustering, in the per-protein "
+                "FASTA files and in the trees."
+            )
+            extra_lines.append(sentence)
+
     if qc_report.protected:
         n_ids = len({p["id"] for p in qc_report.protected})
         stages = sorted({p["stage"] for p in qc_report.protected})
@@ -768,6 +839,8 @@ def _complete_isolates_removed(
         f"carried {seg_txt}; the others were already missing a segment and "
         f"would have been removed at isolate assembly regardless."
     )
+
+
 
 
 def _marker_length_bound_bits(cfg: dict) -> list[str]:

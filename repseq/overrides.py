@@ -63,10 +63,13 @@ QC_PROTECT_STAGES: tuple[str, ...] = (
     "taxonomy_consistency",
     "protein_quality",
     "hmm",
-    # v0.76.0: a protected isolate keeps its marker even when that protein
-    # falls outside the spec's length_aa range, and every picker (clustering,
-    # FASTA, trees, supermatrix) then uses that real protein for it.
-    "marker_length",
+    # Both marker-pick checks: the length_aa ranges (v0.76.0) and the
+    # 5'-completeness requirement (qc.marker_completeness, v0.77.0). One
+    # token by the designer's call (2026-10-29) — a protected isolate keeps
+    # its marker whichever of the two it fails, and every picker
+    # (clustering, FASTA, trees, supermatrix) then uses that real protein.
+    # Was "marker_length" in v0.76.0; the old token is a hard config error.
+    "marker_quality",
 )
 
 _WS = re.compile(r"\s+")

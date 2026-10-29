@@ -17,7 +17,7 @@ Design points pinned here (agreed with the designer 2026-10-28):
 * ``removed_marker_length`` counts each isolate once, while the per-marker
   breakdown counts EVERY failing marker (shows which bound bites);
 * a bounded alias-only marker never falls back to "the longest CDS";
-* ``overrides.protect_qc`` (stage ``marker_length``) keeps the isolate and
+* ``overrides.protect_qc`` (stage ``marker_quality``) keeps the isolate and
   every picker then uses its real, out-of-range protein.
 
 Protein dicts mirror the production schema (``protein_id``, ``product``,
@@ -32,7 +32,7 @@ from unittest.mock import patch
 
 import pytest
 
-from repseq.cli import _run_marker_length_qc
+from repseq.cli import _run_marker_quality_qc
 from repseq.clustering.marker import (
     _format_failure_reason,
     describe_length_miss,
@@ -144,7 +144,7 @@ def _seg_cfg(*, protect=None, hmm_active=True):
     if protect:
         cfg["overrides"] = {
             "ids": list(protect), "protect_qc": True,
-            "protect_stages": ["marker_length"],
+            "protect_stages": ["marker_quality"],
         }
     return cfg
 
@@ -178,9 +178,9 @@ def test_no_hmm_hit_is_still_an_hmm_failure():
     assert failure.reason == "hmm_failed"
 
 
-def test_ignore_bounds_picks_the_out_of_range_protein():
+def test_ignore_restrictions_picks_the_out_of_range_protein():
     marker, failure = select_marker_protein(
-        [_np("x", 481)], [NP_SPEC], hmm_active=True, ignore_bounds=True,
+        [_np("x", 481)], [NP_SPEC], hmm_active=True, ignore_restrictions=True,
     )
     assert failure is None and len(marker["sequence"]) == 481
 
@@ -214,7 +214,7 @@ def test_unmatched_bounded_alias_is_not_counted_by_the_length_stage():
         accession="x", proteins=[_prot("x_NP", "nucleocapsid protein", 498)],
     )
     qc = QCReport()
-    assert _run_marker_length_qc([seq], cfg, qc, None) == [seq]
+    assert _run_marker_quality_qc([seq], cfg, qc, None) == [seq]
     assert qc.removed_marker_length == 0
 
 
@@ -281,7 +281,7 @@ def test_clustering_and_output_pickers_pick_the_same_cds(lengths, kind):
 def test_exempt_output_pick_matches_the_protected_clustering_pick():
     proteins = [_np("x", 481)]
     clustered, _ = select_marker_protein(
-        proteins, [NP_SPEC], hmm_active=True, ignore_bounds=True,
+        proteins, [NP_SPEC], hmm_active=True, ignore_restrictions=True,
     )
     shown = pick_marker_cds(
         proteins, ["Flu_NP"], [], True, bounds=tuple(NP_BOUNDS), exempt=True,
@@ -301,7 +301,7 @@ def _details(qc):
 def test_partial_pa_and_np_drop_the_isolate_once_and_both_markers_count():
     seqs = _isolate("good") + _isolate("h5n8", pa=702, np=481)
     qc = QCReport()
-    kept = _run_marker_length_qc(seqs, _seg_cfg(), qc, None)
+    kept = _run_marker_quality_qc(seqs, _seg_cfg(), qc, None)
     assert {s.isolate_id for s in kept} == {"good"}
     assert qc.removed_marker_length == 1                     # isolates, once
     assert qc.removed_marker_length_by_marker == {"3": 1, "5": 1}  # every marker
@@ -316,7 +316,7 @@ def test_partial_pa_and_np_drop_the_isolate_once_and_both_markers_count():
 def test_unbounded_segment_is_not_judged():
     seqs = _isolate("short_ha", ha=467)  # HA has no length_aa
     qc = QCReport()
-    assert _run_marker_length_qc(seqs, _seg_cfg(), qc, None) == seqs
+    assert _run_marker_quality_qc(seqs, _seg_cfg(), qc, None) == seqs
     assert qc.removed_marker_length == 0
 
 
@@ -324,7 +324,7 @@ def test_missing_marker_is_left_to_the_hmm_gate():
     seqs = _isolate("no_np")
     seqs[2].proteins = [_prot("no_np_X", "hypothetical protein", 120)]
     qc = QCReport()
-    assert len(_run_marker_length_qc(seqs, _seg_cfg(), qc, None)) == 3
+    assert len(_run_marker_quality_qc(seqs, _seg_cfg(), qc, None)) == 3
     assert qc.removed_marker_length == 0
 
 
@@ -337,7 +337,7 @@ def test_records_without_isolate_id_are_grouped_by_the_regex_like_assembly():
     cfg = _seg_cfg()
     cfg["segmented"]["viruses"]["FluA"]["isolate_regex"] = r"^(?P<isolate>[^_]+)_"
     qc = QCReport()
-    assert _run_marker_length_qc(seqs, cfg, qc, None) == []
+    assert _run_marker_quality_qc(seqs, cfg, qc, None) == []
     assert qc.removed_marker_length == 1
     assert _details(qc)["floater_5"] == "marker_length:5:481aa_below_485"
 
@@ -348,7 +348,7 @@ def test_records_whose_isolate_cannot_be_resolved_are_left_alone():
         s.isolate_id = None
     cfg = _seg_cfg()
     cfg["segmented"]["viruses"]["FluA"]["isolate_regex"] = r"(?P<isolate>NOMATCH)"
-    assert len(_run_marker_length_qc(seqs, cfg, QCReport(), None)) == 3
+    assert len(_run_marker_quality_qc(seqs, cfg, QCReport(), None)) == 3
 
 
 def test_no_bounds_configured_is_a_no_op():
@@ -356,24 +356,24 @@ def test_no_bounds_configured_is_a_no_op():
     for spec in cfg["segmented"]["viruses"]["FluA"]["segment_markers"].values():
         spec.pop("length_aa", None)
     seqs = _isolate("h5n8", pa=702, np=481)
-    assert _run_marker_length_qc(seqs, cfg, QCReport(), None) is seqs
+    assert _run_marker_quality_qc(seqs, cfg, QCReport(), None) is seqs
 
 
 def test_protected_isolate_is_kept_and_recorded():
     seqs = _isolate("ref", np=481)
     qc = QCReport()
-    kept = _run_marker_length_qc(seqs, _seg_cfg(protect=["ref"]), qc, None)
+    kept = _run_marker_quality_qc(seqs, _seg_cfg(protect=["ref"]), qc, None)
     assert len(kept) == 3
     assert qc.removed_marker_length == 0
     stages = {(p["id"], p["stage"], p["reason"]) for p in qc.protected}
-    assert ("ref_5", "marker_length", "marker_length:5:481aa_below_485") in stages
-    assert ("ref_3", "marker_length", "marker_length_sibling:5:481aa_below_485") in stages
+    assert ("ref_5", "marker_quality", "marker_length:5:481aa_below_485") in stages
+    assert ("ref_3", "marker_quality", "marker_length_sibling:5:481aa_below_485") in stages
 
 
 def test_skipped_with_a_warning_under_no_resolve(capsys):
     seqs = _isolate("h5n8", np=481)
     seqs[0].proteins = None
-    assert _run_marker_length_qc(seqs, _seg_cfg(), QCReport(), None) is seqs
+    assert _run_marker_quality_qc(seqs, _seg_cfg(), QCReport(), None) is seqs
     assert "--no-resolve was set" in capsys.readouterr().err
 
 
@@ -406,7 +406,7 @@ def _cov(sid, s_len, n_len):
 def test_non_segmented_requires_every_bounded_marker():
     seqs = [_cov("ok", 1273, 419), _cov("short_n", 1273, 300), _cov("both", 900, 300)]
     qc = QCReport()
-    kept = _run_marker_length_qc(seqs, _nonseg_cfg(), qc, None)
+    kept = _run_marker_quality_qc(seqs, _nonseg_cfg(), qc, None)
     assert [s.id for s in kept] == ["ok"]
     assert qc.removed_marker_length == 2                      # sequences
     assert qc.removed_marker_length_by_marker == {"S": 1, "N": 2}
@@ -420,9 +420,9 @@ def test_non_segmented_protection():
     cfg = _nonseg_cfg()
     cfg["overrides"] = {"ids": ["short_n"], "protect_qc": True, "protect_stages": "all"}
     qc = QCReport()
-    kept = _run_marker_length_qc([_cov("short_n", 1273, 300)], cfg, qc, None)
+    kept = _run_marker_quality_qc([_cov("short_n", 1273, 300)], cfg, qc, None)
     assert len(kept) == 1 and qc.removed_marker_length == 0
-    assert qc.protected[0]["stage"] == "marker_length"
+    assert qc.protected[0]["stage"] == "marker_quality"
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +481,7 @@ def test_assembly_backstop_uses_the_real_protein_for_a_protected_isolate():
     )
     assert len(out) == 1
     assert len(out[0].protein_sequence) == 716 + 566 + 481
-    assert any(p["stage"] == "marker_length" for p in qc.protected)
+    assert any(p["stage"] == "marker_quality" for p in qc.protected)
 
 
 def test_assembly_takes_the_in_range_cds_when_a_longer_one_exists():
@@ -651,9 +651,9 @@ def test_validate_rejects_malformed_marker_length_aa():
     assert any("two-item list" in e for e in validate_config(cfg))
 
 
-def test_validate_accepts_the_marker_length_protect_stage():
+def test_validate_accepts_the_marker_quality_protect_stage():
     cfg = load_config(None)
-    cfg["overrides"]["protect_stages"] = ["hmm", "marker_length"]
+    cfg["overrides"]["protect_stages"] = ["hmm", "marker_quality"]
     assert validate_config(cfg) == []
 
 
@@ -698,7 +698,7 @@ def test_complete_count_uses_canonical_segments_and_normalised_ids():
 def test_length_gate_reports_how_many_removed_isolates_were_complete(capsys):
     seqs = _isolate("full", np=481) + _incomplete("part", np=481) + _isolate("ok")
     qc = QCReport()
-    _run_marker_length_qc(seqs, _seg_cfg(), qc, None)
+    _run_marker_quality_qc(seqs, _seg_cfg(), qc, None)
     assert qc.removed_marker_length == 2
     assert qc.display["length_complete_isolates"] == 1
     assert "1 with all 3 segments" in capsys.readouterr().out
@@ -779,14 +779,14 @@ def test_partial_duplicate_does_not_remove_an_isolate_with_a_complete_record():
     # Complete NP record (1,500 nt) plus an older, shorter partial one.
     seqs = _with_np_records("dup", _dup_np("dup", 498, 1500, "a"), _dup_np("dup", 481, 1445, "b"))
     qc = QCReport()
-    assert _run_marker_length_qc(seqs, _seg_cfg(), qc, None) == seqs
+    assert _run_marker_quality_qc(seqs, _seg_cfg(), qc, None) == seqs
     assert qc.removed_marker_length == 0
 
 
 def test_the_record_assembly_keeps_decides_when_it_is_the_partial_one():
     seqs = _with_np_records("dup", _dup_np("dup", 498, 1400, "a"), _dup_np("dup", 481, 1445, "b"))
     qc = QCReport()
-    assert _run_marker_length_qc(seqs, _seg_cfg(), qc, None) == []
+    assert _run_marker_quality_qc(seqs, _seg_cfg(), qc, None) == []
     assert qc.removed_marker_length == 1
     assert qc.removed_marker_length_by_marker == {"5": 1}
     d = _details(qc)
@@ -819,7 +819,7 @@ def test_gates_resolve_named_segments_like_assembly():
     vcfg["segment_markers"] = {"NP": {"hmms": ["Flu_NP"], "length_aa": NP_BOUNDS}}
     seqs = _isolate("h5n8", np=481)
     qc = QCReport()
-    assert _run_marker_length_qc(seqs, cfg, qc, None) == []
+    assert _run_marker_quality_qc(seqs, cfg, qc, None) == []
     assert _details(qc)["h5n8_5"] == "marker_length:NP:481aa_below_485"
 
 
@@ -849,7 +849,7 @@ def test_marker_length_stage_does_not_refetch_proteins_that_carry_hmm_hits():
     # the --no-resolve skip.
     orphan.accession = None
     qc = QCReport()
-    assert len(_run_marker_length_qc(seqs + [orphan], _seg_cfg(), qc, None)) == 4
+    assert len(_run_marker_quality_qc(seqs + [orphan], _seg_cfg(), qc, None)) == 4
     assert "marker_length_skipped" not in qc.display
 
 

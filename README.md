@@ -284,9 +284,11 @@ your FASTA file(s)
     fails the whole isolate)
         │
         ▼
-  marker-protein length check                               (when any marker has length_aa:)
+  marker-protein quality check        (when any marker has length_aa:, and/or
+                                       qc.marker_completeness.require_met_start)
     drop isolates/sequences whose marker protein is there but
-    shorter or longer than its allowed range (a partial record)
+    shorter or longer than its allowed range, or 5'-partial
+    (its translation does not start with methionine)
         │
         ▼
   (segmented mode only)
@@ -595,6 +597,12 @@ Every sequence dropped during cleaning, with the reason. Columns: `accession`,
 - `marker_length:<seg>:<n>aa_below_<min>` (or `_above_<max>`) — the marker
   protein is there but outside its `length_aa` range, usually a partial record;
   the isolate's other segments appear as `marker_length_sibling:...`
+- `marker_completeness:<seg>:no_met_start` — the marker protein is there, and of
+  an acceptable length, but its translation does not begin with methionine, so
+  the coding sequence is 5'-partial; siblings appear as
+  `marker_completeness_sibling:...`. An isolate failing BOTH checks keeps the
+  real reason on each failing segment, while its siblings name the length miss,
+  since that is the check the counters attribute it to.
 
 **Check this file first when more was dropped than expected.** Sort by `reason`
 to see which filter did the damage; the same info is summarised in `_run.log`.
@@ -1452,6 +1460,11 @@ qc:
     enabled: true
     keywords: ["MAG:", synthetic, partial, hypothetical, fragment, uncultured, ...]
     # any sequence whose description contains one of these words is dropped
+
+  marker_completeness:
+    require_met_start: false     # require every marker protein to start with Met
+                                 #   (a complete CDS does; see "Marker
+                                 #   5'-completeness" below)
 ```
 
 A few things worth knowing:
@@ -1526,12 +1539,15 @@ any `overrides.ids` / `overrides.ids_file`, and turns its flag on for that run.
   match on accession.
 - **`protect_stages`** is `all` or a list naming any of: `duplicates`, `length`,
   `ambiguous`, `annotation`, `protein_count`, `taxonomy_consistency`,
-  `protein_quality`, `hmm`, `marker_length`. Per-stage on purpose: you can keep a
+  `protein_quality`, `hmm`, `marker_quality`. Per-stage on purpose: you can keep a
   slightly noisy reference through the `hmm` identity gate while still dropping it
   if its translation is genuine garbage (`protein_quality`). `length` is the
-  nucleotide length filter; `marker_length` is the marker-protein
-  [length range](#marker-protein-length-ranges-length_aa). A record protected
-  from `marker_length` keeps its real protein everywhere: in clustering, in the
+  nucleotide length filter; `marker_quality` covers **both** marker-protein
+  checks — the [length range](#marker-protein-length-ranges-length_aa) and the
+  [5'-completeness requirement](#marker-5-completeness-require_met_start) — so a
+  protected record cannot end up half-exempt. (It was called `marker_length` in
+  v0.76.0; the old token is now a config error that names the new one.) A record
+  protected from `marker_quality` keeps its real protein everywhere: in clustering, in the
   per-protein FASTA and in the trees.
 - **Segmented completeness is deliberately *not* protectable.** Protection can't
   synthesize a missing segment, so a protected isolate missing a segment still
@@ -2123,7 +2139,7 @@ What happens:
   nothing at all, the marker counts as missing, not as partial: protein-alphabet
   clustering then drops the record for having no marker.
 - **To keep a reference strain anyway**, list it under `overrides` and include
-  `marker_length` in `protect_stages`.
+  `marker_quality` in `protect_stages`.
 
 **Choose ranges from your own data, not from a rule of thumb.** Look at the
 `length_aa` column of `{prefix}_isolate_proteins.tsv` (or
@@ -2137,6 +2153,72 @@ partial records tend to come in one batch of consecutive accessions.
 `length_aa` also exists on `extra_protein` entries, with a softer effect: an
 accessory protein outside its range is simply absent for that record, and nothing
 is dropped. See [Accessory proteins](#accessory-proteins-extra_protein).
+
+### Marker 5'-completeness (`require_met_start`)
+
+A length range cannot see a truncation at the **start** of a coding sequence: lose
+twenty residues off the front of a 517-residue HA and you still have a 497-residue
+protein, comfortably inside any sensible range. The tell is the translation
+itself. A complete viral coding sequence begins at its start codon, so its
+translation begins with methionine; one that begins anywhere else comes from a
+record whose coding sequence was cut off at the 5' end.
+
+```yaml
+qc:
+  marker_completeness:
+    require_met_start: true        # default false
+```
+
+One switch, and it applies to every declared marker and `extra_protein` spec —
+there is deliberately no per-spec version, because the requirement is identical on
+every marker and a per-spec flag would let a config check all but one marker and
+still look perfectly normal.
+
+In a **segmented** run that means every segment's marker, since assembly needs all
+of them. In a **non-segmented** run only the markers the run already requires are
+judged: any `clustering.cluster_protein` spec declaring `hmms:` (the HMM gate
+already demands every one of those) or `length_aa:` (an explicit opt-in). An
+unbounded alias-only spec is advisory, and turning this switch on does not promote
+it into something that can drop a record.
+
+What happens:
+
+- **A record whose marker translation does not start with Met is dropped**, by the
+  same check that applies the length ranges and in the same place (right after the
+  HMM gate). The reason is `marker_completeness:<seg>:no_met_start`.
+- **Length is reported first.** A marker that is both out of range *and* 5'-partial
+  is counted and reported as a length miss, so the two counters add up to exactly
+  the records the check removed. Those records are not lost from view: the console
+  tally annotates the length row with how many were *also* 5'-partial, and
+  `{prefix}_summary.md` says so in words, so a run whose truncated records all
+  break a range too never reads as "this check removed nothing".
+- **The same requirement decides which protein is used everywhere** — clustering,
+  the per-protein FASTAs, the trees, the supermatrix and the coverage report — so
+  a tree never shows a truncated protein that clustering did not use.
+- **Accessory proteins follow the same rule with a softer effect**: a 5'-partial
+  `extra_protein` CDS is simply absent for that record, and the writer's stderr
+  block says why it was set aside. Nothing is dropped for an accessory protein.
+- **Polyprotein peptides are exempt.** An internal cleavage product never starts
+  with methionine, so the requirement is not applied to sliced peptides.
+- **It needs the GenBank translations**, so under `--no-resolve` it is skipped and
+  `{prefix}_summary.md` says the requirement was *not* applied, rather than
+  claiming a cleanliness the run never checked.
+- **To keep a reference strain anyway**, include `marker_quality` in
+  `protect_stages`.
+
+**Default off, and worth measuring before you turn it on.** It removes records,
+and a small number of real coding sequences begin at a non-AUG codon. Measured
+across nine repseq runs, the proportion of representative marker proteins lacking
+a Met start was 0 % for Coronaviridae, Betacoronaviridae, Filoviridae and
+Betainfluenzavirus (over 4,127 proteins), 1.7-4.1 % for Picornaviridae,
+Peribunyaviridae and Elliovirales, 8.1 % for influenza A and 11.5 % for
+Amarillovirales. Those are truncations rather than biology: pooling the 609
+affected proteins, the first residue spans all 20 amino acids with a maximum share
+of 13.3 %, which is what a random truncation point looks like — a non-AUG start
+codon would concentrate on the one residue it encodes. On a global influenza A run
+the requirement costs about 2.7 % of isolates — 2.3 times less than the 6.1 %
+you would expect if the eight segments failed independently, because a truncated
+submission is usually truncated on several segments at once.
 
 ### HMM-related config keys
 
@@ -2581,7 +2663,7 @@ that license; it comes with **no warranty**. The full license text is in the
 
 ## Status
 
-Current: **`v0.76.0`**.
+Current: **`v0.77.0`**.
 
 **Selection.** All 8 selection modes, including grouping by a column of your own
 metadata table (`--metadata-table`), so representatives can be chosen per
@@ -2595,8 +2677,9 @@ taxonomy-consistency QC and strain-as-isolate provenance + collision detection
 for segmented viruses; **HMM-based identity QC** with multidomain-architecture
 token notation (HMMER hmmscan against the bundled viral Pfam-A core set, eight
 clade-specific bundled sets, or your own database), plus optional marker-protein
-**length ranges** (`length_aa`) that drop partial records and decide which protein
-clustering, the FASTAs and the trees all use.
+**length ranges** (`length_aa`) and a **5'-completeness requirement**
+(`qc.marker_completeness.require_met_start`) that drop partial records and decide
+which protein clustering, the FASTAs and the trees all use.
 
 **Phylogeny.** Rich phyloXML with taxonomy-driven leaf colouring shared across
 every tree of a run; partitioned-supermatrix trees for protein + IQ-TREE
@@ -2621,7 +2704,7 @@ into plain-English flags and a single-file HTML report; an auto-generated
 Methods-section starter (`_summary.md`), a reproducibility lockfile
 (`repseq replay`), and a sanitized config snapshot on every run.
 
-**1,633 offline regression tests pass.** The NCBI-backed paths have been
+**1,677 offline regression tests pass.** The NCBI-backed paths have been
 validated end-to-end against live influenza A and B, peribunyaviridae,
 hantaviridae, coronaviridae, amarillovirales, elliovirales and hareavirales
 datasets. See `git log` for the full release history.

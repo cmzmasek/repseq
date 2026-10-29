@@ -55,6 +55,23 @@ DEFAULTS: dict[str, Any] = {
             "enabled": False,
             "max_bad_fraction": 0.05,
         },
+        "marker_completeness": {
+            # 5'-completeness of the CLUSTER MARKER protein (v0.77.0).
+            # A complete viral CDS translation always begins with
+            # methionine, so one that does not is a 5'-partial record —
+            # something no length_aa range can detect, because a short
+            # N-terminal truncation stays inside the range. When on, only a
+            # CDS whose translation starts with Met can be picked for any
+            # marker / extra_protein spec; a marker left with no such CDS
+            # drops its record (reason marker_completeness:<seg>:no_met_start),
+            # an extra protein is simply absent. ONE global switch, not a
+            # per-spec flag: the requirement is identical on every marker,
+            # and a per-spec boolean would let a config gate seven of eight
+            # segments and look normal. Default off because it drops
+            # records and genuine non-AUG initiation exists outside the
+            # clades it was measured on. Skipped under --no-resolve.
+            "require_met_start": False,
+        },
         "annotation_filter": {
             "enabled": True,
             "keywords": [
@@ -713,7 +730,7 @@ DEFAULTS: dict[str, Any] = {
     # case- and version-insensitive. `protect_stages` is "all" or a subset
     # of the QC stage tokens (duplicates, length, ambiguous, annotation,
     # protein_count, taxonomy_consistency, protein_quality, hmm,
-    # marker_length). Kept
+    # marker_quality). Kept
     # sequences are recorded in {prefix}_overrides.tsv and the run summary —
     # protection is never silent. Default off (empty id list = no-op).
     "overrides": {
@@ -1482,6 +1499,15 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             errors.append(
                 "qc.protein_quality.max_bad_fraction must be a number between 0 and 1"
             )
+
+    # Marker 5'-completeness QC
+    mc = cfg.get("qc", {}).get("marker_completeness", {}) or {}
+    if "require_met_start" in mc and not isinstance(
+        mc["require_met_start"], bool
+    ):
+        errors.append(
+            "qc.marker_completeness.require_met_start must be a boolean"
+        )
 
     # Segmented virus
     seg = cfg.get("segmented", {})
@@ -2265,7 +2291,21 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                 "overrides.protect_stages must be \"all\" or a list of stage tokens"
             )
         if stages_list is not None:
-            bad = [s for s in stages_list if s not in QC_PROTECT_STAGES]
+            if "marker_length" in stages_list:
+                # Renamed in v0.77.0 when the stage grew a second check.
+                # Hard error rather than a silent alias: a stale token must
+                # not look like it is protecting something it no longer names.
+                errors.append(
+                    "overrides.protect_stages token \"marker_length\" was "
+                    "renamed to \"marker_quality\" in repseq 0.77.0 — it now "
+                    "covers both marker checks (length_aa ranges and "
+                    "qc.marker_completeness). Replace it with "
+                    "\"marker_quality\"."
+                )
+            bad = [
+                s for s in stages_list
+                if s not in QC_PROTECT_STAGES and s != "marker_length"
+            ]
             if bad:
                 errors.append(
                     f"overrides.protect_stages has unknown stage(s): "

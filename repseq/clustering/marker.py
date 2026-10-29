@@ -53,6 +53,16 @@ protein is present but outside the range the result is a
 no product at all it is a ``no_alias_match`` failure (missing, not partial) —
 never a silent fall-through to the longest CDS.
 
+Marker completeness (``qc.marker_completeness.require_met_start``,
+v0.77.0): a global switch, not a per-spec one. When on, only a CDS whose
+translation begins with methionine can be picked for ANY spec — a complete
+viral CDS always starts with Met, so a translation that does not is a
+5'-partial record, which no length range can detect (a short N-terminal
+truncation stays inside the range). Composed with ``length_aa`` as a second
+candidate filter in every picker, with length taking precedence in the
+reported failure: a candidate outside the range is ``length_out_of_bounds``,
+one inside the range but lacking the Met start is ``no_met_start``.
+
 When no specs are configured at all, the longest CDS with a translation
 is returned (legacy fallback). When specs ARE configured but none
 yield a satisfying CDS, the function returns ``(None, MarkerFailure)``
@@ -115,6 +125,72 @@ def within_length_bounds(prot: dict, bounds: Optional[LengthBounds]) -> bool:
     return (lo is None or n >= lo) and (hi is None or n <= hi)
 
 
+def starts_with_met(prot: dict) -> bool:
+    """True when the CDS translation begins with methionine.
+
+    The decisive 5'-completeness test: a complete viral CDS translation
+    always starts with Met, so one that does not is a 5'-partial record.
+    A CDS with no translation is not judged here (callers filter those out
+    first) and counts as passing, so this never becomes a second
+    "no translation" drop.
+    """
+    seq = prot.get("sequence") or ""
+    return not seq or seq[0].upper() == "M"
+
+
+def marker_candidate_ok(
+    prot: dict,
+    bounds: Optional[LengthBounds],
+    *,
+    require_met_start: bool = False,
+) -> bool:
+    """Whether ``prot`` may be picked for a spec with these restrictions.
+
+    Composes the two candidate filters for pickers that only need a
+    yes/no — ``phylo.per_protein.pick_marker_cds`` and everything routed
+    through it (per-protein FASTAs, 2F/2K trees, the supermatrix, the
+    coverage report). ``select_marker_protein`` and ``pick_extra_cds``
+    deliberately apply the filters in SEQUENCE instead, because they must
+    report WHICH restriction withheld a CDS and length takes precedence
+    over completeness; a single boolean cannot carry that.
+    """
+    if not within_length_bounds(prot, bounds):
+        return False
+    return not require_met_start or starts_with_met(prot)
+
+
+def require_met_start_from_cfg(cfg: Any) -> bool:
+    """``qc.marker_completeness.require_met_start`` (default False).
+
+    One global switch rather than a per-spec flag (designer's call,
+    2026-10-29): the requirement is identical on every marker, and a
+    per-spec boolean would let a config gate seven of eight segments and
+    look entirely normal.
+    """
+    qc = (cfg or {}).get("qc", {}) or {}
+    block = qc.get("marker_completeness", {}) or {}
+    return bool(block.get("require_met_start", False))
+
+
+MARKER_QUALITY_RUNTIME = "_marker_quality_runtime"
+
+
+def require_met_start_active(cfg: Any) -> bool:
+    """``require_met_start``, but False once the QC stage has skipped it.
+
+    The stage skips under ``--no-resolve`` (no GenBank translations to
+    judge) and records that on ``cfg[MARKER_QUALITY_RUNTIME]``. Every
+    PICKER asks this, so the FASTAs, trees, supermatrix and coverage
+    tables cannot enforce a requirement the Methods summary reports as
+    not applied. ``require_met_start_from_cfg`` stays the CONFIGURED
+    value, which is what that summary prose needs.
+    """
+    if not require_met_start_from_cfg(cfg):
+        return False
+    rt = (cfg or {}).get(MARKER_QUALITY_RUNTIME) or {}
+    return not rt.get("require_met_start_skipped", False)
+
+
 def describe_length_miss(
     length: Optional[int], bounds: Optional[LengthBounds],
 ) -> str:
@@ -156,6 +232,16 @@ class MarkerFailure:
                                 is the length of the CDS that would have been
                                 picked without the bound; ``bounds`` is the
                                 spec's range.
+        - ``no_met_start``    — the spec's protein was found INSIDE any
+                                ``length_aa`` range but its translation does
+                                not begin with Met, i.e. the CDS is
+                                5'-partial (only when
+                                ``qc.marker_completeness.require_met_start``
+                                is on). ``length_aa`` carries the length of
+                                the CDS that would have been picked without
+                                the requirement. Reported only when the
+                                length bound itself is satisfied, so length
+                                failures never read as truncations.
     """
 
     reason: str
@@ -231,7 +317,8 @@ def select_marker_protein(
     hmm_active: bool = False,
     ga_cutoffs: Optional[dict[str, Optional[float]]] = None,
     hmm_cfg: Optional[dict[str, Any]] = None,
-    ignore_bounds: bool = False,
+    ignore_restrictions: bool = False,
+    require_met_start: bool = False,
 ) -> tuple[Optional[dict], Optional[MarkerFailure]]:
     """Pick the marker CDS for one sequence/segment.
 
@@ -244,10 +331,25 @@ def select_marker_protein(
     ``length_aa`` bounds on a spec restrict its candidates; a spec whose
     protein exists only outside the range yields a ``length_out_of_bounds``
     failure (HMM failures take precedence, since the marker-length QC stage
-    runs after the HMM gate). ``ignore_bounds=True`` picks as if no spec had
-    a bound — used only for isolates protected against the ``marker_length``
-    QC stage (``overrides.protect_qc``), so clustering uses their real
-    protein exactly as the FASTA / tree pickers do.
+    runs after the HMM gate). ``require_met_start`` adds the second
+    candidate filter: a CDS inside the range whose translation does not
+    begin with Met is 5'-partial, and a spec left with only such candidates
+    yields a ``no_met_start`` failure.
+
+    When several specs fail, the failure KIND decides what is returned
+    (hmm → length → met → missing, the order the QC stages attribute in),
+    and within one kind the FIRST declared spec that failed that way names
+    the marker. One rule for every branch: the reported ``marker_name``
+    reaches ``_qc_removed.tsv`` and the per-marker breakdown, so it must not
+    depend on which code path produced the failure.
+
+    ``ignore_restrictions=True`` waives BOTH restrictions — the length
+    bound and the Met requirement — which is exactly what the
+    ``marker_quality`` protect stage buys (``overrides.protect_qc``), so
+    clustering uses a protected isolate's real protein exactly as the FASTA
+    / tree pickers do. (Named for what it does rather than for the length
+    half alone: a caller that waived one and kept the other would silently
+    half-protect a reference strain.)
 
     Note: the HMM hits have already been scanned and annotated with
     ``passing`` flags by ``cli._run_hmm_qc`` (v0.14.0+). The
@@ -262,6 +364,11 @@ def select_marker_protein(
     if not with_seq:
         return None, MarkerFailure("no_translated")
 
+    # ONE place decides what protection waives: the `marker_quality` protect
+    # stage covers both restrictions, so a caller passes a single flag and
+    # cannot accidentally waive one and keep the other.
+    met_required = require_met_start and not ignore_restrictions
+
     # Test back-compat: if hits lack the pre-computed `passing` flag,
     # recompute it on the fly from the supplied cutoffs.
     if hmm_active and hmm_cfg is not None:
@@ -270,16 +377,24 @@ def select_marker_protein(
     specs = _normalize_marker_specs(marker_specs)
 
     if not specs:
-        # No markers configured → legacy longest-CDS fallback.
-        return max(with_seq, key=lambda p: len(p["sequence"])), None
+        # No markers configured → legacy longest-CDS fallback, still
+        # restricted to a complete CDS when the run asks for one (the
+        # picked protein is what clustering sees either way).
+        pool = [p for p in with_seq if starts_with_met(p)] if met_required else with_seq
+        if not pool:
+            return None, MarkerFailure(
+                reason="no_met_start",
+                length_aa=len(max(with_seq, key=lambda p: len(p["sequence"]))["sequence"]),
+            )
+        return max(pool, key=lambda p: len(p["sequence"])), None
 
     def _longest(cands: list[dict]) -> dict:
         return max(cands, key=lambda p: len(p["sequence"]))
 
     last_hmm_failure: Optional[MarkerFailure] = None
     last_length_failure: Optional[MarkerFailure] = None
+    last_met_failure: Optional[MarkerFailure] = None
     last_missing_failure: Optional[MarkerFailure] = None
-    any_alias_only_attempted = False
     # Bounds of the first spec that cannot identify its protein here (no
     # aliases, and its hmms unusable because the HMM tier is off). The legacy
     # longest-CDS fallback below must still respect that bound.
@@ -287,8 +402,11 @@ def select_marker_protein(
     fallback_name: Optional[str] = None
     overlap_tol = int((hmm_cfg or {}).get("multidomain_overlap_tolerance", 30))
 
+    def _met_ok(p: dict) -> bool:
+        return not met_required or starts_with_met(p)
+
     for spec in specs:
-        bounds = None if ignore_bounds else spec.get("bounds")
+        bounds = None if ignore_restrictions else spec.get("bounds")
         hmms = spec["hmms"]
         if hmms and hmm_active:
             # HMM tier is authoritative for this spec.
@@ -299,24 +417,38 @@ def select_marker_protein(
                 ) is not None:
                     satisfying.append(p)
             in_range = [p for p in satisfying if within_length_bounds(p, bounds)]
+            pickable = [p for p in in_range if _met_ok(p)]
+            if pickable:
+                return _longest(pickable), None
             if in_range:
-                return _longest(in_range), None
+                # Length is fine; every candidate is 5'-partial. Reported
+                # separately so a truncation never reads as a length miss.
+                if last_met_failure is None:
+                    last_met_failure = MarkerFailure(
+                        reason="no_met_start",
+                        marker_name=spec["name"] or ",".join(hmms),
+                        length_aa=len(_longest(in_range)["sequence"]),
+                        bounds=bounds,
+                    )
+                continue
             if satisfying:
                 # HMM-verified protein present, but only outside length_aa.
-                last_length_failure = MarkerFailure(
-                    reason="length_out_of_bounds",
-                    marker_name=spec["name"] or ",".join(hmms),
-                    length_aa=len(_longest(satisfying)["sequence"]),
-                    bounds=bounds,
-                )
+                if last_length_failure is None:
+                    last_length_failure = MarkerFailure(
+                        reason="length_out_of_bounds",
+                        marker_name=spec["name"] or ",".join(hmms),
+                        length_aa=len(_longest(satisfying)["sequence"]),
+                        bounds=bounds,
+                    )
                 continue
             # Record the failure and move on — do NOT consult aliases.
-            last_hmm_failure = MarkerFailure(
-                reason="hmm_failed",
-                marker_name=spec["name"] or ",".join(hmms),
-                failed_tokens=list(hmms),
-                best_evalue=_best_evalue_across_token_hmms(with_seq, hmms),
-            )
+            if last_hmm_failure is None:
+                last_hmm_failure = MarkerFailure(
+                    reason="hmm_failed",
+                    marker_name=spec["name"] or ",".join(hmms),
+                    failed_tokens=list(hmms),
+                    best_evalue=_best_evalue_across_token_hmms(with_seq, hmms),
+                )
             continue
 
         # Alias-only spec (or HMM tier inactive). Try the aliases.
@@ -327,9 +459,8 @@ def select_marker_protein(
                 fallback_bounds = bounds
                 fallback_name = spec["name"] or ",".join(hmms)
             continue
-        if not bounds:
-            any_alias_only_attempted = True
         matched: list[dict] = []
+        matched_in_range: list[dict] = []
         for alias in spec["aliases"]:
             needle = alias.lower().strip()
             if not needle:
@@ -341,9 +472,23 @@ def select_marker_protein(
             if not matches:
                 continue
             in_range = [p for p in matches if within_length_bounds(p, bounds)]
-            if in_range:
-                return _longest(in_range), None
+            pickable = [p for p in in_range if _met_ok(p)]
+            if pickable:
+                return _longest(pickable), None
             matched.extend(matches)
+            matched_in_range.extend(in_range)
+        if met_required and matched_in_range and last_met_failure is None:
+            # An alias matched an in-range CDS, but every match is
+            # 5'-partial. Strict for the same reason a bounded alias spec
+            # is: falling through to "the longest CDS" could substitute an
+            # unrelated protein that happens to be complete.
+            last_met_failure = MarkerFailure(
+                reason="no_met_start",
+                marker_name=spec["name"] or ",".join(spec["aliases"]),
+                length_aa=len(_longest(matched_in_range)["sequence"]),
+                bounds=bounds,
+            )
+            continue
         if bounds:
             # A bounded alias-only spec is strict: with no in-range alias
             # match it never falls back to "the longest CDS", which could be
@@ -353,12 +498,13 @@ def select_marker_protein(
             # which is a missing marker, not a partial one.
             name = spec["name"] or ",".join(spec["aliases"])
             if matched:
-                last_length_failure = MarkerFailure(
-                    reason="length_out_of_bounds",
-                    marker_name=name,
-                    length_aa=len(_longest(matched)["sequence"]),
-                    bounds=bounds,
-                )
+                if last_length_failure is None:
+                    last_length_failure = MarkerFailure(
+                        reason="length_out_of_bounds",
+                        marker_name=name,
+                        length_aa=len(_longest(matched)["sequence"]),
+                        bounds=bounds,
+                    )
             elif last_missing_failure is None:
                 last_missing_failure = MarkerFailure(
                     reason="no_alias_match", marker_name=name,
@@ -370,29 +516,50 @@ def select_marker_protein(
         # for that marker.
         return None, last_hmm_failure
     if last_length_failure is not None:
-        # A bound is a hard requirement too: no fall-through.
+        # A bound is a hard requirement too: no fall-through. Length is
+        # reported ahead of a completeness miss so the two stages' counters
+        # agree with the reason written to _qc_removed.tsv.
         return None, last_length_failure
+    if last_met_failure is not None:
+        # The marker was found at an acceptable length but is 5'-partial.
+        return None, last_met_failure
     if last_missing_failure is not None:
         # A bounded alias-only spec found no protein: strict, no fall-through.
         return None, last_missing_failure
     if fallback_bounds is not None:
         # Identity-less spec with a bound (e.g. HMM tier soft-failed):
-        # longest CDS, but only inside the range.
+        # longest CDS, but only inside the range and complete.
         in_range = [p for p in with_seq if within_length_bounds(p, fallback_bounds)]
+        pickable = [p for p in in_range if _met_ok(p)]
+        if pickable:
+            return _longest(pickable), None
         if in_range:
-            return _longest(in_range), None
+            return None, MarkerFailure(
+                reason="no_met_start",
+                marker_name=fallback_name,
+                length_aa=len(_longest(in_range)["sequence"]),
+                bounds=fallback_bounds,
+            )
         return None, MarkerFailure(
             reason="length_out_of_bounds",
             marker_name=fallback_name,
             length_aa=len(_longest(with_seq)["sequence"]),
             bounds=fallback_bounds,
         )
-    if any_alias_only_attempted:
-        # Legacy behaviour: alias-only specs are advisory; if none matched,
-        # fall through to longest CDS rather than dropping.
-        return _longest(with_seq), None
-    # All specs were empty (no aliases AND no hmms). Treat as no specs.
-    return _longest(with_seq), None
+    # Legacy behaviour: an unbounded alias-only spec that matched no product
+    # is advisory — fall through to the longest CDS rather than dropping.
+    # Same for a run with only empty specs (no aliases AND no hmms). Both
+    # still honour require_met_start, so clustering never takes a 5'-partial
+    # CDS once the run asks for complete markers. A spec whose alias DID
+    # match, but only truncated CDSes, is strict: it set last_met_failure
+    # above, which is returned before this point.
+    pool = [p for p in with_seq if _met_ok(p)]
+    if not pool:
+        return None, MarkerFailure(
+            reason="no_met_start",
+            length_aa=len(_longest(with_seq)["sequence"]),
+        )
+    return _longest(pool), None
 
 def _ensure_passing_annotation(
     proteins: list[dict],
@@ -458,7 +625,8 @@ def select_concatenated_markers(
     hmm_active: bool = False,
     ga_cutoffs: Optional[dict[str, Optional[float]]] = None,
     hmm_cfg: Optional[dict[str, Any]] = None,
-    ignore_bounds: bool = False,
+    ignore_restrictions: bool = False,
+    require_met_start: bool = False,
 ) -> tuple[Optional[list[dict]], Optional[MarkerFailure]]:
     """Pick the marker CDS from EVERY spec, for non-segmented concat clustering.
 
@@ -481,7 +649,7 @@ def select_concatenated_markers(
         marker, failure = select_marker_protein(
             proteins, marker_specs,
             hmm_active=hmm_active, ga_cutoffs=ga_cutoffs, hmm_cfg=hmm_cfg,
-            ignore_bounds=ignore_bounds,
+            ignore_restrictions=ignore_restrictions, require_met_start=require_met_start,
         )
         return ([marker], None) if marker is not None else (None, failure)
 
@@ -490,7 +658,7 @@ def select_concatenated_markers(
         marker, failure = select_marker_protein(
             proteins, [spec],
             hmm_active=hmm_active, ga_cutoffs=ga_cutoffs, hmm_cfg=hmm_cfg,
-            ignore_bounds=ignore_bounds,
+            ignore_restrictions=ignore_restrictions, require_met_start=require_met_start,
         )
         if marker is None:
             return None, failure
@@ -508,6 +676,7 @@ def populate_protein_sequences(
     hmm_cfg: Optional[dict[str, Any]] = None,
     concatenate: bool = False,
     policy=None,
+    require_met_start: bool = False,
 ) -> list[Sequence]:
     """Set ``seq.protein_sequence`` on each sequence to its marker protein.
 
@@ -527,16 +696,21 @@ def populate_protein_sequences(
     ``removed_marker_length_by_marker``. All other failure modes are
     counted under ``report.removed_proteins``. Returns the surviving list.
 
+    ``require_met_start`` (``qc.marker_completeness``) additionally requires
+    the picked CDS to start with Met; such a failure is counted under
+    ``report.removed_marker_completeness`` / ``_by_marker``.
+
     ``policy`` (an ``overrides.ProtectionPolicy``): a sequence protected
-    against the ``marker_length`` stage is picked as if no bound existed,
-    matching what the output pickers show for it.
+    against the ``marker_quality`` stage is picked as if neither the length
+    bound nor the Met requirement existed, matching what the output pickers
+    show for it.
 
     Note: in v0.14.0+ this should rarely fire under HMM control, because
     ``cli._run_hmm_qc`` has already dropped sequences whose HMM gate
     failed. The HMM-failure branch here remains as a defence-in-depth /
     direct-test entry point.
     """
-    def _select(seq: Sequence, ignore_bounds: bool):
+    def _select(seq: Sequence, ignore_restrictions: bool):
         if concatenate:
             return select_concatenated_markers(
                 seq.proteins,
@@ -544,7 +718,8 @@ def populate_protein_sequences(
                 hmm_active=hmm_active,
                 ga_cutoffs=ga_cutoffs,
                 hmm_cfg=hmm_cfg,
-                ignore_bounds=ignore_bounds,
+                ignore_restrictions=ignore_restrictions,
+                require_met_start=require_met_start,
             )
         marker, failure = select_marker_protein(
             seq.proteins,
@@ -552,7 +727,8 @@ def populate_protein_sequences(
             hmm_active=hmm_active,
             ga_cutoffs=ga_cutoffs,
             hmm_cfg=hmm_cfg,
-            ignore_bounds=ignore_bounds,
+            ignore_restrictions=ignore_restrictions,
+            require_met_start=require_met_start,
         )
         return ([marker] if marker is not None else None), failure
 
@@ -562,9 +738,9 @@ def populate_protein_sequences(
         if (
             markers is None
             and failure is not None
-            and failure.reason == "length_out_of_bounds"
+            and failure.reason in ("length_out_of_bounds", "no_met_start")
             and policy is not None
-            and policy.protects(seq, "marker_length")
+            and policy.protects(seq, "marker_quality")
         ):
             markers, failure = _select(seq, True)
         if markers is None:
@@ -583,6 +759,12 @@ def populate_protein_sequences(
                     key = failure.marker_name or "?"
                     report.removed_marker_length_by_marker[key] = (
                         report.removed_marker_length_by_marker.get(key, 0) + 1
+                    )
+                elif failure is not None and failure.reason == "no_met_start":
+                    report.removed_marker_completeness += 1
+                    key = failure.marker_name or "?"
+                    report.removed_marker_completeness_by_marker[key] = (
+                        report.removed_marker_completeness_by_marker.get(key, 0) + 1
                     )
                 else:
                     report.removed_proteins += 1
@@ -603,8 +785,9 @@ def _format_failure_reason(failure: Optional[MarkerFailure]) -> str:
     string for back-compat with downstream parsers; HMM failures get the
     structured ``hmm_failed:<marker>:<tokens>(E=...)`` form and length
     failures ``marker_length:<marker>:<len>aa_below_<min>`` (or
-    ``_above_<max>`` / ``no_candidate``) so they're visually distinct in the
-    output and grep-able for triage.
+    ``_above_<max>`` / ``no_candidate``) and 5'-partial markers
+    ``marker_completeness:<marker>:no_met_start``, so they're visually
+    distinct in the output and grep-able for triage.
     """
     if failure is None:
         return "no_marker_protein_for_clustering"
@@ -613,6 +796,8 @@ def _format_failure_reason(failure: Optional[MarkerFailure]) -> str:
             f"marker_length:{failure.marker_name or '?'}:"
             f"{describe_length_miss(failure.length_aa, failure.bounds)}"
         )
+    if failure.reason == "no_met_start":
+        return f"marker_completeness:{failure.marker_name or '?'}:no_met_start"
     if failure.reason == "hmm_failed":
         parts = ["hmm_failed", failure.marker_name or "?"]
         if failure.failed_tokens:

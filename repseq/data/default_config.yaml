@@ -52,6 +52,29 @@ qc:
     enabled: false
     max_bad_fraction: 0.05
 
+  # 5'-completeness of the CLUSTER MARKER proteins. A complete viral coding
+  # sequence translates from an initial methionine, so a marker protein whose
+  # translation starts elsewhere comes from a 5'-partial record — something a
+  # `length_aa` range cannot catch, because a short N-terminal truncation
+  # still falls inside the range. With require_met_start: true, only a CDS
+  # whose translation begins with Met may be picked for ANY marker or
+  # extra_protein spec: a cluster marker left with no such CDS DROPS its
+  # record (reason marker_completeness:<seg>:no_met_start in _qc_removed.tsv,
+  # counted in removed_marker_completeness), while an accessory protein is
+  # simply absent from its FASTA and tree. One global switch rather than a
+  # per-spec flag, because the requirement is identical on every marker and a
+  # per-spec boolean would let a config gate all but one marker and still
+  # look normal. Shares the marker-quality QC step with the length ranges and
+  # runs right after the HMM gate, so attribution stays readable: "no NP" is
+  # an HMM-gate drop, "NP 481 aa" a length drop, "NP 497 aa starting
+  # mid-protein" a completeness drop. Protect a reference strain from either
+  # check with the overrides.protect_stages token `marker_quality`. Needs the
+  # GenBank CDS translations, so it is skipped under --no-resolve (and the
+  # generated {prefix}_summary.md then says it was NOT applied). Default off:
+  # it removes records, and genuine non-AUG initiation exists in some taxa.
+  marker_completeness:
+    require_met_start: false
+
   annotation_filter:
     enabled: true
     keywords:
@@ -279,7 +302,10 @@ clustering:
   # rule is AND (each spec is an independent marker to verify), while within
   # one spec's token list it is OR (alternative architectures). Specs that
   # only define `aliases:` (no `hmms:`) are advisory selection hints; they
-  # do not gate QC.
+  # do not gate QC — and qc.marker_completeness.require_met_start does not
+  # change that: it is judged for the specs this run already requires (any
+  # spec with `hmms:`, plus any with `length_aa:`), never for an unbounded
+  # alias-only spec.
   #
   # LENGTH BOUNDS: a dict entry may add `length_aa: [min, max]` (amino
   # acids, inclusive; `null` leaves an end open), e.g.
@@ -292,7 +318,7 @@ clustering:
   # trees and the partitioned supermatrix use, so they always agree. A
   # bounded alias-only entry never falls back to "the longest CDS".
   # Protect a reference strain from this step with overrides.protect_stages
-  # token `marker_length`.
+  # token `marker_quality` (one token for both marker checks).
   cluster_protein: []
 
   # Non-segmented multi-marker clustering. When false (default) the
@@ -939,10 +965,13 @@ overrides:
   # protect_stages: which QC removal stages to protect against. Either the
   # string "all", or a list naming any of:
   #   duplicates, length, ambiguous, annotation, protein_count,
-  #   taxonomy_consistency, protein_quality, hmm, marker_length
-  # (`length` is the nucleotide length filter; `marker_length` is the
-  # marker-protein length_aa check — a protected record keeps its real,
-  # out-of-range protein in clustering and in every per-protein output.)
+  #   taxonomy_consistency, protein_quality, hmm, marker_quality
+  # (`length` is the nucleotide length filter; `marker_quality` is the
+  # marker-protein step — BOTH its checks, the length_aa ranges and the
+  # 5'-completeness requirement — so a protected record keeps its real
+  # protein in clustering and in every per-protein output even when that
+  # protein is out of range or 5'-partial. It was called `marker_length`
+  # before repseq 0.77.0; the old name is now an error, not a silent no-op.)
   # (Segmented completeness is NOT protectable — protection cannot
   # synthesize a missing segment, so an incomplete isolate still drops.)
   protect_stages: all

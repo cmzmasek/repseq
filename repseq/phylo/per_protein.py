@@ -49,6 +49,9 @@ from ..clustering.marker import (
     LengthBounds,
     format_length_bounds,
     parse_length_bounds,
+    marker_candidate_ok,
+    require_met_start_active,
+    starts_with_met,
     within_length_bounds,
 )
 from ..config import get_virus_config
@@ -260,33 +263,39 @@ def _is_exempt(exempt: Exempt) -> bool:
 
 class MarkerBoundsContext:
     """What an output-side picker needs to take EXACTLY the CDS clustering
-    took for a cluster marker: each spec's ``length_aa`` and the
-    ``marker_length`` protection policy.
+    took for a cluster marker: each spec's ``length_aa``, the global
+    5'-completeness requirement, and the ``marker_quality`` protection
+    policy.
 
     Clustering (``clustering.marker.select_marker_protein``) picks the
-    longest satisfying CDS inside the bound; an isolate protected against
-    the ``marker_length`` QC stage is picked as if unbounded. Every
-    per-protein FASTA / tree / supermatrix / coverage pick goes through
-    :meth:`pick` (or :func:`pick_marker_cds` with :meth:`bounds_for` and
-    :meth:`exempt`) so the same rule holds there.
+    longest satisfying CDS inside the bound that also starts with Met when
+    ``qc.marker_completeness.require_met_start`` is on; an isolate protected
+    against the ``marker_quality`` QC stage is picked as if unrestricted.
+    Every per-protein FASTA / tree / supermatrix / coverage pick goes
+    through :meth:`pick` (or :func:`pick_marker_cds` with :meth:`bounds_for`
+    and :meth:`exempt`) so the same rule holds there.
     """
 
     def __init__(
         self,
         bounds: dict[tuple[str, Optional[str]], LengthBounds],
         policy: Optional[ProtectionPolicy] = None,
+        require_met_start: bool = False,
     ) -> None:
         self.bounds = bounds
         self.policy = policy
+        self.require_met_start = require_met_start
 
     def bounds_for(self, label: str, segment: Optional[str]) -> Optional[LengthBounds]:
         return self.bounds.get((label, segment))
 
     def exempt(self, rep: Sequence) -> bool:
-        if not self.bounds or self.policy is None:
+        if not self.bounds and not self.require_met_start:
+            return False
+        if self.policy is None:
             return False
         return self.policy.protects_any(
-            [rep, *(rep.concat_segments or [])], "marker_length"
+            [rep, *(rep.concat_segments or [])], "marker_quality"
         )
 
     def pick(
@@ -305,13 +314,16 @@ class MarkerBoundsContext:
             overlap_tolerance=overlap_tolerance,
             bounds=self.bounds_for(label, segment),
             exempt=lambda: self.exempt(rep),
+            require_met_start=self.require_met_start,
         )
 
 
 def build_marker_bounds_context(cfg: dict[str, Any]) -> MarkerBoundsContext:
-    """Cluster-marker ``length_aa`` bounds + the protection policy, once per writer."""
+    """Cluster-marker restrictions + the protection policy, once per writer."""
     return MarkerBoundsContext(
-        collect_marker_length_bounds(cfg), ProtectionPolicy.from_cfg(cfg or {}),
+        collect_marker_length_bounds(cfg),
+        ProtectionPolicy.from_cfg(cfg or {}),
+        require_met_start_active(cfg),
     )
 
 
@@ -457,18 +469,20 @@ class ExtraPickContext:
             list[tuple[str, list[str], Optional[LengthBounds], bool]],
         ],
         marker_ctx: Optional["MarkerBoundsContext"] = None,
+        require_met_start: bool = False,
     ) -> None:
         self.hmm_active = hmm_active
         self.overlap_tolerance = overlap_tolerance
         self.bounds = bounds
+        self.require_met_start = require_met_start
         # (label, tokens, bounds, is_cluster_marker) per scope.
         self.claimants = claimants
         self.marker_ctx = marker_ctx
         self._claim_cache: dict[tuple, dict[int, str]] = {}
 
     def exempt(self, rep: Sequence) -> bool:
-        """True when ``rep`` is protected against the ``marker_length`` QC
-        stage, so its cluster markers are picked as if unbounded."""
+        """True when ``rep`` is protected against the ``marker_quality`` QC
+        stage, so its cluster markers are picked as if unrestricted."""
         return self.marker_ctx is not None and self.marker_ctx.exempt(rep)
 
     def claimed(
@@ -479,36 +493,44 @@ class ExtraPickContext:
         Keyed on object identity: the claimant's pick comes from the same
         protein dicts the alias spec sees. Empty when the HMM tier is off.
         A cluster-marker claimant claims exactly the CDS the marker picker
-        takes — inside its ``length_aa``, or (``exempt``: the rep is protected
-        against ``marker_length``) its unbounded pick when nothing is in range.
-        ``exempt`` is only evaluated when a bounded marker claimant misses.
+        takes — inside its ``length_aa`` and starting with Met when the run
+        requires it, or (``exempt``: the rep is protected against
+        ``marker_quality``) its unrestricted pick when nothing qualifies.
+        ``exempt`` is only evaluated when a restricted marker claimant misses.
         """
         if not self.hmm_active:
             return {}
         with_seq = [p for p in (proteins or []) if p.get("sequence")]
         ids = tuple(id(p) for p in with_seq)
-        bounded = self._claims(segment, ids, with_seq, unbounded_markers=False)
-        if not bounded[1] or not _is_exempt(exempt):
-            return bounded[0]
+        restricted = self._claims(segment, ids, with_seq, unbounded_markers=False)
+        if not restricted[1] or not _is_exempt(exempt):
+            return restricted[0]
         return self._claims(segment, ids, with_seq, unbounded_markers=True)[0]
 
     def _claims(
         self, segment, ids, with_seq, *, unbounded_markers: bool,
     ) -> tuple[dict[int, str], bool]:
-        """``(claims, a_bounded_marker_missed)``, memoised per scope."""
+        """``(claims, a_restricted_marker_missed)``, memoised per scope."""
         key = (segment, unbounded_markers, ids)
         cached = self._claim_cache.get(key)
         if cached is not None:
             return cached
         out: dict[int, str] = {}
         missed = False
+        met = self.require_met_start and not unbounded_markers
         for label, tokens, bounds, is_marker in self.claimants.get(segment, []):
             pick = pick_marker_cds(
                 with_seq, tokens, [], True,
                 overlap_tolerance=self.overlap_tolerance,
                 bounds=bounds, exempt=(unbounded_markers and is_marker),
+                # The exemption is marker-only, exactly as the bounds waiver
+                # above is: an HMM extra_protein spec claims the CDS its own
+                # `pick_extra_cds` call will take, or the claim lands on a
+                # CDS that spec withholds and leaves its real pick free for
+                # another alias spec to take as well.
+                require_met_start=(met if is_marker else self.require_met_start),
             )
-            if pick is None and bounds and is_marker:
+            if pick is None and is_marker and (bounds or self.require_met_start):
                 missed = True
             if pick is not None:
                 out.setdefault(id(pick), label)
@@ -542,6 +564,7 @@ def build_extra_pick_context(cfg: dict[str, Any], hmm_active: bool) -> ExtraPick
         bounds=bounds,
         claimants=claimants,
         marker_ctx=marker_ctx,
+        require_met_start=require_met_start_active(cfg),
     )
 
 
@@ -571,38 +594,53 @@ def pick_extra_cds(
     if not with_seq:
         return None, []
     bounds = ctx.bounds.get((family_label, segment))
-    in_bounds = [p for p in with_seq if _within_bounds(p, bounds)]
-    in_ids = {id(p) for p in in_bounds}
-    out_reason = f"outside length_aa {format_length_bounds(bounds)}"
+    met_required = ctx.require_met_start
+
+    def _withheld(p: dict) -> Optional[str]:
+        """Why this CDS may not be picked for the spec, or None.
+
+        Both restrictions apply to accessory proteins exactly as to cluster
+        markers (parity; the designer's call 2026-10-29) — only the
+        CONSEQUENCE differs, since a missing accessory protein is simply
+        absent rather than a drop.
+        """
+        if not _within_bounds(p, bounds):
+            return f"outside length_aa {format_length_bounds(bounds)}"
+        if met_required and not starts_with_met(p):
+            return "5'-partial CDS (translation does not start with Met)"
+        return None
+
+    eligible = [p for p in with_seq if _withheld(p) is None]
+    elig_ids = {id(p) for p in eligible}
     set_aside: list[tuple[dict, str]] = []
 
     if hmm_tokens and ctx.hmm_active:
         cds = pick_marker_cds(
-            in_bounds, hmm_tokens, [], True, overlap_tolerance=ctx.overlap_tolerance,
+            eligible, hmm_tokens, [], True, overlap_tolerance=ctx.overlap_tolerance,
         )
-        if bounds:
+        if bounds or met_required:
             for p in with_seq:
-                if id(p) in in_ids:
+                if id(p) in elig_ids:
                     continue
                 if pick_marker_cds(
                     [p], hmm_tokens, [], True,
                     overlap_tolerance=ctx.overlap_tolerance,
                 ) is not None:
-                    set_aside.append((p, out_reason))
+                    set_aside.append((p, _withheld(p) or ""))
         return cds, set_aside
 
     # Alias path: an alias-only spec, or an HMM spec on a run where the HMM
     # tier did not run (then nothing is claimed — behaviour as before).
     claimed = ctx.claimed(with_seq, segment, exempt)
-    pool = [p for p in in_bounds if id(p) not in claimed]
+    pool = [p for p in eligible if id(p) not in claimed]
     cds = pick_marker_cds(pool, [], aliases, False)
     for p in with_seq:
         if not _matches_any_alias(p, aliases):
             continue
         if id(p) in claimed:
             set_aside.append((p, f"already selected by HMM spec {claimed[id(p)]}"))
-        elif id(p) not in in_ids:
-            set_aside.append((p, out_reason))
+        elif id(p) not in elig_ids:
+            set_aside.append((p, _withheld(p) or ""))
     return cds, set_aside
 
 
@@ -748,20 +786,28 @@ def pick_marker_cds(
     overlap_tolerance: int = 0,
     bounds: Optional[LengthBounds] = None,
     exempt: Exempt = False,
+    require_met_start: bool = False,
 ) -> Optional[dict]:
     """Pick one CDS to represent a marker spec on one sequence/segment.
 
-    ``bounds`` (the spec's ``length_aa``) restricts the candidates before
-    the pick, exactly as the clustering picker does. ``exempt`` (the rep is
-    protected against the ``marker_length`` QC stage) falls back to the
-    unbounded pick when nothing is in range — again matching clustering.
+    ``bounds`` (the spec's ``length_aa``) and ``require_met_start``
+    (``qc.marker_completeness``) restrict the candidates before the pick,
+    exactly as the clustering picker does. ``exempt`` (the rep is protected
+    against the ``marker_quality`` QC stage) falls back to the unrestricted
+    pick when nothing survives both — again matching clustering, where one
+    protect token waives both restrictions.
     """
     with_seq = [p for p in (proteins or []) if p.get("sequence")]
     if not with_seq:
         return None
-    if bounds:
+    if bounds or require_met_start:
         pick = _pick_marker_cds_core(
-            [p for p in with_seq if within_length_bounds(p, bounds)],
+            [
+                p for p in with_seq
+                if marker_candidate_ok(
+                    p, bounds, require_met_start=require_met_start,
+                )
+            ],
             hmm_tokens, aliases, hmm_active, overlap_tolerance,
         )
         if pick is None and _is_exempt(exempt):

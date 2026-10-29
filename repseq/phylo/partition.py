@@ -295,8 +295,9 @@ def build_partitioned_phylogeny(
     # families carried by >= 2 reps (a partition needs >= 2 sequences to be
     # alignable / informative).
     fam_bodies: list[tuple[str, dict[str, str]]] = []
-    # The marker's length_aa (and marker_length protection) hold here too, so
-    # each supermatrix block carries exactly the CDS clustering used.
+    # The marker's length_aa and 5'-completeness requirement (and
+    # `marker_quality` protection) hold here too, so each supermatrix block
+    # carries exactly the CDS clustering used.
     marker_ctx = build_marker_bounds_context(cfg)
     overlap_tol = overlap_tolerance_from_cfg(cfg)
     for family_label, tokens, segment in specs:
@@ -311,7 +312,8 @@ def build_partitioned_phylogeny(
         bodies: dict[str, str] = {}
         for rep in representatives:
             # The same picker as the per-protein FASTAs and trees (bounds,
-            # marker_length protection, and hmm.multidomain_overlap_tolerance).
+            # the Met requirement, `marker_quality` protection, and
+            # hmm.multidomain_overlap_tolerance).
             cds = marker_ctx.pick(
                 rep, _segment_proteins(rep, segment), family_label, tokens, [],
                 segment, True, overlap_tol,

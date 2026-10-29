@@ -648,6 +648,7 @@ def build_concatenated_sequences(
     ga_cutoffs: Optional[dict[str, Optional[float]]] = None,
     hmm_cfg: Optional[dict[str, Any]] = None,
     policy=None,
+    require_met_start: bool = False,
 ) -> list[Sequence]:
     """Return one concatenated Sequence per complete isolate.
 
@@ -701,33 +702,37 @@ def build_concatenated_sequences(
                     hmm_active=hmm_active,
                     ga_cutoffs=ga_cutoffs,
                     hmm_cfg=hmm_cfg,
+                    require_met_start=require_met_start,
                 )
                 if (
                     marker is None
                     and failure is not None
-                    and failure.reason == "length_out_of_bounds"
+                    and failure.reason in (
+                        "length_out_of_bounds", "no_met_start",
+                    )
                     and policy is not None
-                    and policy.protects_any(segs, "marker_length")
+                    and policy.protects_any(segs, "marker_quality")
                 ):
-                    # Protected against the marker-length stage: pick as if
-                    # no bound existed, exactly like the output pickers do
-                    # for this isolate. The QC stage already recorded the
-                    # protection for isolates it saw; record it here only
-                    # for the rare isolate that reached assembly without
-                    # passing through that stage (no isolate_id upstream).
+                    # Protected against the marker-quality stage: pick as if
+                    # neither the bound nor the Met requirement existed,
+                    # exactly like the output pickers do for this isolate.
+                    # The QC stage already recorded the protection for
+                    # isolates it saw; record it here only for the rare
+                    # isolate that reached assembly without passing through
+                    # that stage (no isolate_id upstream).
                     marker, _ = select_marker_protein(
                         seg.proteins, marker_specs,
                         hmm_active=hmm_active, ga_cutoffs=ga_cutoffs,
-                        hmm_cfg=hmm_cfg, ignore_bounds=True,
+                        hmm_cfg=hmm_cfg, ignore_restrictions=True,
                     )
                     if marker is not None:
                         if report is not None and not any(
-                            pr["stage"] == "marker_length"
+                            pr["stage"] == "marker_quality"
                             and pr["id"] in {s.id for s in segs}
                             for pr in report.protected
                         ):
                             report.add_protected(
-                                seg.id, "marker_length",
+                                seg.id, "marker_quality",
                                 _format_failure_reason(failure),
                             )
                         failure = None
@@ -746,21 +751,26 @@ def build_concatenated_sequences(
                         and policy is not None
                         and policy.protects_any(segs, "hmm")
                     ):
-                        # The HMM-off pick still honours length_aa, unless
-                        # the isolate is protected against that stage too.
+                        # The HMM-off pick still honours length_aa and the
+                        # Met requirement, unless the isolate is protected
+                        # against that stage too.
                         marker, retry_failure = select_marker_protein(
                             seg.proteins, marker_specs, hmm_active=False,
-                            ignore_bounds=policy.protects_any(
-                                segs, "marker_length"
+                            require_met_start=require_met_start,
+                            ignore_restrictions=policy.protects_any(
+                                segs, "marker_quality"
                             ),
                         )
                         if (
                             marker is None
                             and retry_failure is not None
-                            and retry_failure.reason == "length_out_of_bounds"
+                            and retry_failure.reason in (
+                                "length_out_of_bounds", "no_met_start",
+                            )
                         ):
                             # HMM protection rescued the identity, but the
-                            # protein is outside its range: a length drop.
+                            # marker is out of range or 5'-partial: the
+                            # marker-quality stage owns that drop.
                             failure = retry_failure
                         if marker is not None:
                             if report is not None:
@@ -789,24 +799,33 @@ def build_concatenated_sequences(
                         failure_info is not None
                         and failure_info.reason == "length_out_of_bounds"
                     )
-                    if is_length:
-                        # Same reason shape as the marker-length QC stage;
+                    is_partial = (
+                        failure_info is not None
+                        and failure_info.reason == "no_met_start"
+                    )
+                    if is_length or is_partial:
+                        # Same reason shape as the marker-quality QC stage;
                         # one isolate, first failing segment (this backstop
                         # only sees isolates the stage could not group).
-                        detail = describe_length_miss(
-                            failure_info.length_aa, failure_info.bounds
-                        )
-                        report.removed_marker_length += 1
-                        report.removed_marker_length_by_marker[failed_segment] = (
-                            report.removed_marker_length_by_marker.get(
-                                failed_segment, 0) + 1
-                        )
+                        if is_length:
+                            prefix = "marker_length"
+                            detail = describe_length_miss(
+                                failure_info.length_aa, failure_info.bounds
+                            )
+                            report.removed_marker_length += 1
+                            tally = report.removed_marker_length_by_marker
+                        else:
+                            prefix = "marker_completeness"
+                            detail = "no_met_start"
+                            report.removed_marker_completeness += 1
+                            tally = report.removed_marker_completeness_by_marker
+                        tally[failed_segment] = tally.get(failed_segment, 0) + 1
                         for seq in segs:
                             if seq.segment == failed_segment:
-                                reason = f"marker_length:{failed_segment}:{detail}"
+                                reason = f"{prefix}:{failed_segment}:{detail}"
                             else:
                                 reason = (
-                                    f"marker_length_sibling:{failed_segment}:"
+                                    f"{prefix}_sibling:{failed_segment}:"
                                     f"{detail}"
                                 )
                             seq.qc_passed = False

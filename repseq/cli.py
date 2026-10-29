@@ -36,6 +36,9 @@ from .output.writer import write_results
 from .clustering.marker import (
     describe_length_miss,
     populate_protein_sequences,
+    MARKER_QUALITY_RUNTIME,
+    require_met_start_active,
+    require_met_start_from_cfg,
     select_marker_protein,
 )
 from .qc.pipeline import remove_duplicates, run_qc
@@ -1192,24 +1195,43 @@ def _count_isolates_with_all_segments(groups, isolate_keys, expected) -> Optiona
     return sum(1 for key in isolate_keys if groups[key].has_all(expected))
 
 
-def _isolate_gate_reasons(groups, failures, prefix: str) -> dict[int, str]:
+def _isolate_gate_reasons(
+    groups, failures, prefix: str, stage_order: tuple[str, ...] = (),
+) -> dict[int, str]:
     """``{id(record): reason}`` for every record of every failing isolate.
 
     ``failures`` maps isolate key to ``[(segment, detail, judged_record)]``
-    in input order. The judged record that failed gets
+    in input order, optionally with a 4th element naming the stage prefix for
+    that one failure (the marker-quality gate runs two checks and must label
+    each failure with its own stage; the HMM gate passes 3-tuples and uses
+    the ``prefix`` argument throughout). The judged record that failed gets
     ``<prefix>:<segment>:<detail>``; every other record of the isolate
     (including duplicate records assembly would have discarded) gets
-    ``<prefix>_sibling:`` plus the isolate's first failure.
+    ``<prefix>_sibling:`` plus the isolate's PRIMARY failure.
+
+    ``stage_order`` lists stage prefixes in precedence order, so the sibling
+    reason names the same failure the counters attribute the isolate to — for
+    the marker-quality gate, length ahead of completeness. Without it (the
+    HMM gate, one stage) the primary failure is simply the first.
     """
+    def _px(fail) -> str:
+        return fail[3] if len(fail) > 3 and fail[3] else prefix
+
+    def _rank(fail) -> int:
+        px = _px(fail)
+        return stage_order.index(px) if px in stage_order else len(stage_order)
+
     out: dict[int, str] = {}
     for key, fails in failures.items():
-        own = {id(rec): (seg, detail) for seg, detail, rec in fails}
-        first_seg, first_detail = fails[0][0], fails[0][1]
+        own = {id(f[2]): (f[0], f[1], _px(f)) for f in fails}
+        # `min` is stable, so this is the first failure of the
+        # highest-precedence stage present.
+        primary = min(fails, key=_rank) if stage_order else fails[0]
         for seq in groups[key].sequences():
             mine = own.get(id(seq))
             out[id(seq)] = (
-                f"{prefix}:{mine[0]}:{mine[1]}" if mine is not None
-                else f"{prefix}_sibling:{first_seg}:{first_detail}"
+                f"{mine[2]}:{mine[0]}:{mine[1]}" if mine is not None
+                else f"{_px(primary)}_sibling:{primary[0]}:{primary[1]}"
             )
     return out
 
@@ -1383,48 +1405,69 @@ def _run_hmm_qc_non_segmented(sequences, cfg, qc_report):
 # Marker-length QC (v0.76.0)
 # ---------------------------------------------------------------------------
 
-def _run_marker_length_qc(sequences, cfg, qc_report, ncbi):
-    """Marker-length QC: drop records whose marker protein is present but
-    only outside its spec's ``length_aa`` range.
+def _run_marker_quality_qc(sequences, cfg, qc_report, ncbi):
+    """Marker-quality QC: drop records whose marker protein is present but
+    unusable — outside its spec's ``length_aa`` range, or 5'-partial.
 
     Runs right after the HMM gate and, like it, whatever the clustering
-    alphabet. Only marker specs that declare ``length_aa`` are judged:
-    ``segment_markers[seg]`` entries (segmented) and dict-form
-    ``clustering.cluster_protein`` entries (non-segmented).
+    alphabet. Two checks share this stage because they are the same
+    judgement ("may this CDS be picked for this spec") enforced in the same
+    four pickers:
 
-    Running second keeps attribution honest: an isolate with no NP at all is
-    the HMM gate's drop ("marker fails HMM identity"); this stage only judges
-    proteins already identified, so a partial NP reads as a partial NP. Each
+      * ``length_aa`` on ``segment_markers[seg]`` (segmented) or a dict-form
+        ``clustering.cluster_protein`` entry (non-segmented) — judged only
+        for specs that declare it;
+      * ``qc.marker_completeness.require_met_start`` — one global switch,
+        judged for EVERY declared marker spec. A complete viral CDS
+        translation starts with Met, so one that does not is a 5'-partial
+        record, which no length range can see (a short N-terminal truncation
+        stays inside the range).
+
+    Running after the HMM gate keeps attribution honest: an isolate with no
+    NP at all is the HMM gate's drop, an NP of 481 aa is a length drop, and
+    a full-length NP starting mid-protein is a completeness drop. Each
     marker is judged with the SAME picker clustering uses
     (``clustering.marker.select_marker_protein``), so a record this stage
-    keeps always yields an in-range marker downstream, and the per-protein
-    FASTAs / trees / supermatrix (which apply the same bound) show exactly
-    the CDS clustering used.
+    keeps always yields a usable marker downstream, and the per-protein
+    FASTAs / trees / supermatrix (which apply the same restrictions) show
+    exactly the CDS clustering used.
 
     Drops:
-        - Segmented: an isolate is dropped when ANY bounded segment fails.
-          The failing segment's record gets ``marker_length:<seg>:<detail>``
-          (``<detail>`` e.g. ``481aa_below_485``), its siblings
-          ``marker_length_sibling:<seg>:<detail>``. ``removed_marker_length``
-          counts isolates once; ``removed_marker_length_by_marker`` counts
-          EVERY failing segment, so it shows which bound bites.
-        - Non-segmented: a sequence must have an in-range pick for every
-          bounded spec (AND across specs, like the HMM gate); counted in
-          sequences, breakdown keyed by spec name.
+        - Segmented: an isolate is dropped when ANY judged segment fails.
+          The failing segment's record gets ``<stage>:<seg>:<detail>``
+          (``marker_length:5:481aa_below_485`` or
+          ``marker_completeness:5:no_met_start``), its siblings
+          ``<stage>_sibling:...``.
+        - Non-segmented: a sequence must have a usable pick for every judged
+          spec (AND across specs, like the HMM gate).
 
-    Protection (``overrides.protect_qc``, stage token ``marker_length``)
+    Counters: ``removed_marker_length`` and ``removed_marker_completeness``
+    each count isolates/sequences ONCE, and an isolate failing both is
+    counted under length only — the same precedence the written reason uses,
+    so the two sum to exactly what the stage dropped. Their ``_by_marker``
+    breakdowns count EVERY failing marker, so a breakdown can exceed its
+    counter (deliberately: it shows which restriction bites).
+
+    Protection (``overrides.protect_qc``, stage token ``marker_quality``)
     keeps the record and records the would-be reason; clustering and every
-    output picker then use its real, out-of-range protein.
+    output picker then use its real protein, waiving BOTH restrictions.
     """
+    met_required = require_met_start_from_cfg(cfg)
     segmented = bool(cfg.get("segmented", {}).get("enabled"))
     if segmented:
         virus_cfg = get_virus_config(cfg) or {}
         segment_markers = virus_cfg.get("segment_markers") or {}
+        cluster_protein = virus_cfg.get("cluster_protein") or {}
         bounded_segments = {
             seg for seg, spec in segment_markers.items()
             if (spec or {}).get("length_aa") is not None
         }
-        if not bounded_segments:
+        # The Met requirement is global, so every segment carrying a marker
+        # spec is judged for it — not just the bounded ones.
+        judged_segments = set(bounded_segments)
+        if met_required:
+            judged_segments |= set(segment_markers) | set(cluster_protein)
+        if not judged_segments:
             return sequences
     else:
         entries = cfg.get("clustering", {}).get("cluster_protein", []) or []
@@ -1432,21 +1475,58 @@ def _run_marker_length_qc(sequences, cfg, qc_report, ncbi):
             e for e in entries
             if isinstance(e, dict) and e.get("length_aa") is not None
         ]
-        if not bounded_specs:
+
+        def _judged(entry) -> bool:
+            # Only specs this run ALREADY requires are judged (designer's
+            # call 2026-10-29). A `length_aa` spec opted in explicitly; a
+            # spec declaring `hmms:` is already mandatory, since the HMM gate
+            # ANDs across every HMM-bearing spec — for both, the Met test only
+            # strengthens a check the record had to pass. An unbounded
+            # alias-only marker was never gated by anything, so the global
+            # switch must not quietly promote it into a drop condition
+            # (non-segmented clustering picks the FIRST matching spec, so
+            # such a marker need not even be the one clustering uses).
+            if not isinstance(entry, dict):
+                return False
+            if entry.get("length_aa") is not None:
+                return True
+            return bool(met_required and entry.get("hmms"))
+
+        judged_specs = [e for e in entries if _judged(e)]
+        if not judged_specs:
             return sequences
 
     if any(_needs_protein_fetch(seq) for seq in sequences):
         if ncbi is None:
+            # (phrase, plural) — the verb has to agree with whichever
+            # subject(s) actually apply to this run.
+            items: list[tuple[str, bool]] = []
+            has_bounds = bool(bounded_segments if segmented else bounded_specs)
+            if has_bounds:
+                items.append(("the length_aa bounds", True))
+            if met_required:
+                items.append(("the marker-completeness check", False))
+            verb = "need" if len(items) > 1 or items[0][1] else "needs"
             click.echo(
-                "[marker length] length_aa bounds need the GenBank CDS "
-                "translations, but --no-resolve was set, so the marker-length "
-                "check was skipped. Drop --no-resolve to apply the bounds.",
+                f"[marker quality] {' and '.join(p for p, _ in items)} {verb} "
+                "the GenBank CDS translations, but --no-resolve was set, so "
+                "the marker-quality check was skipped. Drop --no-resolve to "
+                "apply it.",
                 err=True,
             )
-            # The Methods summary must not claim the ranges were applied.
+            # The Methods summary must not claim the checks were applied.
             qc_report.display["marker_length_skipped"] = True
+            if met_required:
+                qc_report.display["marker_completeness_skipped"] = True
+                # And no PICKER may enforce what the stage just skipped:
+                # `require_met_start_active` reads this, so the FASTAs,
+                # trees, supermatrix and coverage tables agree with the
+                # Methods prose about what was applied.
+                cfg.setdefault(MARKER_QUALITY_RUNTIME, {})[
+                    "require_met_start_skipped"
+                ] = True
             return sequences
-        click.echo("Fetching CDS proteins for the marker-length check ...")
+        click.echo("Fetching CDS proteins for the marker-quality check ...")
         _attach_missing_proteins(sequences, ncbi)
 
     hmm_rt = cfg.get("_hmm_runtime", {}) or {}
@@ -1454,47 +1534,94 @@ def _run_marker_length_qc(sequences, cfg, qc_report, ncbi):
         hmm_active=bool(hmm_rt.get("active", False)),
         ga_cutoffs=hmm_rt.get("ga_cutoffs"),
         hmm_cfg=hmm_rt.get("hmm_cfg"),
+        require_met_start=met_required,
     )
     policy = ProtectionPolicy.from_cfg(cfg)
     if segmented:
-        return _run_marker_length_qc_segmented(
-            sequences, cfg, qc_report, bounded_segments, pick_kw, policy,
+        return _run_marker_quality_qc_segmented(
+            sequences, cfg, qc_report, judged_segments, pick_kw, policy,
         )
-    return _run_marker_length_qc_non_segmented(
-        sequences, qc_report, bounded_specs, pick_kw, policy,
+    return _run_marker_quality_qc_non_segmented(
+        sequences, qc_report, judged_specs, pick_kw, policy,
     )
 
 
-def _length_miss(proteins, marker_specs, pick_kw) -> Optional[tuple[str, str]]:
-    """``(marker_name, detail)`` when the marker exists only outside its
-    ``length_aa`` range; ``None`` when it passes or fails for another reason
-    (no CDS, HMM failure — other stages own those)."""
+#: Reason prefixes of the two marker-quality checks, in the precedence used
+#: for both the written reason and the counters.
+_MARKER_LENGTH = "marker_length"
+_MARKER_COMPLETENESS = "marker_completeness"
+#: Precedence order, for `_isolate_gate_reasons` and the counters alike.
+_MARKER_STAGE_ORDER = (_MARKER_LENGTH, _MARKER_COMPLETENESS)
+
+
+def _marker_miss(proteins, marker_specs, pick_kw) -> Optional[tuple[str, str, str]]:
+    """``(stage, marker_name, detail)`` when the marker exists but is not
+    pickable; ``None`` when it passes or fails for a reason another stage
+    owns (no CDS, HMM failure, unmatched alias)."""
     marker, failure = select_marker_protein(proteins, marker_specs, **pick_kw)
     if marker is not None or failure is None:
         return None
-    if failure.reason != "length_out_of_bounds":
-        return None
-    return (
-        failure.marker_name or "?",
-        describe_length_miss(failure.length_aa, failure.bounds),
-    )
+    name = failure.marker_name or "?"
+    if failure.reason == "length_out_of_bounds":
+        return (
+            _MARKER_LENGTH, name,
+            describe_length_miss(failure.length_aa, failure.bounds),
+        )
+    if failure.reason == "no_met_start":
+        return (_MARKER_COMPLETENESS, name, "no_met_start")
+    return None
 
 
-def _echo_marker_length_drops(qc_report, what: str) -> None:
-    top = ", ".join(
-        f"{k}={v}"
-        for k, v in sorted(
-            qc_report.removed_marker_length_by_marker.items(),
-            key=lambda kv: (-kv[1], str(kv[0])),
-        )[:8]
-    )
-    click.echo(f"  Marker length QC: dropped {what}. Failing markers: {top}")
+def _marker_quality_tally(qc_report, stages: list[str], keys: list[tuple[str, str]]):
+    """Bump the stage counters for ONE failing isolate/sequence.
+
+    ``stages`` are the stages its failures fall under and ``keys`` the
+    ``(stage, marker)`` pairs for the per-marker breakdowns. The record
+    counts once, under length when any failure is a length miss — matching
+    the reason written to ``_qc_removed.tsv``.
+    """
+    if _MARKER_LENGTH in stages:
+        qc_report.removed_marker_length += 1
+        if _MARKER_COMPLETENESS in stages:
+            # Counted under length by the precedence rule, but a 5'-partial
+            # marker is part of why it went. Recorded so neither the console
+            # tally nor the Methods prose can read the completeness check as
+            # a no-op on a run where every truncated record also broke a
+            # length range — which is the common case, since the ranges were
+            # tuned on exactly those records.
+            qc_report.display["marker_completeness_also_length"] = (
+                qc_report.display.get("marker_completeness_also_length", 0) + 1
+            )
+    else:
+        qc_report.removed_marker_completeness += 1
+    for stage, marker in keys:
+        tally = (
+            qc_report.removed_marker_length_by_marker
+            if stage == _MARKER_LENGTH
+            else qc_report.removed_marker_completeness_by_marker
+        )
+        tally[marker] = tally.get(marker, 0) + 1
 
 
-def _run_marker_length_qc_segmented(
-    sequences, cfg, qc_report, bounded_segments, pick_kw, policy,
+def _echo_marker_quality_drops(qc_report, what: str) -> None:
+    for tally, label in (
+        (qc_report.removed_marker_length_by_marker, "outside length range"),
+        (qc_report.removed_marker_completeness_by_marker, "5'-partial"),
+    ):
+        if not tally:
+            continue
+        top = ", ".join(
+            f"{k}={v}" for k, v in
+            sorted(tally.items(), key=lambda kv: (-kv[1], str(kv[0])))[:8]
+        )
+        click.echo(f"  Marker quality QC ({label}): {top}")
+    click.echo(f"  Marker quality QC: dropped {what}.")
+
+
+def _run_marker_quality_qc_segmented(
+    sequences, cfg, qc_report, judged_segments, pick_kw, policy,
 ):
-    """Segmented marker-length gate. Groups and judges exactly like the HMM
+    """Segmented marker-quality gate. Groups and judges exactly like the HMM
     gate (``group_isolate_records``; only the record assembly keeps for each
     segment is judged), so a partial duplicate cannot remove an isolate that
     also has a complete record for that segment."""
@@ -1503,34 +1630,41 @@ def _run_marker_length_qc_segmented(
     cluster_protein = virus_cfg.get("cluster_protein") or {}
     groups = group_isolate_records(sequences, virus_cfg)
 
-    # isolate key -> [(segment, detail, judged_record), ...] in input order.
+    # isolate key -> [(segment, detail, judged_record, stage), ...] in input order.
     failures: dict[str, list] = {}
     for key, grp in groups.items():
         for seg_name, seq in grp.judged():
-            if seg_name not in bounded_segments:
+            if seg_name not in judged_segments:
                 continue
-            miss = _length_miss(
+            miss = _marker_miss(
                 seq.proteins,
                 segment_marker_specs(seg_name, segment_markers, cluster_protein),
                 pick_kw,
             )
             if miss is not None:
-                failures.setdefault(key, []).append((seg_name, miss[1], seq))
+                failures.setdefault(key, []).append(
+                    (seg_name, miss[2], seq, miss[0])
+                )
 
     if policy.enabled:
         for key in list(failures):
             segs = groups[key].sequences()
-            if policy.protects_any(segs, "marker_length"):
+            if policy.protects_any(segs, "marker_quality"):
                 reasons = _isolate_gate_reasons(
-                    groups, {key: failures.pop(key)}, "marker_length",
+                    groups, {key: failures.pop(key)}, "marker_quality",
+                    _MARKER_STAGE_ORDER,
                 )
                 for seq in segs:
-                    qc_report.add_protected(seq.id, "marker_length", reasons[id(seq)])
+                    qc_report.add_protected(
+                        seq.id, "marker_quality", reasons[id(seq)]
+                    )
 
     if not failures:
         return sequences
 
-    reasons = _isolate_gate_reasons(groups, failures, "marker_length")
+    reasons = _isolate_gate_reasons(
+        groups, failures, "marker_quality", _MARKER_STAGE_ORDER,
+    )
     kept: list = []
     n_dropped_segs = 0
     for seq in sequences:
@@ -1543,56 +1677,78 @@ def _run_marker_length_qc_segmented(
         qc_report.add_removed(seq.id, reason)
         n_dropped_segs += 1
 
-    for fails in failures.values():
-        qc_report.removed_marker_length += 1
-        for seg_name, _detail, _rec in fails:
-            qc_report.removed_marker_length_by_marker[seg_name] = (
-                qc_report.removed_marker_length_by_marker.get(seg_name, 0) + 1
-            )
-    expected = virus_cfg.get("segments") or []
-    n_complete = _count_isolates_with_all_segments(groups, failures, expected)
-    complete_note = ""
-    if n_complete is not None:
-        qc_report.display["length_complete_isolates"] = (
-            qc_report.display.get("length_complete_isolates", 0) + n_complete
+    # Complete-share figures are kept per stage, so each isolate is reported
+    # under the same stage its reason names.
+    by_stage: dict[str, list[str]] = {}
+    for key, fails in failures.items():
+        stages = [f[3] for f in fails]
+        _marker_quality_tally(
+            qc_report, stages, [(f[3], f[0]) for f in fails],
         )
-        complete_note = f"; {n_complete} with all {len(set(expected))} segments"
-    _echo_marker_length_drops(
+        primary = (
+            _MARKER_LENGTH if _MARKER_LENGTH in stages else _MARKER_COMPLETENESS
+        )
+        by_stage.setdefault(primary, []).append(key)
+
+    expected = virus_cfg.get("segments") or []
+    notes = []
+    for stage, display_key, label in (
+        (_MARKER_LENGTH, "length_complete_isolates", "outside length range"),
+        (_MARKER_COMPLETENESS, "completeness_complete_isolates", "5'-partial"),
+    ):
+        keys = by_stage.get(stage) or []
+        if not keys:
+            continue
+        n_complete = _count_isolates_with_all_segments(groups, keys, expected)
+        if n_complete is None:
+            continue
+        qc_report.display[display_key] = (
+            qc_report.display.get(display_key, 0) + n_complete
+        )
+        # Prose label, never the internal reason prefix — this sentence is
+        # read by a bench scientist.
+        notes.append(
+            f"{len(keys)} {label} ({n_complete} with all "
+            f"{len(set(expected))} segments)"
+        )
+    detail = "; ".join(notes)
+    _echo_marker_quality_drops(
         qc_report,
-        f"{len(failures)} isolate(s) ({n_dropped_segs} segment-records{complete_note})",
+        f"{len(failures)} isolate(s) ({n_dropped_segs} segment-records)"
+        + (f" — {detail}" if detail else ""),
     )
     return kept
 
 
-def _run_marker_length_qc_non_segmented(
-    sequences, qc_report, bounded_specs, pick_kw, policy,
+def _run_marker_quality_qc_non_segmented(
+    sequences, qc_report, judged_specs, pick_kw, policy,
 ):
     kept: list = []
     n_dropped = 0
     for seq in sequences:
         fails = []
-        for entry in bounded_specs:
-            miss = _length_miss(seq.proteins, [entry], pick_kw)
+        for entry in judged_specs:
+            miss = _marker_miss(seq.proteins, [entry], pick_kw)
             if miss is not None:
                 fails.append(miss)
         if not fails:
             kept.append(seq)
             continue
-        reason = f"marker_length:{fails[0][0]}:{fails[0][1]}"
-        if protected_keep(seq, "marker_length", reason, policy, qc_report):
+        stages = [f[0] for f in fails]
+        primary = next(
+            (f for f in fails if f[0] == _MARKER_LENGTH), fails[0]
+        )
+        reason = f"{primary[0]}:{primary[1]}:{primary[2]}"
+        if protected_keep(seq, "marker_quality", reason, policy, qc_report):
             kept.append(seq)
             continue
         seq.qc_passed = False
         seq.qc_fail_reason = reason
         qc_report.add_removed(seq.id, reason)
-        qc_report.removed_marker_length += 1
+        _marker_quality_tally(qc_report, stages, [(f[0], f[1]) for f in fails])
         n_dropped += 1
-        for name, _detail in fails:
-            qc_report.removed_marker_length_by_marker[name] = (
-                qc_report.removed_marker_length_by_marker.get(name, 0) + 1
-            )
     if n_dropped:
-        _echo_marker_length_drops(qc_report, f"{n_dropped} sequence(s)")
+        _echo_marker_quality_drops(qc_report, f"{n_dropped} sequence(s)")
     return kept
 
 
@@ -1825,6 +1981,7 @@ def _setup_protein_alphabet(sequences, cfg, qc_report, ncbi):
         before = len(sequences)
         hmm_before = qc_report.removed_hmm_failed
         length_before = qc_report.removed_marker_length
+        completeness_before = qc_report.removed_marker_completeness
         if concatenate:
             names = [
                 (s.get("name") if isinstance(s, dict) else s)
@@ -1843,12 +2000,16 @@ def _setup_protein_alphabet(sequences, cfg, qc_report, ncbi):
             hmm_cfg=hmm_rt.get("hmm_cfg"),
             concatenate=concatenate,
             policy=ProtectionPolicy.from_cfg(cfg),
+            require_met_start=require_met_start_active(cfg),
         )
         dropped = before - len(sequences)
         hmm_dropped = qc_report.removed_hmm_failed - hmm_before
         length_dropped = qc_report.removed_marker_length - length_before
+        partial_dropped = (
+            qc_report.removed_marker_completeness - completeness_before
+        )
         if dropped:
-            missing = dropped - hmm_dropped - length_dropped
+            missing = dropped - hmm_dropped - length_dropped - partial_dropped
             bits = []
             if missing:
                 bits.append(f"{missing} with no marker protein")
@@ -1862,6 +2023,11 @@ def _setup_protein_alphabet(sequences, cfg, qc_report, ncbi):
                 bits.append(
                     f"{length_dropped} with the marker protein outside its "
                     f"length range"
+                )
+            if partial_dropped:
+                bits.append(
+                    f"{partial_dropped} with a 5'-partial marker protein "
+                    f"(no Met start)"
                 )
             click.echo(
                 f"  Dropped {dropped} sequence(s) at marker selection "
@@ -2060,6 +2226,9 @@ def _handle_segmented(sequences, cfg, qc_report):
     qc_report.display["n_segments"] = len(virus_cfg.get("segments") or [])
     qc_report.display["hmm_isolates_pre_assembly"] = qc_report.removed_hmm_failed
     qc_report.display["length_isolates_pre_assembly"] = qc_report.removed_marker_length
+    qc_report.display["completeness_isolates_pre_assembly"] = (
+        qc_report.removed_marker_completeness
+    )
     kept, complete_isolates, extras_by_isolate = filter_complete_isolates(
         sequences, virus_cfg, qc_report, extra_segments_action=extra_action
     )
@@ -2131,6 +2300,7 @@ def _handle_segmented(sequences, cfg, qc_report):
     hmm_before = qc_report.removed_hmm_failed
     hmm_before_by_marker = dict(qc_report.removed_hmm_by_marker)
     length_before = qc_report.removed_marker_length
+    completeness_before = qc_report.removed_marker_completeness
     concat_seqs = build_concatenated_sequences(
         complete_isolates,
         segment_names=virus_cfg["segments"],
@@ -2142,6 +2312,7 @@ def _handle_segmented(sequences, cfg, qc_report):
         ga_cutoffs=hmm_rt.get("ga_cutoffs"),
         hmm_cfg=hmm_rt.get("hmm_cfg"),
         policy=ProtectionPolicy.from_cfg(cfg),
+        require_met_start=require_met_start_active(cfg),
     )
     # Drop isolates that lost a marker on any segment from complete_isolates
     # too, so the per-segment FASTA writer and isolate_proteins.tsv don't
@@ -2162,9 +2333,13 @@ def _handle_segmented(sequences, cfg, qc_report):
         qc_report.display["concat_length_isolates"] = (
             qc_report.removed_marker_length - length_before
         )
+        qc_report.display["concat_completeness_isolates"] = (
+            qc_report.removed_marker_completeness - completeness_before
+        )
         if dropped:
             length_dropped = qc_report.display["concat_length_isolates"]
-            missing = dropped - hmm_dropped - length_dropped
+            partial_dropped = qc_report.display["concat_completeness_isolates"]
+            missing = dropped - hmm_dropped - length_dropped - partial_dropped
             bits = []
             if missing:
                 bits.append(f"{missing} with no marker protein on a segment")
@@ -2184,6 +2359,11 @@ def _handle_segmented(sequences, cfg, qc_report):
                 bits.append(
                     f"{length_dropped} with a marker protein outside its "
                     f"length range"
+                )
+            if partial_dropped:
+                bits.append(
+                    f"{partial_dropped} with a 5'-partial marker protein "
+                    f"(no Met start)"
                 )
             click.echo(
                 f"  Dropped {dropped} isolate(s) at concatenation "
@@ -3069,7 +3249,7 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _run_marker_length_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
@@ -3113,7 +3293,7 @@ def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _run_marker_length_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
@@ -3161,7 +3341,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _run_marker_length_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
@@ -3203,7 +3383,7 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _run_marker_length_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
@@ -3247,7 +3427,7 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _run_marker_length_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
@@ -3289,7 +3469,7 @@ def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _run_marker_length_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
@@ -3374,7 +3554,7 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _run_marker_length_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())
@@ -3433,7 +3613,7 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
     sequences = _run_protein_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _run_hmm_qc(sequences, cfg, qc_report, ncbi)
-    sequences = _run_marker_length_qc(sequences, cfg, qc_report, ncbi)
+    sequences = _run_marker_quality_qc(sequences, cfg, qc_report, ncbi)
     sequences = _setup_protein_alphabet(sequences, cfg, qc_report, ncbi)
     sequences, complete_isolates, segment_names = _handle_segmented(sequences, cfg, qc_report)
     click.echo(qc_report.summary())

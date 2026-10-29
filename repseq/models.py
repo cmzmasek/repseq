@@ -253,6 +253,21 @@ class QCReport:
     # both and the breakdown can sum to more than ``removed_marker_length``
     # — the point is to show which bound bites.
     removed_marker_length_by_marker: dict = field(default_factory=dict)
+    # Isolates (segmented) / sequences (non-segmented) dropped because a
+    # marker spec's protein was present and INSIDE any ``length_aa`` range
+    # but its translation does not begin with Met, i.e. the CDS is
+    # 5'-partial (``qc.marker_completeness.require_met_start``, v0.77.0).
+    # Shares the marker-length QC stage but counts separately, because a
+    # truncation and a length miss are different defects and the user needs
+    # to see which one cost them records. An isolate failing BOTH is counted
+    # here only if no segment failed on length: the same precedence the
+    # reason in ``_qc_removed.tsv`` uses, so the two counters sum to exactly
+    # the isolates the stage dropped.
+    removed_marker_completeness: int = 0
+    # Per-marker breakdown, keyed by segment (segmented) or spec name
+    # (non-segmented). Like ``removed_marker_length_by_marker`` this counts
+    # EVERY failing marker, so it can sum to more than the counter.
+    removed_marker_completeness_by_marker: dict = field(default_factory=dict)
     # Whole-pool length filter is skipped in segmented mode (the input is a
     # mix of segments of very different lengths; per-segment bounds are
     # applied later via segmented.viruses.<v>.segment_lengths instead).
@@ -305,7 +320,10 @@ class QCReport:
     # the segment→isolate unit change (``segments_entering_assembly`` and
     # the per-cause Phase-2 magnitudes ``incomplete_segments`` /
     # ``concat_marker_isolates`` / ``concat_hmm_isolates`` /
-    # ``hmm_isolates_pre_assembly`` / ``duplicate_isolates``). Populated by
+    # ``hmm_isolates_pre_assembly`` / ``duplicate_isolates``), plus
+    # ``marker_completeness_also_length`` — isolates the marker-quality stage
+    # counted under length that were ALSO 5'-partial, so neither the tally nor
+    # the Methods prose can read that check as a no-op. Populated by
     # the CLI driver (``_run_qc`` for the thresholds, ``_handle_segmented``
     # for the assembly magnitudes); empty for directly-constructed reports,
     # in which case ``summary()`` infers the layout and omits the live
@@ -425,6 +443,18 @@ class QCReport:
             return self._summary_segmented(d)
         return self._summary_nonsegmented(d)
 
+    def _also_length_note(self, d: dict) -> str:
+        """Annotation for the length row naming isolates that were ALSO
+        5'-partial.
+
+        Length takes precedence, so those isolates are counted under length
+        and the completeness counter does not see them — on a run where every
+        truncated record also breaks a range the completeness row would
+        otherwise be absent and the check would read as a no-op.
+        """
+        also = d.get("marker_completeness_also_length", 0)
+        return f" (incl. {self._n(also)} also 5'-partial)" if also else ""
+
     def _summary_nonsegmented(self, d: dict) -> str:
         n = self._n
         lines = ["QC summary", "", "Per-record screening  (unit: sequences)"]
@@ -443,7 +473,11 @@ class QCReport:
              f"ambiguous protein residues "
              f"(>{self._pct(d.get('protein_quality_pct', 0.05))} X)"),
             (self.removed_hmm_failed, "marker fails HMM identity"),
-            (self.removed_marker_length, "marker protein outside length range"),
+            (self.removed_marker_length,
+             "marker protein outside length range"
+             + self._also_length_note(d)),
+            (self.removed_marker_completeness,
+             "marker protein 5'-partial (no Met start)"),
         ]
         for removed, label in stages:
             if not removed:
@@ -491,7 +525,10 @@ class QCReport:
         len_pre = d.get(
             "length_isolates_pre_assembly", self.removed_marker_length
         )
-        if pq or hmm_pre or len_pre:
+        mc_pre = d.get(
+            "completeness_isolates_pre_assembly", self.removed_marker_completeness
+        )
+        if pq or hmm_pre or len_pre or mc_pre:
             lines.append("")
             lines.append(
                 "  isolate-level identity gates — a failure drops the whole "
@@ -521,9 +558,15 @@ class QCReport:
                      "−" + n(hmm_pre) + " isolates" + _complete("hmm_complete_isolates")))
             if len_pre:
                 gate_rows.append(
-                    ("marker protein outside length range", "",
+                    ("marker protein outside length range"
+                     + self._also_length_note(d), "",
                      "−" + n(len_pre) + " isolates"
                      + _complete("length_complete_isolates")))
+            if mc_pre:
+                gate_rows.append(
+                    ("marker protein 5'-partial (no Met start)", "",
+                     "−" + n(mc_pre) + " isolates"
+                     + _complete("completeness_complete_isolates")))
             # Reconcile the isolate-gate removals back to the segment pool.
             # Only meaningful here — with no gates the Phase-1 subtotal already
             # is the pool entering assembly, so the line would be redundant.
@@ -556,9 +599,14 @@ class QCReport:
         if cm:
             hmm_c = d.get("concat_hmm_isolates", 0)
             len_c = d.get("concat_length_isolates", 0)
+            # Every cause the backstop can report, or the parenthetical does
+            # not add up to the total it annotates.
+            partial_c = d.get("concat_completeness_isolates", 0)
             vias = [f"{n(hmm_c)} via HMM"] if hmm_c else []
             if len_c:
                 vias.append(f"{n(len_c)} via length")
+            if partial_c:
+                vias.append(f"{n(partial_c)} via 5'-partial marker")
             note = f" ({', '.join(vias)})" if vias else ""
             p2.append(("marker lost at concatenation", "",
                        "−" + n(cm) + " isolates" + note))
