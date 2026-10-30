@@ -229,7 +229,9 @@ disappears silently. The run prints how many isolates took their label from the
 table, and **stops with an error if no row matches at all** — that almost always
 means the key column holds something other than your accessions or isolate
 names. Each isolate's label and how it was matched are listed in
-[`{prefix}_group_assignments.tsv`](#prefix_group_assignmentstsv--custom--hybrid-modes).
+[`{prefix}_group_assignments.tsv`](#prefix_group_assignmentstsv--custom--hybrid-modes),
+and per-clade counts (pre-QC, post-QC pool, representatives) in
+[`{prefix}_clade_report.txt`](#prefix_label_reporttxt--tsv--clade--genotype-distribution).
 
 Things to know:
 
@@ -256,7 +258,7 @@ repseq global -c cfg.yaml -i flu.fasta --segmented -T 0.97 \
     --annotate-table nextclade.tsv --annotate-field clade --phylo
 ```
 
-Each attached label is emitted in three places:
+Each attached label is emitted in four places:
 
 - **Protein FASTA headers** — a `[clade=2.3.4.4b]` tag beside `[subtype=...]`,
   in the all-protein, per-protein and `extra_protein` files. The **nucleotide**
@@ -272,6 +274,10 @@ Each attached label is emitted in three places:
   this is what turns the clade into a reassortment readout. Spell it however
   you like there: both ends normalise the name the same way, so `HA clade`,
   `ha_clade` and `HA.clade` all refer to the same label.
+- **A label report** — `{prefix}_clade_report.txt` / `.tsv`, counting every
+  clade pre-QC, in the post-QC pool and among the representatives, so you can
+  see which clades the panel covers and whether QC removed any entirely
+  ([details](#prefix_label_reporttxt--tsv--clade--genotype-distribution)).
 
 ```yaml
 annotate:
@@ -422,6 +428,7 @@ flags you passed. At a glance:
 | `{prefix}_nucleotide_taxonomic_report.txt` | every run | Per-rank NT length statistics: per-segment + `total` (segmented) or single `genome` column. |
 | `{prefix}_polyprotein_taxonomic_report.txt` | `polyprotein:` declared + HMM tier active | Per-rank peptide coverage + AA length statistics. |
 | `{prefix}_subtype_report.txt` / `.tsv` | only when the representatives span >1 viral subtype | Per-serotype distribution (e.g. influenza H5N1) before vs after clustering. |
+| `{prefix}_<label>_report.txt` / `.tsv` (e.g. `_clade_report.txt`) | any run carrying an external label (`--annotate-field`, or the `custom` / `hybrid` selection field) | Every value of the label (each clade, each genotype) counted **pre-QC**, in the post-QC pool and among the representatives — so a clade removed entirely by QC is visible. |
 | `{prefix}_*_taxonomic_report.tsv` | parallel to the matching `.txt` reports | Machine-readable tidy long-format companions (8-column schema). |
 | `{prefix}_clustering.png` | only with `--plot` | Diagnostic scatter of the clustering. |
 | `{prefix}_msa.fasta`, `_tree.xml`, `_tree_id_map.tsv` | only with `--phylo` | Alignment + annotated tree (phyloXML) + short-id↔accession map. |
@@ -440,7 +447,7 @@ flags you passed. At a glance:
 | `{prefix}_msa_conservation.tsv` | any phylo step that wrote an MSA (default on) | One conservation number per alignment (JSD-to-background, Henikoff-weighted, gap-penalised). |
 | `{prefix}_monophyly.tsv` | any phylo step that built a tree (always on) | Per-taxon monophyly status off every annotated `*_tree.xml`. |
 | `{prefix}_segment_status_matrix.tsv` | whenever `_monophyly.tsv` is written | Cross-tree pivot of the monophyly report; `single_marker_break` localises which taxon breaks on which one marker tree (reassortment). |
-| `{prefix}_flags.txt` | when any conflict table exists **or** a genus+ taxon was eliminated by QC **or** a polyprotein-coverage wall is detected | Plain-English synthesis: taxa eliminated by QC + polyprotein peptide-coverage walls + the conflict tables, one skimmable list. |
+| `{prefix}_flags.txt` | when any conflict table exists **or** a genus+ taxon or a label value (a clade) was eliminated by QC **or** a polyprotein-coverage wall is detected | Plain-English synthesis: taxa and clades eliminated by QC + polyprotein peptide-coverage walls + the conflict tables, one skimmable list. |
 | `{prefix}_report.html` | any run with figures or a conflict table | Single-file HTML report: flags + embedded tree-figure gallery + output-file index. |
 | `{prefix}_hmm_diagnostic.tsv` | HMM tier ran AND a spec declares `hmms:` | One row per (rep, marker spec, HMM profile): hit / best-E / coverage / cutoff / passing. |
 | `{prefix}_summary.md` | every run | Auto-generated Methods-section starter (prose + numbers + tool citations), led by an "Analysis at a glance" table. |
@@ -868,6 +875,70 @@ companion (same 8-column schema as the other report TSVs, `report=subtype`).
 Use for: "how are the H/N subtypes distributed in my influenza set, and did
 clustering preserve the rare ones?"
 
+#### `{prefix}_<label>_report.txt` / `.tsv` — clade / genotype distribution
+
+One report per **external label** — a column attached with `--annotate-field`
+(see [Carrying a clade into the output of any run](#carrying-a-clade-into-the-output-of-any-run---annotate-table))
+or the `custom` / `hybrid` selection field — named after the label:
+`--field clade` writes `{prefix}_clade_report.txt` and `.tsv`. A label named
+after a report repseq already writes (e.g. a column called `taxonomic`) gets a
+`label_` prefix instead, so it can never overwrite that report. A field named
+after metadata repseq already reports (`--field host`, `--field genus`) gets no
+label report; that metadata has its own.
+
+```
+Label report: clade
+Source: h5n1_HA_nextclade.tsv
+Counting unit: isolates (pool = post-QC pool fed to selection, 17,206; reps = representatives, 160)
+...
+  clade         pre-QC      pool      reps
+  ----------------------------------------
+  2.3.4.4b       20826     15512         4
+  2.3.2.1a         788       355         5
+  ...
+  2.1.3.2a          36         0         0   removed by QC (incomplete_isolate:missing_segments 32, marker_length 3, ...)
+  2.3.3             28         0         0   removed by QC (segmented_filter:could_not_identify_isolate_or_segment 28)
+  ----------------------------------------
+  Unknown            -        37         5   no table row matched
+```
+
+- **Three columns.** *pre-QC* counts the rows of the label's table matched by
+  at least one input record **before any QC removal**; *pool* is the post-QC
+  pool fed to selection; *reps* the representatives. *pool* and *reps* count
+  **isolates** (segmented) or **sequences** otherwise. *pre-QC* counts **table
+  rows** — for a Nextclade table with one row per HA record, that is HA records
+  in the input — so read presence across that boundary, not exact magnitudes.
+- **Every value is listed** (no top-20 cap), sorted by pool count. `Unknown`
+  (no table row matched) and `Conflict` (rows disagreed) sit below a rule.
+- **"removed by QC"** marks a value that was in the input, has no post-QC
+  member, **and every input record matched to it is in the QC removal log** —
+  with the most common removal reasons beside it (e.g. isolates missing
+  segments, or records whose isolate/segment could not be identified). It is
+  also flagged in `{prefix}_flags.txt` and printed as a console `WARNING`;
+  `_qc_removed.tsv` has each record's reason.
+- **"not in pool, not removed by QC"** marks a value that vanished although
+  its records were *not* all removed: its isolates survived but carry another
+  label — `Conflict` when their table rows disagree, or `Unknown` / another
+  value when the isolate kept a different duplicate record of the segment
+  than the one the table lists. No alarm is raised for these.
+- **When there is no pre-QC column.** Before QC, input records are matched to
+  the table by accession or id only; isolate names are read from GenBank
+  later. A table keyed by **isolate name or strain** therefore can't be
+  matched pre-QC, and repseq notices this (some value would have more post-QC
+  isolates matched through the table than pre-QC rows). It **withholds the
+  column with a note** rather than print undercounts. A label that does not
+  come from a table at all has no pre-QC column either; in `custom` /
+  `hybrid`, isolates whose value came from the `--field-regex` / attribute
+  fallback are simply not compared with the table rows.
+
+The `.tsv` is the tidy long-format companion (same 8-column schema as the other
+report TSVs, `report=label`, `rank=<label>`, `spec=_label`); `pool=pre_qc` rows
+appear only when the pre-QC column was shown, and a value absent from the pool
+also carries `records_matched` / `records_removed_by_qc` on its pre-QC row.
+The file name uses the label in lower case with spaces and punctuation as `_`
+(`HA clade` → `{prefix}_ha_clade_report.txt`). Use for: "which clades does my
+panel cover, how deeply, and did QC remove any of them entirely?"
+
 #### `{prefix}_protein_taxonomic_report.txt` — per-marker coverage + length
 
 Per-rank tables for **each declared protein** (every `cluster_protein` /
@@ -920,13 +991,13 @@ they concatenate and key on `report`:
 
 | column | values |
 | --- | --- |
-| `report` | `diversity`, `protein`, `nucleotide`, `polyprotein` |
-| `rank` | the 9 `_TAX_RANKS` |
-| `pool` | `post_qc` or `reps` |
-| `taxon` | taxon name at that rank; `*ALL*` for rank-level diversity rows |
+| `report` | `diversity`, `protein`, `nucleotide`, `polyprotein`; also `subtype` and `label` for the subtype and label reports |
+| `rank` | the 9 `_TAX_RANKS` (`subtype` / the label name in those two reports) |
+| `pool` | `post_qc` or `reps`; `pre_qc` in the diversity report (when metadata was resolved) and in label reports that show the pre-QC column |
+| `taxon` | taxon name at that rank (a subtype, a clade); `*ALL*` for rank-level diversity rows |
 | `taxon_count` | items in that (rank, pool, taxon) cell — the denominator of coverage_pct |
-| `spec` | marker / extra-protein name (cluster-driving carry `*`); `<polyprotein>:<peptide>`; `genome` / `<segment>` / `total`; `_diversity` |
-| `metric` | `distinct_taxa`, `member_count`, `coverage_count`, `coverage_pct`, `length_min`, `length_max`, `length_median`, `length_iqr`, `length_n` |
+| `spec` | marker / extra-protein name (cluster-driving carry `*`); `<polyprotein>:<peptide>`; `genome` / `<segment>` / `total`; `_diversity`; `_subtype`; `_label` |
+| `metric` | `distinct_taxa`, `member_count`, `coverage_count`, `coverage_pct`, `length_min`, `length_max`, `length_median`, `length_iqr`, `length_n`; label reports add `records_matched` / `records_removed_by_qc` |
 | `value` | numeric (integers as integers; percentages up to 4 decimals, trailing zeros trimmed) |
 
 ```r
@@ -1490,7 +1561,7 @@ this says *which taxon, on which tree*.
 ### Plain-English flags — `{prefix}_flags.txt`
 
 The interesting anomalies a run can find are spread across several tables (the
-taxonomic report, `_monophyly.tsv`, `_incongruence.tsv`, and — when the opt-in
+taxonomic and label reports, `_monophyly.tsv`, `_incongruence.tsv`, and — when the opt-in
 review ran — `_taxonomy_review.tsv`). `{prefix}_flags.txt` distils them into one
 skimmable, plain-English list so you don't have to join TSVs by hand:
 
@@ -1500,6 +1571,11 @@ skimmable, plain-English list so you don't have to join TSVs by hand:
   vanishing usually means a QC gate (often an HMM marker) doesn't cover it — check
   `_qc_removed.tsv` for the per-record reason. Listed first, and **also printed as
   a `WARNING` on the console** at the end of the run.
+- **Labelled groups removed entirely by QC** — the same alarm for an external
+  label: a clade or genotype present in the input, with no post-QC member, and
+  every input record matched to it removed by QC (read from each
+  [`_<label>_report.tsv`](#prefix_label_reporttxt--tsv--clade--genotype-distribution)).
+  Also printed as a console `WARNING`.
 - **Polyprotein peptide-coverage walls** — when polyprotein slicing is
   configured, a clade whose peptides are almost all at **0 % coverage** under its
   best-matching (“home”) spec — a “wall of zeros” meaning the peptide profiles are
@@ -1523,8 +1599,8 @@ skimmable, plain-English list so you don't have to join TSVs by hand:
   neighbourhood disagrees with (from the taxonomy review).
 
 It's a pure synthesis (no new computation), written whenever any source table
-exists **or** a QC elimination / polyprotein-coverage wall is detected — so those
-two alarms fire even on a plain clustering run with no `--phylo`. A clean run that has conflict
+exists **or** a QC elimination (of a taxon or a clade) / polyprotein-coverage wall
+is detected — so those alarms fire even on a plain clustering run with no `--phylo`. A clean run that has conflict
 tables gets a `No flags raised ✓` file so you can tell "nothing flagged" from
 "report not produced". The flags are heuristics — the source tables remain
 authoritative.
@@ -2774,7 +2850,7 @@ that license; it comes with **no warranty**. The full license text is in the
 
 ## Status
 
-Current: **`v0.78.0`**.
+Current: **`v0.79.0`**.
 
 **Selection.** All 8 selection modes, including grouping by a column of your own
 metadata table (`--metadata-table`), so representatives can be chosen per
@@ -2809,15 +2885,17 @@ mislabelled GenBank `/product` strings (HMM specs claim their CDS first, plus an
 optional `length_aa` bound).
 
 **Reporting.** Taxonomic, protein, nucleotide, polyprotein and serotype reports,
-each as human-readable text plus a tidy long-format TSV; a cross-tree
-segment-status matrix that localises which taxon breaks on which marker tree;
-three loud alarms for silent problems — taxa eliminated entirely by QC, a
-polyprotein peptide-coverage "wall of zeros", and the conflict tables — collected
+plus one report per external label (e.g. per HA clade: pre-QC / post-QC /
+representatives), each as human-readable text plus a tidy long-format TSV; a
+cross-tree segment-status matrix that localises which taxon breaks on which
+marker tree; loud alarms for silent problems — taxa and clades eliminated
+entirely by QC, a polyprotein peptide-coverage "wall of zeros", and the
+conflict tables — collected
 into plain-English flags and a single-file HTML report; an auto-generated
 Methods-section starter (`_summary.md`), a reproducibility lockfile
 (`repseq replay`), and a sanitized config snapshot on every run.
 
-**1,719 offline regression tests pass.** The NCBI-backed paths have been
+**1,753 offline regression tests pass.** The NCBI-backed paths have been
 validated end-to-end against live influenza A and B, peribunyaviridae,
 hantaviridae, coronaviridae, amarillovirales, elliovirales and hareavirales
 datasets. See `git log` for the full release history.

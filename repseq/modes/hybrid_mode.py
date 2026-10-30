@@ -91,6 +91,19 @@ class HybridMode(BaseMode):
                     f"lower case does not matter), or drop --metadata-table."
                 )
 
+    def table_label_sources(self) -> list[tuple[str, MetadataTable, str]]:
+        """``(field, table, column)`` for each selection field that is a
+        ``--metadata-table`` column — what the label reports' pre-QC column
+        needs (``annotate.tally_pre_qc_labels``)."""
+        if self.metadata_table is None:
+            return []
+        out: list[tuple[str, MetadataTable, str]] = []
+        for field in self.fields:
+            column = self.metadata_table.column_for(field)
+            if column:
+                out.append((field, self.metadata_table, column))
+        return out
+
     def run(self, sequences: list[Sequence]) -> RunResult:
         resolved = _resolve_all(
             sequences, self.fields, self.metadata_table, self.field_regexes

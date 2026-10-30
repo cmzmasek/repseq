@@ -511,6 +511,15 @@ class CustomMode(BaseMode):
                     f"a sequence attribute or taxonomy rank."
                 )
 
+    def table_label_sources(self) -> list[tuple[str, MetadataTable, str]]:
+        """``(field, table, column)`` when the selection field comes from
+        ``--metadata-table`` — what the label report's pre-QC column needs
+        (``annotate.tally_pre_qc_labels``)."""
+        if self.metadata_table is None:
+            return []
+        column = self.metadata_table.column_for(self.field)
+        return [(self.field, self.metadata_table, column)] if column else []
+
     def run(self, sequences: list[Sequence]) -> RunResult:
         values = [
             resolve_field(seq, self.field, self.metadata_table, self.field_regex)

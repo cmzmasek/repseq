@@ -1025,6 +1025,7 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
     group_sentence = (
         _group_assignment_sentence(result, segmented)
         + _annotate_sentence(cfg, segmented)
+        + _label_report_sentence(qc_report, segmented)
     )
 
     hmm_sentence = ""
@@ -1212,6 +1213,52 @@ def _annotate_sentence(cfg: dict, segmented: bool) -> str:
         "are emitted as `[<field>=<value>]` tags in the protein FASTA "
         "headers and as `repseq:<field>` properties on every tree leaf."
     )
+    return out
+
+
+def _label_report_sentence(qc_report: QCReport, segmented: bool) -> str:
+    """Methods prose for the label reports (``{prefix}_<label>_report.*``):
+    which were written, whether the pre-QC column could be given, and how
+    many values QC removed in full."""
+    status = (getattr(qc_report, "display", None) or {}).get("label_reports")
+    if not status:
+        return ""
+    unit = "isolates" if segmented else "sequences"
+    files = ", ".join(f"`{s['file']}`" for s in status.values())
+    names = ", ".join(f"`{k}`" for k in status)
+    out = (
+        f" The distribution of each label's values ({names}) across the "
+        f"post-QC pool and the representatives is reported in {files}, each "
+        f"with a tidy `.tsv` companion sharing the 8-column schema of the "
+        f"taxonomic-report TSVs; counts are {unit}."
+    )
+    with_pre = [k for k, s in status.items() if s.get("pre_qc")]
+    without = [k for k, s in status.items() if not s.get("pre_qc")]
+    if with_pre:
+        out += (
+            f" For {', '.join(f'`{k}`' for k in with_pre)}, a leading pre-QC "
+            f"column counts the rows of the label's metadata table matched by "
+            f"the input records before any QC removal, so a value removed in "
+            f"full by QC is visible rather than silent; any such value is "
+            f"also flagged in `{{prefix}}_flags.txt` and on the console."
+        )
+    if without:
+        out += (
+            f" No pre-QC column is given for "
+            f"{', '.join(f'`{k}`' for k in without)}, because those values do "
+            f"not come from a table that could be matched to the input "
+            f"records before QC (input records are matched by accession or "
+            f"id at that point; isolate names are read later)."
+        )
+    elim = getattr(qc_report, "eliminated_labels", None) or []
+    if elim:
+        per: dict[str, int] = {}
+        for e in elim:
+            per[e["label"]] = per.get(e["label"], 0) + 1
+        out += " " + "; ".join(
+            f"**{n}** `{k}` value(s) present in the input had no post-QC member"
+            for k, n in per.items()
+        ) + "."
     return out
 
 

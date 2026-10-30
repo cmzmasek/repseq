@@ -298,3 +298,98 @@ def annotate_stats(cfg: dict) -> Optional[dict]:
     runtime = (cfg or {}).get(ANNOTATE_RUNTIME) or {}
     stats = runtime.get("stats")
     return dict(stats) if stats else None
+
+
+# ---------------------------------------------------------------------------
+# Pre-QC label snapshot (for the label reports' pre-QC column)
+# ---------------------------------------------------------------------------
+
+def label_table_sources(
+    cfg: dict, mode_sources=(),
+) -> dict[str, tuple[Any, str]]:
+    """``{label key: (table, column)}`` for every label whose values come
+    from a metadata table.
+
+    ``annotate.fields`` come from the startup-validated runtime state;
+    ``mode_sources`` are a ``custom`` / ``hybrid`` mode's
+    ``table_label_sources()`` and override an annotate field with the same
+    key, because the selection value is the one emitted (``set_labels``
+    with ``overwrite=True``). Keys repseq never emits as a label
+    (``RESERVED_LABEL_KEYS``) are left out.
+    """
+    sources: dict[str, tuple[Any, str]] = {}
+    runtime = (cfg or {}).get(ANNOTATE_RUNTIME) or {}
+    columns = runtime.get("columns") or {}
+    if columns:
+        table = _load_table(runtime["table"])
+        for field, column in columns.items():
+            key = sanitize_label_key(field)
+            if key and key not in RESERVED_LABEL_KEYS:
+                sources[key] = (table, column)
+    for field, table, column in mode_sources or ():
+        key = sanitize_label_key(field)
+        if key and key not in RESERVED_LABEL_KEYS:
+            sources[key] = (table, column)
+    return sources
+
+
+def tally_pre_qc_labels(
+    sequences: list[Sequence], sources: dict[str, tuple[Any, str]],
+) -> dict[str, dict]:
+    """Count each label value over the table rows the RAW input reaches.
+
+    Called at the QC chokepoint (``cli._run_qc``), before any removal, so the
+    label reports can show a pre-QC column and flag a value QC removed in
+    full. Labels themselves are attached only after assembly, so the records
+    QC drops never carry one; this matches them against the table directly,
+    through the same ``custom_mode.matched_rows`` the post-QC binding uses.
+
+    Returns ``{key: {"source": <table file name>, "counts": {value: rows},
+    "records": {value: [(seq.id, seq.accession), ...]}}}``. ``counts`` is the
+    displayed pre-QC number — distinct table rows with a non-empty value,
+    matched by at least one input record (for a Nextclade table, HA records
+    in the input). ``records`` lists the input records behind each value, so
+    the report can check them against the QC removal log rather than infer a
+    removal from absence. Raw ``id`` / ``accession`` strings, because those
+    are what ``QCReport.details`` stores. A file named by two sources (the
+    mode's ``--metadata-table`` and ``annotate.table``) is walked once.
+    """
+    if not sources or not sequences:
+        return {}
+    from .modes.custom_mode import matched_rows
+
+    by_file: dict[str, tuple[Any, list[tuple[str, str]]]] = {}
+    for key, (table, column) in sources.items():
+        try:
+            file_key = str(Path(str(table.path)).resolve())
+        except (OSError, RuntimeError):
+            file_key = f"id:{id(table)}"
+        by_file.setdefault(file_key, (table, []))[1].append((key, column))
+
+    out: dict[str, dict] = {}
+    for table, wanted in by_file.values():
+        row_records: dict[int, list[tuple]] = {}
+        for seq in sequences:
+            rows = matched_rows(seq, table)
+            if not rows:
+                continue
+            rec = (seq.id, seq.accession)
+            for i, _kind, _where in rows:
+                row_records.setdefault(i, []).append(rec)
+        for key, column in wanted:
+            counts: dict[str, int] = {}
+            records: dict[str, dict] = {}
+            for i, recs in row_records.items():
+                value = (table.rows[i].get(column) or "").strip()
+                if not value:
+                    continue
+                counts[value] = counts.get(value, 0) + 1
+                bucket = records.setdefault(value, {})
+                for rec in recs:
+                    bucket.setdefault(rec, None)
+            out[key] = {
+                "source": Path(str(table.path)).name,
+                "counts": counts,
+                "records": {v: list(b) for v, b in records.items()},
+            }
+    return out

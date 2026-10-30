@@ -445,6 +445,17 @@ class QCReport:
     # (output.report.find_eliminated_taxa); surfaced in the console final
     # summary and, via the taxonomic-report TSV, in ``_flags.txt``.
     eliminated_taxa: list = field(default_factory=list)
+    # Pre-QC label snapshot for the label reports
+    # (``{prefix}_<label>_report.*``): ``{key: {"source": <table file name>,
+    # "counts": {value: rows}}}`` — table rows matched by the raw input before
+    # any QC removal (``annotate.tally_pre_qc_labels``), only for labels whose
+    # values come from a metadata table. Empty otherwise.
+    pre_qc_labels: dict = field(default_factory=dict)
+    # Label values (a clade, a genotype) present pre-QC with no post-QC
+    # member: ``{label, value, pre_qc_count}`` each, from
+    # ``output.label_report.write_label_reports``; surfaced in the console
+    # final summary and, via the label-report TSV, in ``_flags.txt``.
+    eliminated_labels: list = field(default_factory=list)
     # Polyprotein peptide-coverage "walls of zeros": a clade whose home
     # polyprotein spec leaves most of its peptides at 0 % coverage (mistuned
     # profiles), or that no spec slices at all. Each entry is a dict from

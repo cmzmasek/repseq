@@ -2,7 +2,8 @@
 
 The interesting anomalies a run can surface are scattered across several
 machine-readable tables: ``{prefix}_taxonomic_report.tsv`` (pre-QC vs post-QC
-taxon counts — a whole genus/family eliminated by QC), ``{prefix}_monophyly.tsv``
+taxon counts — a whole genus/family eliminated by QC), the label reports
+``{prefix}_<label>_report.tsv`` (the same for a clade or genotype), ``{prefix}_monophyly.tsv``
 (per-taxon mono/para/poly), ``{prefix}_per_protein/{prefix}_incongruence.tsv``
 (tree-vs-tree RF distance), and ``{prefix}_taxonomy_review.tsv`` (per-leaf rank
 conflicts, when the opt-in review ran). This module reads whichever of those
@@ -38,7 +39,8 @@ _MAX_INCONGRUENCE_FLAGS = 15
 @dataclass
 class Flag:
     """One analysis flag. ``severity`` ∈ {``warn``, ``info``}; ``category`` ∈
-    {``qc_drop``, ``reassortment``, ``monophyly``, ``taxonomy``}."""
+    {``qc_drop``, ``label_drop``, ``polyprotein_wall``, ``reassortment``,
+    ``monophyly``, ``taxonomy``}."""
     severity: str
     category: str
     message: str
@@ -221,6 +223,76 @@ def _qc_elimination_flags(out_dir: Path, prefix: str) -> list[Flag]:
     ]
 
 
+def _label_elimination_flags(out_dir: Path, prefix: str) -> list[Flag]:
+    """External-label values (a clade, a genotype) removed by QC in full.
+
+    Reads every label-report TSV (``{prefix}_<label>_report.tsv``, rows with
+    ``report == "label"``) and flags a value that has ``pre_qc`` members, no
+    ``post_qc`` member, and ``records_removed_by_qc == records_matched`` —
+    every input record matched to it is in the QC removal log. Absence alone
+    is not enough: a value whose isolates survived under ``Conflict``, or
+    whose kept duplicate record is not in the table, is absent without any QC
+    removal. ``pre_qc`` rows exist only when the report SHOWED its pre-QC
+    column, so a withheld column never raises this flag.
+    """
+    import glob
+
+    from .label_report import (
+        TIDY_REPORT,
+        is_label_report_stem,
+        label_report_stem,
+    )
+
+    pfx = f"{prefix}_"
+    counts: dict[tuple[str, str], dict[str, int]] = {}
+    # glob.escape: a prefix like "run[1]" must not become a character class.
+    for path in sorted(out_dir.glob(f"{glob.escape(pfx)}*_report.tsv")):
+        stem = path.name[len(pfx):-len("_report.tsv")]
+        if not is_label_report_stem(stem):
+            continue  # another report's TSV: skip reading it at all
+        for r in _read_tsv(path):
+            if r.get("report") != TIDY_REPORT:
+                continue
+            label, value = r.get("rank", ""), r.get("taxon", "")
+            if not label or not value or value == "*ALL*":
+                continue
+            try:
+                val = int(float(r.get("value") or 0))
+            except ValueError:
+                continue
+            metric = r.get("metric", "")
+            pool = r.get("pool", "")
+            slot = counts.setdefault((label, value), {})
+            if metric == "member_count":
+                slot[pool] = val
+            elif metric in ("records_matched", "records_removed_by_qc"):
+                slot[metric] = val
+
+    eliminated = sorted(
+        (
+            (label, value, c.get("pre_qc", 0))
+            for (label, value), c in counts.items()
+            if c.get("pre_qc", 0) > 0
+            and c.get("post_qc", 0) == 0
+            and c.get("records_matched", 0) > 0
+            and c.get("records_removed_by_qc", -1) == c.get("records_matched")
+        ),
+        key=lambda e: (e[0], -e[2], e[1]),
+    )
+    return [
+        Flag(
+            "warn", "label_drop",
+            f"{value} ({label}) was present in the input ({pre} matching "
+            f"table row(s) before QC) but every input record matched to it "
+            f"was removed by QC, so nothing in the post-QC pool carries it. "
+            f"The most common reasons are beside it in "
+            f"_{label_report_stem(label)}_report.txt; _qc_removed.tsv has "
+            f"each record's.",
+        )
+        for label, value, pre in eliminated
+    ]
+
+
 def _polyprotein_wall_flags(
     out_dir: Path, prefix: str, cfg: Optional[dict] = None
 ) -> list[Flag]:
@@ -310,6 +382,7 @@ def collect_flags(
     """Gather all flags from whichever source tables are present."""
     return (
         _qc_elimination_flags(out_dir, prefix)
+        + _label_elimination_flags(out_dir, prefix)
         + _polyprotein_wall_flags(out_dir, prefix, cfg)
         + _monophyly_flags(out_dir, prefix)
         + _incongruence_flags(out_dir, prefix)
@@ -319,6 +392,7 @@ def collect_flags(
 
 _SECTIONS = [
     ("qc_drop", "Taxa eliminated entirely by QC"),
+    ("label_drop", "Labelled groups (clade, genotype, ...) removed entirely by QC"),
     ("polyprotein_wall", "Polyprotein peptide-coverage walls"),
     ("reassortment", "Reassortment / recombination signals"),
     ("monophyly", "Taxonomy ↔ tree conflicts (non-monophyletic taxa)"),
@@ -339,7 +413,8 @@ def write_flags_report(
     """
     flags = collect_flags(out_dir, prefix, cfg)
     standalone = [
-        f for f in flags if f.category in ("qc_drop", "polyprotein_wall")
+        f for f in flags
+        if f.category in ("qc_drop", "label_drop", "polyprotein_wall")
     ]
     has_conflict_tables = (
         (out_dir / f"{prefix}_monophyly.tsv").exists()
@@ -357,9 +432,9 @@ def write_flags_report(
     lines = [
         f"# {prefix} — analysis flags",
         "",
-        "Anomalies worth a look, distilled from the taxonomic report "
-        "(pre-QC vs",
-        "post-QC), _monophyly.tsv, _incongruence.tsv, and "
+        "Anomalies worth a look, distilled from the taxonomic and label "
+        "reports (pre-QC",
+        "vs post-QC), _monophyly.tsv, _incongruence.tsv, and "
         "_taxonomy_review.tsv. These",
         "are heuristics — absence of a flag is not proof of cleanliness; the "
         "source",

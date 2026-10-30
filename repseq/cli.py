@@ -92,8 +92,12 @@ def _shared_options(fn):
             "custom/hybrid --metadata-table it only labels, it does not "
             "group, so a global panel run can carry clade tags too. Each "
             "label becomes a [<field>=<value>] tag in the protein FASTA "
-            "headers and a repseq:<field> property on every tree leaf; the "
-            "nucleotide FASTA headers are unchanged. Validated at startup, "
+            "headers, a repseq:<field> property on every tree leaf, and a "
+            "{prefix}_<field>_report.txt/.tsv counting each value pre-QC, "
+            "post-QC and among the representatives (<field> in lower case, "
+            "spaces and punctuation as '_': 'HA clade' gives "
+            "{prefix}_ha_clade_report.txt); the nucleotide FASTA "
+            "headers are unchanged. Validated at startup, "
             "so a wrong path or column fails in seconds and under --dry-run."
         ),
     )(fn)
@@ -770,7 +774,9 @@ def _resolve_metadata(sequences, cfg, no_resolve):
     return ncbi
 
 
-def _run_qc(sequences, cfg):
+def _run_qc(sequences, cfg, label_sources=()):
+    """``label_sources``: a custom / hybrid mode's ``table_label_sources()``,
+    so its selection field gets a pre-QC column in its label report."""
     click.echo("Running QC ...")
     passed, qc_report = run_qc(sequences, cfg)
     # NOTE: the QC summary is printed once at the end (after the
@@ -800,6 +806,17 @@ def _run_qc(sequences, cfg):
     # ({rank: Counter}); the raw input list is not held to end of run. No-op
     # under --no-resolve (no taxonomy → empty counters).
     qc_report.pre_qc_taxa = tally_taxa_by_rank(sequences)
+    # The same snapshot for external labels (a clade, a genotype): labels are
+    # attached only after assembly, so the raw records are matched against the
+    # label's table here instead. Feeds the label reports' pre-QC column and
+    # the "removed by QC" alarm. Soft: a failure costs only that column.
+    try:
+        from .annotate import label_table_sources, tally_pre_qc_labels
+        sources = label_table_sources(cfg, label_sources)
+        if sources:
+            qc_report.pre_qc_labels = tally_pre_qc_labels(sequences, sources)
+    except Exception as exc:
+        click.echo(f"[label pre-QC snapshot skipped] {exc}", err=True)
     return passed, qc_report
 
 
@@ -2802,6 +2819,45 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
                 out_files.append(tax_tsv)
         except Exception as exc:
             click.echo(f"[taxonomic report TSV skipped] {exc}", err=True)
+        # Label reports — one {prefix}_<label>_report.txt/.tsv per external
+        # label (an annotate.fields column, a custom / hybrid selection field):
+        # each value's pre-QC / pool / reps count. Written HERE, before the
+        # flags + HTML steps, so collect_flags can read the TSV and flag a
+        # value (a whole clade) QC removed in full. Soft-fail.
+        try:
+            from .output.label_report import (
+                table_sourced_counts,
+                write_label_reports,
+            )
+            out_dir = Path(cfg["output"]["dir"])
+            prefix = cfg["output"].get("prefix", "repseq")
+            label_paths, eliminated_labels, label_status = write_label_reports(
+                pre_clustering_sequences,
+                result.representatives,
+                getattr(qc_report, "pre_qc_labels", None) or {},
+                out_dir=out_dir,
+                prefix=prefix,
+                segmented=bool(complete_isolates),
+                provenance=_report_provenance,
+                # custom / hybrid: only table-matched members count against
+                # the pre-QC rows (a regex-derived value has no row).
+                table_counts=table_sourced_counts(
+                    getattr(result, "group_assignments", None)),
+                # The removal log the "removed by QC" check reads.
+                qc_details=getattr(qc_report, "details", None),
+            )
+            out_files.extend(label_paths)
+            if qc_report is not None:
+                qc_report.eliminated_labels = eliminated_labels
+                # For the Methods prose (written later by write_all_reports).
+                qc_report.display["label_reports"] = label_status
+            if label_paths:
+                click.echo(
+                    f"Wrote {len(label_paths) // 2} label report(s): "
+                    + ", ".join(p.name for p in label_paths[::2])
+                )
+        except Exception as exc:
+            click.echo(f"[label report skipped] {exc}", err=True)
         # Per-peptide coverage + length report for declared polyprotein specs
         # — the sliced-peptide analogue of the protein taxonomic report. Only
         # emitted when at least one `polyprotein:` spec is declared AND the HMM
@@ -3092,6 +3148,38 @@ def _final_summary(result, qc_report, cfg) -> None:
             err=True,
         )
 
+    def _echo_eliminated_labels() -> None:
+        # The same alarm for external labels: a whole clade / genotype present
+        # in the input with no post-QC member (from the label reports).
+        elim = (
+            getattr(qc_report, "eliminated_labels", None) if qc_report else None
+        ) or []
+        if not elim:
+            return
+        by_label: dict[str, list[dict]] = {}
+        for e in elim:
+            by_label.setdefault(e["label"], []).append(e)
+        for label, items in by_label.items():
+            shown = items[:8]
+            bits = ", ".join(
+                f"{e['value']} ({e['pre_qc_count']} pre-QC"
+                + (f"; mostly {e['reasons'][0]}" if e.get("reasons") else "")
+                + ")"
+                for e in shown
+            )
+            more = f", +{len(items) - len(shown)} more" if len(items) > len(shown) else ""
+            click.echo(
+                f"\nWARNING: {len(items)} {label} value(s) were present in the "
+                f"input but REMOVED by QC (no post-QC member): {bits}{more}.",
+                err=True,
+            )
+        click.echo(
+            "  See _qc_removed.tsv for the per-record reason, plus _flags.txt "
+            "and the pre-QC column of the label report(s) "
+            "(_<label>_report.txt).",
+            err=True,
+        )
+
     def _echo_polyprotein_walls() -> None:
         # Peptide-coverage "wall of zeros" alarm: a clade that clusters fine but
         # whose polyprotein peptides are almost all uncovered (mistuned profiles
@@ -3148,6 +3236,7 @@ def _final_summary(result, qc_report, cfg) -> None:
                 msg += "."
             click.echo(msg)
         _echo_eliminated()
+        _echo_eliminated_labels()
         _echo_polyprotein_walls()
         return
 
@@ -3201,6 +3290,7 @@ def _final_summary(result, qc_report, cfg) -> None:
         click.echo(f"  - {r}", err=True)
     click.echo("  See the run log for the full QC and selection breakdown.", err=True)
     _echo_eliminated()
+    _echo_eliminated_labels()
 
 
 # ---------------------------------------------------------------------------
@@ -3576,7 +3666,10 @@ _METADATA_TABLE_HELP = (
     "column (case and accession version ignored); in segmented runs any "
     "segment's accession reaches its isolate. Sequences with no value go to "
     "an 'Unknown' group, isolates whose rows disagree to 'Conflict'; the run "
-    "stops if no row matches at all. Labels: {prefix}_group_assignments.tsv."
+    "stops if no row matches at all. Labels: {prefix}_group_assignments.tsv; "
+    "per-value counts (pre-QC, post-QC, representatives): "
+    "{prefix}_<field>_report.txt, <field> in lower case with spaces and "
+    "punctuation as '_'."
 )
 
 
@@ -3607,7 +3700,10 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
       repseq custom -c cfg.yaml -i flu.fasta --segmented \\
           --field clade --metadata-table nextclade.tsv -n 5
 
-    Each sequence's label is written to {prefix}_group_assignments.tsv.
+    Each sequence's label is written to {prefix}_group_assignments.tsv, and
+    each value's counts (pre-QC, post-QC pool, representatives) to
+    {prefix}_<field>_report.txt, e.g. {prefix}_clade_report.txt (<field> in
+    lower case, spaces and punctuation as '_').
     """
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
                              alphabet_for_clustering=alphabet_for_clustering, concatenate_markers=concatenate_markers, fast=fast,
@@ -3632,7 +3728,8 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _load_sequences(input_paths, source_override)
     sequences = _apply_exclusions(sequences, cfg)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
-    sequences, qc_report = _run_qc(sequences, cfg)
+    sequences, qc_report = _run_qc(
+        sequences, cfg, label_sources=mode.table_label_sources())
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)
@@ -3669,7 +3766,9 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
 
     Fields can mix sequence attributes, taxonomy ranks and columns of
     --metadata-table (e.g. --fields clade,host). Each sequence's labels are
-    written to {prefix}_group_assignments.tsv.
+    written to {prefix}_group_assignments.tsv; a field that is not already
+    reported metadata (clade, not host) also gets a per-value count report,
+    {prefix}_<field>_report.txt.
     """
     field_list = [f.strip() for f in fields.split(",")]
     cfg = _load_and_validate(config_path, output_dir, prefix, threads, seed,
@@ -3693,7 +3792,8 @@ def run_hybrid(config_path, input_paths, output_dir, prefix, threads, seed,
     sequences = _load_sequences(input_paths, source_override)
     sequences = _apply_exclusions(sequences, cfg)
     ncbi = _resolve_metadata(sequences, cfg, no_resolve)
-    sequences, qc_report = _run_qc(sequences, cfg)
+    sequences, qc_report = _run_qc(
+        sequences, cfg, label_sources=mode.table_label_sources())
     _populate_genbank_isolate_segment(sequences, cfg, ncbi)
     sequences = _run_protein_qc(sequences, cfg, qc_report, ncbi)
     sequences = _filter_taxonomy_consistent(sequences, cfg, qc_report)

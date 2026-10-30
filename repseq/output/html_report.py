@@ -148,7 +148,8 @@ def write_html_report(
     # wall is worth a report even on a plain clustering run with no conflict
     # tables or tree figures.
     have_qc_drop = any(
-        f.category in ("qc_drop", "polyprotein_wall") for f in flags
+        f.category in ("qc_drop", "label_drop", "polyprotein_wall")
+        for f in flags
     )
     if not have_flag_sources and not have_figures and not have_qc_drop:
         return None
