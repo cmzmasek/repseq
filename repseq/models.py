@@ -270,7 +270,10 @@ class GroupStat:
     concatenated per-isolate sequences, since segmentation happens before
     the mode runs. ``cutoff`` is the MMseqs2 identity threshold the binary
     search settled on, or ``None`` when the group was small enough to keep
-    without clustering.
+    without clustering. Re-clustering the group at ``cutoff`` reproduces
+    ``n_after`` clusters — except after an ``--overflow trim``, where it
+    reproduces ``trimmed_from`` and the diversity sampler then pares those
+    to ``n_after``.
     """
     grouping: str            # the grouping dimension (rank name, "host", field, …)
     group: str               # the group label/value within that dimension
@@ -285,6 +288,15 @@ class GroupStat:
     # ``clustered=True`` and ``clustering.diversity_curve_cutoffs`` is
     # non-empty; reporting only — does not influence selection.
     cutoff_counts: Optional[dict[float, Optional[int]]] = None
+    # Clusters the threshold search held BEFORE ``--overflow trim`` pared
+    # them down to ``n_after``; ``None`` when no trim ran. Without it
+    # ``cutoff`` and ``n_after`` read as a contradiction to anyone holding
+    # only this one file.
+    trimmed_from: Optional[int] = None
+    # One plain sentence from the threshold search when it could not land on
+    # the requested count (undershoot, overshoot, or a trim), carried into
+    # the run log so the explanation outlives the console scrollback.
+    note: Optional[str] = None
 
 
 @dataclass

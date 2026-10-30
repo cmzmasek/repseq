@@ -122,13 +122,14 @@ class TaxonomicMode2(BaseMode):
                 self._recurse(group_seqs, next_levels, all_reps, all_clusters,
                               group_stats, group_prefix, represented)
             else:
-                clusters, threshold = _binary_search_threshold(
+                search = _binary_search_threshold(
                     group_seqs,
                     n_per_group,
                     self.cfg,
                     self.overflow,  # type: ignore[arg-type]
                     label=group_prefix,
                 )
+                clusters = search.clusters
                 # Each cluster's representative now also stands for its
                 # members (and, transitively, whatever those members already
                 # represented from levels above). Carry that forward so the
@@ -146,7 +147,8 @@ class TaxonomicMode2(BaseMode):
                 group_stats.append(GroupStat(
                     grouping=rank, group=group_prefix,
                     n_before=len(group_seqs), n_after=len(reps),
-                    clustered=True, cutoff=threshold,
+                    clustered=True, cutoff=search.threshold,
+                    trimmed_from=search.trimmed_from, note=search.note,
                     cutoff_counts=compute_diversity_curve(group_seqs, self.cfg),
                 ))
                 # Recurse into next level with the representatives

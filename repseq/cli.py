@@ -120,7 +120,17 @@ def _shared_options(fn):
     fn = click.option("--no-resolve", is_flag=True, default=False,
                       help="Skip database metadata resolution.")(fn)
     fn = click.option("--overflow", type=click.Choice(["keep", "trim"]), default="keep",
-                      help="Behaviour when a group exceeds n-per-group.")(fn)
+                      help="Behaviour when a group cannot be clustered to "
+                           "exactly n-per-group (cluster count moves in steps "
+                           "as identity changes). 'keep' returns whichever "
+                           "step is closer to the target, ties rounding up; "
+                           "'trim' takes the step above and diversity-selects "
+                           "down to exactly n-per-group. Either way, when "
+                           "only one side of the target is reachable that "
+                           "side is returned: a group that never splits "
+                           "returns fewer, one that never merges that far "
+                           "returns more. Ignored by 'global', which makes a "
+                           "single pass over everything.")(fn)
     fn = click.option(
         "--plot", is_flag=True, default=False,
         help=(
@@ -3383,7 +3393,7 @@ def run_doctor_cmd(config_path, no_network):
 @_shared_options
 @click.option("--threshold", "-T", default=None, type=float,
               help="Identity threshold for clustering (e.g. 0.90).")
-@click.option("--n-select", "-n", default=None, type=int,
+@click.option("--n-select", "-n", default=None, type=click.IntRange(min=1),
               help="Number of representative sequences to select.")
 def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
                segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf, annotate_table, annotate_field,threshold, n_select):
@@ -3433,7 +3443,7 @@ def run_global(config_path, input_paths, output_dir, prefix, threads, seed,
 @_shared_options
 @click.option("--rank", "-r", required=True,
               help="Taxonomic rank to group by (e.g. genus, family).")
-@click.option("--n-per-group", "-n", required=True, type=int,
+@click.option("--n-per-group", "-n", required=True, type=click.IntRange(min=1),
               help="Target representatives per taxonomic group.")
 def run_taxonomic1(config_path, input_paths, output_dir, prefix, threads, seed,
                    segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf, annotate_table, annotate_field,rank, n_per_group):
@@ -3527,7 +3537,7 @@ def run_taxonomic2(config_path, input_paths, output_dir, prefix, threads, seed,
 
 @main.command("host")
 @_shared_options
-@click.option("--n-per-host", "-n", required=True, type=int,
+@click.option("--n-per-host", "-n", required=True, type=click.IntRange(min=1),
               help="Target representatives per host organism.")
 def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
              segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf, annotate_table, annotate_field,n_per_host):
@@ -3571,7 +3581,7 @@ def run_host(config_path, input_paths, output_dir, prefix, threads, seed,
 
 @main.command("time")
 @_shared_options
-@click.option("--n-per-window", "-n", required=True, type=int,
+@click.option("--n-per-window", "-n", required=True, type=click.IntRange(min=1),
               help="Target representatives per time window.")
 @click.option("--window", default="year",
               help='Time window: "year", "decade", or a number (e.g. "5" for 5-year bins).')
@@ -3617,7 +3627,7 @@ def run_time(config_path, input_paths, output_dir, prefix, threads, seed,
 
 @main.command("geographic")
 @_shared_options
-@click.option("--n-per-country", "-n", required=True, type=int,
+@click.option("--n-per-country", "-n", required=True, type=click.IntRange(min=1),
               help="Target representatives per country.")
 def run_geographic(config_path, input_paths, output_dir, prefix, threads, seed,
                    segmented, dry_run, no_resolve, overflow, plot, phylo, per_protein_phylo, per_segment_phylo, source_override, alphabet_for_clustering, concatenate_markers, fast, verbose, pre_cluster_tree, protect_ids, pin_ids, exclude_ids, newick, pdf, annotate_table, annotate_field,n_per_country):
@@ -3679,7 +3689,7 @@ _METADATA_TABLE_HELP = (
               help="Field name to group by: a column of --metadata-table "
                    "(e.g. clade, genotype), a sequence attribute (host, "
                    "country, subtype, ...) or a taxonomy rank.")
-@click.option("--n-per-group", "-n", required=True, type=int,
+@click.option("--n-per-group", "-n", required=True, type=click.IntRange(min=1),
               help="Target representatives per group.")
 @click.option("--metadata-table", default=None,
               help=_METADATA_TABLE_HELP)
@@ -3691,7 +3701,9 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
                metadata_table, field_regex):
     """Custom metadata mode: group by any field or metadata table column.
 
-    Selects up to -n representatives per value of --field. To select per
+    Selects about -n representatives per value of --field (cluster count
+    moves in steps, so an exact -n is not always reachable; --overflow
+    says which side is taken). To select per
     influenza clade or genotype, classify your sequences first (e.g.
     Nextclade for H5 HA clades, GenoFLU for genotypes) and pass the result
     as --metadata-table:
@@ -3755,7 +3767,7 @@ def run_custom(config_path, input_paths, output_dir, prefix, threads, seed,
 @_shared_options
 @click.option("--fields", "-f", required=True,
               help="Comma-separated list of fields to combine (e.g. genus,host,decade).")
-@click.option("--n-per-group", "-n", required=True, type=int,
+@click.option("--n-per-group", "-n", required=True, type=click.IntRange(min=1),
               help="Target representatives per stratum.")
 @click.option("--metadata-table", default=None,
               help=_METADATA_TABLE_HELP)

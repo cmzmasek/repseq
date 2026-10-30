@@ -161,9 +161,9 @@ def test_binary_search_returns_clusters_with_members(make_seq):
         Cluster(cluster_id="c1", representative=seqs[6], members=list(seqs[7:10])),
     ]
     with patch("repseq.modes.taxonomic1.run_clustering", return_value=fake):
-        clusters, _ = _binary_search_threshold(
+        clusters = _binary_search_threshold(
             seqs, n_target=2, cfg=_base_cfg(), overflow="keep"
-        )
+        ).clusters
 
     assert all(isinstance(c, Cluster) for c in clusters)
     assert sorted(c.size for c in clusters) == [4, 6]
@@ -244,9 +244,9 @@ def test_binary_search_climbs_toward_target(make_seq):
         ]
 
     with patch("repseq.modes.taxonomic1.run_clustering", side_effect=fake_run_clustering):
-        reps, threshold = _binary_search_threshold(
+        reps = _binary_search_threshold(
             seqs, n_target=10, cfg=_base_cfg(), overflow="keep"
-        )
+        ).clusters
 
     # count ≈ threshold*20, so the target of 10 sits near threshold 0.5.
     # The search must land close to 10 — not undershoot to 1-3.
@@ -300,9 +300,9 @@ def test_binary_search_trim_enforces_exact_count(make_seq):
         ]
 
     with patch("repseq.modes.taxonomic1.run_clustering", side_effect=fake_run_clustering):
-        reps, _ = _binary_search_threshold(
+        reps = _binary_search_threshold(
             seqs, n_target=5, cfg=_base_cfg(), overflow="trim"
-        )
+        ).clusters
 
     assert len(reps) == 5
 

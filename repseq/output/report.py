@@ -93,6 +93,31 @@ def write_run_log(
         f"  Mode              : {result.mode}",
         f"  Representatives   : {len(result.representatives)}",
         f"  Clusters          : {len(result.clusters)}",
+    ]
+
+    # Per-group search notes. The same sentences are echoed while the run
+    # works, but a long run's console scrollback is gone by the time anyone
+    # asks why a stratum has 3 representatives instead of 5 — so the log
+    # keeps them.
+    search_notes = [
+        (gs.group, gs.note) for gs in (result.group_stats or []) if gs.note
+    ]
+    if search_notes:
+        lines += [
+            "",
+            "PER-GROUP THRESHOLD SEARCH",
+            "  Strata whose representative count could not land on the "
+            "request: cluster",
+            "  count moves in steps as the identity threshold changes, so "
+            "some requests have",
+            "  no exact answer. Every stratum's achieved count and identity "
+            "is in",
+            "  {prefix}_group_counts.tsv.",
+        ]
+        for group, note in search_notes:
+            lines.append(f"  {group}: {note}")
+
+    lines += [
         "",
         "OUTPUT FILES",
     ]
@@ -1348,6 +1373,12 @@ def write_group_counts_tsv(result: RunResult, path: Path) -> bool:
     settled on for that stratum, left blank when the stratum was small
     enough to keep without clustering (``clustered`` is then ``FALSE``).
 
+    A ``clusters_before_trim`` column appears when any stratum was pared by
+    ``--overflow trim``: clustering at that row's ``cutoff`` yields that
+    many clusters, which the diversity sampler then reduced to
+    ``stratum_size_after``. Without it the two cells read as a
+    contradiction.
+
     When ``clustering.diversity_curve_cutoffs`` is configured, each
     clustered stratum also carries cluster counts at those fixed
     cutoffs in trailing ``n_clusters_<c>`` columns (e.g.
@@ -1372,6 +1403,9 @@ def write_group_counts_tsv(result: RunResult, path: Path) -> bool:
             curve_cutoffs.update(gs.cutoff_counts.keys())
     sorted_cutoffs = sorted(curve_cutoffs, reverse=True)
     curve_cols = [f"n_clusters_{c:g}" for c in sorted_cutoffs]
+    # Same data-driven rule as the curve columns: the column shows up only
+    # on runs where a trim actually happened.
+    any_trim = any(gs.trimmed_from for gs in result.group_stats)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fh:
@@ -1379,6 +1413,8 @@ def write_group_counts_tsv(result: RunResult, path: Path) -> bool:
             "stratified_by\tstratum\tstratum_size_before\t"
             "stratum_size_after\tclustered\tcutoff"
         )
+        if any_trim:
+            header += "\tclusters_before_trim"
         if curve_cols:
             header += "\t" + "\t".join(curve_cols)
         fh.write(header + "\n")
@@ -1389,6 +1425,10 @@ def write_group_counts_tsv(result: RunResult, path: Path) -> bool:
                 f"{gs.n_before}\t{gs.n_after}\t"
                 f"{_tsv_bool(gs.clustered)}\t{cutoff}"
             )
+            if any_trim:
+                row += (
+                    f"\t{gs.trimmed_from}" if gs.trimmed_from else "\t"
+                )
             if curve_cols:
                 cells = []
                 for c in sorted_cutoffs:

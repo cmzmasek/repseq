@@ -5,7 +5,8 @@ from unittest.mock import patch
 
 import pytest
 
-from repseq.models import Cluster, QCReport, RunResult
+from repseq.models import Cluster, GroupStat, QCReport, RunResult
+from repseq.modes.taxonomic1 import THRESHOLD_RESOLUTION
 from repseq.output.summary import (
     detect_tool_versions,
     render_summary,
@@ -1147,3 +1148,65 @@ def test_render_summary_describes_per_segment_section_when_2h_ran(
     assert "{prefix}_per_segment/" in md
     # Reassortment is the headline motivation — verify it's mentioned.
     assert "reassortment" in md
+
+
+# ---------------------------------------------------------------------------
+# Per-group threshold-search paragraph (v0.80.0)
+# ---------------------------------------------------------------------------
+
+def _grouped_result(make_seq, overflow="keep", mode="custom"):
+    """A result shaped like one of the seven bisecting modes: a clustered
+    stratum plus an ``overflow`` key in the config snapshot."""
+    result = _result(make_seq, n_reps=3, mode=mode)
+    result.group_stats = [GroupStat(
+        grouping="clade", group="2.3.2.1c", n_before=27, n_after=3,
+        clustered=True, cutoff=0.9941,
+    )]
+    result.config_snapshot = {"field": "clade", "n_per_group": 5,
+                              "overflow": overflow}
+    return result
+
+
+def test_summary_describes_the_threshold_search_for_a_grouped_mode(make_seq, tmp_path):
+    md = render_summary(_base_cfg(tmp_path), _qc(),
+                        _grouped_result(make_seq), ["a.fasta"])
+    assert "cluster count is a step function of the identity threshold" in md
+    assert "resolution of 0.0005 identity units" in md
+    assert "ties resolved upward (`--overflow keep`)" in md
+    # The single-bracket case must be stated, not implied by the closeness
+    # rule: only one side is reachable for a clonal clade.
+    assert "Where only one side was attainable" in md
+    assert "`{prefix}_group_counts.tsv`" in md
+
+
+def test_summary_threshold_search_describes_trim_when_trim_ran(make_seq, tmp_path):
+    md = render_summary(_base_cfg(tmp_path), _qc(),
+                        _grouped_result(make_seq, overflow="trim"), ["a.fasta"])
+    assert "pared to exactly the target" in md
+    assert "`--overflow trim`" in md
+    assert "--overflow keep" not in md
+
+
+def test_summary_omits_the_threshold_search_paragraph_for_global(make_seq, tmp_path):
+    """`global -T` runs ONE fixed-threshold pass and records clustered=True
+    for it, so gating the paragraph on `clustered` claimed a bracketed
+    search, a resolution and an --overflow setting that never existed."""
+    result = _result(make_seq, n_reps=3, mode="global")
+    result.group_stats = [GroupStat(
+        grouping="global", group="(all)", n_before=100, n_after=3,
+        clustered=True, cutoff=0.95,
+    )]
+    result.config_snapshot = {"threshold": 0.95}
+
+    md = render_summary(_base_cfg(tmp_path), _qc(), result, ["a.fasta"])
+    assert "step function of the identity threshold" not in md
+    assert "identity units" not in md
+    assert "--overflow" not in md
+
+
+def test_summary_threshold_search_quotes_the_shared_resolution_constant(make_seq, tmp_path):
+    """The prose must not restate the number: a change to the search's
+    constant has to move the Methods text with it."""
+    md = render_summary(_base_cfg(tmp_path), _qc(),
+                        _grouped_result(make_seq), ["a.fasta"])
+    assert f"resolution of {THRESHOLD_RESOLUTION:g} identity units" in md

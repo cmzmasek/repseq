@@ -136,6 +136,84 @@ def test_write_group_counts_tsv_no_curve_columns_when_feature_off(tmp_path):
     assert lines[1] == "genus\tA\t10\t5\tTRUE\t0.9000"
 
 
+def test_write_group_counts_tsv_records_the_pre_trim_cluster_count(tmp_path):
+    """After an --overflow trim, `cutoff` and `stratum_size_after` describe
+    different moments: clustering at that identity yields the pre-trim
+    count, which the diversity sampler then pares. Without the extra
+    column the two cells read as a contradiction."""
+    result = RunResult(
+        mode="custom",
+        group_stats=[
+            GroupStat(grouping="clade", group="2.3.2.1c",
+                      n_before=27, n_after=5, clustered=True, cutoff=0.9945,
+                      trimmed_from=7),
+            GroupStat(grouping="clade", group="2.1.2",
+                      n_before=7, n_after=4, clustered=True, cutoff=0.9931),
+        ],
+    )
+    path = tmp_path / "g.tsv"
+    assert write_group_counts_tsv(result, path) is True
+    lines = path.read_text().splitlines()
+    assert lines[0] == (
+        "stratified_by\tstratum\tstratum_size_before\tstratum_size_after\t"
+        "clustered\tcutoff\tclusters_before_trim"
+    )
+    assert lines[1] == "clade\t2.3.2.1c\t27\t5\tTRUE\t0.9945\t7"
+    # No trim on this stratum: the cell is blank, not 0 or a repeat of
+    # stratum_size_after.
+    assert lines[2] == "clade\t2.1.2\t7\t4\tTRUE\t0.9931\t"
+
+
+def test_write_group_counts_tsv_omits_trim_column_without_a_trim(tmp_path):
+    result = RunResult(
+        mode="custom",
+        group_stats=[
+            GroupStat(grouping="clade", group="A",
+                      n_before=10, n_after=5, clustered=True, cutoff=0.9),
+        ],
+    )
+    path = tmp_path / "g.tsv"
+    write_group_counts_tsv(result, path)
+    assert "clusters_before_trim" not in path.read_text()
+
+
+def test_write_run_log_keeps_the_per_group_search_notes(tmp_path):
+    """The console says why a stratum fell short while the run works, but a
+    long run's scrollback is gone by the time anyone asks — so the notes
+    land in the log."""
+    result = RunResult(
+        mode="custom",
+        group_stats=[
+            GroupStat(grouping="clade", group="2.1.2",
+                      n_before=7, n_after=4, clustered=True, cutoff=0.9931,
+                      note="kept 4 of 5 requested — no threshold split this "
+                           "group past 4"),
+            GroupStat(grouping="clade", group="2.3.4.4b",
+                      n_before=15512, n_after=5, clustered=True, cutoff=0.99),
+        ],
+    )
+    log_path = tmp_path / "x_run.log"
+    write_run_log(
+        result, QCReport(), {"output": {"dir": str(tmp_path), "prefix": "x"}},
+        input_paths=["in.fasta"], output_files=[], log_path=log_path,
+    )
+    text = log_path.read_text()
+    assert "PER-GROUP THRESHOLD SEARCH" in text
+    assert "2.1.2: kept 4 of 5 requested" in text
+    # Strata that landed on the request add no noise.
+    assert "2.3.4.4b" not in text
+
+
+def test_write_run_log_omits_the_search_section_when_nothing_to_say(tmp_path):
+    log_path = tmp_path / "x_run.log"
+    write_run_log(
+        RunResult(mode="global"), QCReport(),
+        {"output": {"dir": str(tmp_path), "prefix": "x"}},
+        input_paths=["in.fasta"], output_files=[], log_path=log_path,
+    )
+    assert "PER-GROUP THRESHOLD SEARCH" not in log_path.read_text()
+
+
 def test_write_representative_isolates_tsv_emits_isolate_columns(tmp_path):
     """A CONCAT|<isolate_id> rep with concat_segments populated must
     produce: n_segments, comma-joined segments, comma-joined accessions

@@ -21,6 +21,7 @@ from .. import __version__ as REPSEQ_VERSION
 from ..clustering.marker import parse_length_bounds, require_met_start_from_cfg
 from ..config import get_virus_config
 from ..models import QCReport, RunResult
+from ..modes.taxonomic1 import THRESHOLD_RESOLUTION
 
 
 # ---------------------------------------------------------------------------
@@ -962,6 +963,7 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
         )
 
     mode_desc = _describe_mode(result.mode, cfg)
+    mode_desc += _threshold_search_sentence(result)
     rep_unit = "representative isolates" if segmented else "representative sequences"
 
     diversity_cutoffs = cluster_cfg.get("diversity_curve_cutoffs") or []
@@ -1315,6 +1317,51 @@ def _group_assignment_sentence(result: RunResult, segmented: bool) -> str:
         f"listed in `{{prefix}}_group_assignments.tsv`."
     )
     return out
+
+
+def _threshold_search_sentence(result: RunResult) -> str:
+    """How the per-group threshold search resolved a target it could not hit
+    exactly — a Methods claim, because it decides how many representatives
+    each stratum actually contributed.
+
+    Keyed on ``overflow`` being present in the mode's config snapshot, which
+    is true of exactly the seven modes that bisect per group. ``clustered``
+    cannot carry that: ``global`` sets it for its single fixed-threshold
+    pass, so gating on it described a bracketed search, a resolution and an
+    ``--overflow`` setting to every ``global -T`` run, none of which exist
+    there.
+    """
+    snapshot = result.config_snapshot or {}
+    if "overflow" not in snapshot:
+        return ""
+    if not (result.group_stats and any(g.clustered for g in result.group_stats)):
+        return ""
+    overflow = snapshot.get("overflow", "keep")
+    if overflow == "trim":
+        rule = (
+            "the smallest count above it was taken and pared to exactly the "
+            "target by the same maximum-diversity sampler used elsewhere "
+            "(`--overflow trim`)"
+        )
+    else:
+        rule = (
+            "whichever of the two was closer to the target was kept, ties "
+            "resolved upward (`--overflow keep`)"
+        )
+    return (
+        " Because cluster count is a step function of the identity "
+        "threshold, an exact target is not always attainable: the search "
+        f"bisected to a resolution of {THRESHOLD_RESOLUTION:g} identity "
+        "units and bracketed the target between the nearest attainable "
+        "counts below and above it, and where no threshold yielded the "
+        f"target exactly, {rule}. Where only one side was attainable it was "
+        "taken whatever its distance from the target, so a stratum whose "
+        "cluster count never reaches the target (a clonal clade that does "
+        "not split at any identity) contributed fewer representatives than "
+        "requested, and one whose count never falls to it contributed more. "
+        "Every stratum's achieved count, and the identity it was clustered "
+        "at, is recorded in `{prefix}_group_counts.tsv`."
+    )
 
 
 def _describe_mode(mode: str, cfg: dict) -> str:

@@ -97,6 +97,41 @@ def basis_sequence(seq: Sequence, use_protein: bool) -> str:
     return seq.sequence or ""
 
 
+def nearest_by_kmer(
+    queries: list[Sequence],
+    targets: list[Sequence],
+    cfg: Optional[dict] = None,
+) -> list[int]:
+    """For each query, the index of the closest target by k-mer distance.
+
+    Uses the same representation, k and containment distance as
+    :func:`select_diverse` (see :func:`kmer_basis`), so "closest" means the
+    same thing to both — which matters where the two run back to back, as
+    ``--overflow trim`` does when it folds the clusters it did not keep into
+    the ones it did. Ties go to the earliest target, keeping the assignment
+    deterministic for a given input order. Returns ``[]`` when either side
+    is empty.
+    """
+    if not queries or not targets:
+        return []
+    if cfg is not None:
+        use_protein, k = kmer_basis(list(queries) + list(targets), cfg)
+    else:
+        use_protein, k = False, _PROTEIN_KMER
+    target_sets = [_kmer_set(basis_sequence(t, use_protein), k) for t in targets]
+    assignment: list[int] = []
+    for query in queries:
+        q_set = _kmer_set(basis_sequence(query, use_protein), k)
+        best_i = 0
+        best_d: Optional[float] = None
+        for i, t_set in enumerate(target_sets):
+            d = _containment_distance(q_set, t_set)
+            if best_d is None or d < best_d:
+                best_i, best_d = i, d
+        assignment.append(best_i)
+    return assignment
+
+
 # ---------------------------------------------------------------------------
 # MaxMin diversity selection
 # ---------------------------------------------------------------------------

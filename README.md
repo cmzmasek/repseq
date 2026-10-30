@@ -153,17 +153,35 @@ each group*. All modes take `-i` (input), `-c` (config), and most take `-n`
 | Command | What it does | Use it when… |
 | --- | --- | --- |
 | `global` | One big pass over everything. Either cluster at a similarity threshold `-T` (e.g. `-T 0.95` = group sequences ≥95% identical), or just ask for `-n` maximally-different sequences. | You want a flat, even sampling of the whole dataset. |
-| `taxonomic1` | Up to `-n` sequences per taxonomic rank — `--rank genus`, `family`, `species`, etc. | You want even coverage across the tree of life (or of viruses). |
+| `taxonomic1` | About `-n` sequences per taxonomic rank — `--rank genus`, `family`, `species`, etc. | You want even coverage across the tree of life (or of viruses). |
 | `taxonomic2` | Like `taxonomic1` but **nested**: e.g. 20 per family, then 5 per genus within each. | One rank isn't enough — you want a hierarchy. |
-| `host` | Up to `-n` sequences per host organism. | You care which host the virus came from. |
-| `time` | Up to `-n` per time window — `--window year`, `decade`, or a number like `5` for 5-year bins. | You want even coverage across collection dates. |
-| `geographic` | Up to `-n` per country. | You want even geographic coverage. |
-| `custom` | Up to `-n` per *any* field — a sequence attribute, a taxonomy rank, or a column in a metadata spreadsheet you provide (e.g. an influenza clade or genotype — see [Selecting per clade or genotype](#selecting-per-clade-or-genotype-metadata-tables)). | Your grouping isn't one of the built-ins. |
-| `hybrid` | Up to `-n` per *combination* of fields, e.g. `--fields genus,host,decade`. | You want a balanced grid across several variables at once. |
+| `host` | About `-n` sequences per host organism. | You care which host the virus came from. |
+| `time` | About `-n` per time window — `--window year`, `decade`, or a number like `5` for 5-year bins. | You want even coverage across collection dates. |
+| `geographic` | About `-n` per country. | You want even geographic coverage. |
+| `custom` | About `-n` per *any* field — a sequence attribute, a taxonomy rank, or a column in a metadata spreadsheet you provide (e.g. an influenza clade or genotype — see [Selecting per clade or genotype](#selecting-per-clade-or-genotype-metadata-tables)). | Your grouping isn't one of the built-ins. |
+| `hybrid` | About `-n` per *combination* of fields, e.g. `--fields genus,host,decade`. | You want a balanced grid across several variables at once. |
 
 **Within each group**, if it already has `-n` or fewer sequences, all are kept.
 If it's bigger, `repseq` clusters it down to about `-n` representatives. Add
 `--overflow trim` if you need *exactly* `-n`.
+
+Cluster count moves in steps as the identity threshold changes, so an exact
+`-n` is not always on offer: a group can jump straight from 1 cluster to 7
+with nothing in between. The search brackets your target from both sides and
+then, by default (`--overflow keep`), keeps whichever side is closer — 1 → 7
+for `-n 5` gives you 7, while 4 → 200 gives you 4. With `--overflow trim` the
+upper bracket is taken and pared down to exactly `-n`.
+
+Sometimes only one side of your target is reachable at all, and then that
+side is used however far away it is — so a group whose cluster count never
+reaches `-n` returns fewer (a clonal clade that never splits returns 1), and
+one whose count never drops to `-n` returns more, which `--overflow trim`
+cannot fix either since there is no upper bracket to pare. Both cases print
+a line saying which step the group got stuck on, and because a long run's
+console output scrolls away, the same sentences are collected under
+**PER-GROUP THRESHOLD SEARCH** in `{prefix}_run.log`. Every group's achieved
+count and the identity it was clustered at are in
+`{prefix}_group_counts.tsv`.
 
 The `-n` "maximally-different" selection (`global -n`, and the `--overflow trim`
 step) is an alignment-free **MaxMin** sampler over k-mer distance, run on the
@@ -403,7 +421,7 @@ flags you passed. At a glance:
 | `{prefix}_overrides.tsv` | when any sequence was force-kept | Force-keep audit: each sequence `overrides.protect_qc` rescued from a QC stage, with the reason it would otherwise have been dropped. |
 | `{prefix}_force_selected.tsv` | when any sequence was force-selected | Force-select audit: each `overrides.force_select` / `--pin-ids` pin and the action taken. |
 | `{prefix}_excluded.tsv` | when any sequence was blocklisted | Input-blocklist audit: each `overrides.exclude` / `--exclude-ids` record dropped on load, plus any exclude id that matched nothing. |
-| `{prefix}_group_counts.tsv` | yes | One row per stratum: in / out / clustered / cutoff. |
+| `{prefix}_group_counts.tsv` | yes | One row per stratum: in / out / clustered / cutoff (+ `clusters_before_trim` after a trim). |
 | `{prefix}_group_assignments.tsv` | `custom` / `hybrid` modes | Each isolate's (or sequence's) group label, where it came from (metadata table, attribute, taxonomy, header regex), and whether it became a representative. |
 | `{prefix}_clusters.tsv` | yes | Which sequences ended up grouped, who represents whom. |
 | `{prefix}_representatives.fasta` | non-segmented | Selected representative sequences. |
@@ -649,6 +667,10 @@ together, or re-running selection with a different priority without re-clusterin
 One row per stratum. Columns: `stratified_by`, `stratum`,
 `stratum_size_before`, `stratum_size_after`, `clustered` (did the
 binary-search clusterer run?), `cutoff` (the identity threshold it settled on).
+Clustering a stratum at its own `cutoff` reproduces `stratum_size_after`
+clusters — except on an `--overflow trim` run, which adds a
+`clusters_before_trim` column: clustering reproduces that many, and the
+diversity sampler then pares them to `stratum_size_after`.
 
 When `clustering.diversity_curve_cutoffs` is non-empty (default
 `[0.99, 0.95, 0.9, 0.8, 0.7]`), every clustered stratum also carries trailing
@@ -758,7 +780,10 @@ Plain-text record: version, date, exact command line, every active config
 setting, per-step QC counts, the mode's results, and the output file list. Save
 it with your data. The "QC SUMMARY" block also shows the per-segment
 length-filter breakdown (`L too short : N`, …), so you can tell *which* segment
-caused isolates to fall out.
+caused isolates to fall out. On a grouped run, a "PER-GROUP THRESHOLD SEARCH"
+block lists every stratum whose representative count could not land on `-n`,
+with the step it got stuck on — the same lines the console prints while the
+run works, kept for after the scrollback is gone.
 
 #### `{prefix}_config_repseq<ver>.yaml` — sanitized effective-config snapshot
 
