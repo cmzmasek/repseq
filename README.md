@@ -672,6 +672,10 @@ clusters — except on an `--overflow trim` run, which adds a
 `clusters_before_trim` column: clustering reproduces that many, and the
 diversity sampler then pares them to `stratum_size_after`.
 
+Every count in this file is **before any `force_select` pins**, which are
+applied after clustering, so these rows can sum to fewer than the final
+representative count; see `{prefix}_force_selected.tsv` for the difference.
+
 When `clustering.diversity_curve_cutoffs` is non-empty (default
 `[0.99, 0.95, 0.9, 0.8, 0.7]`), every clustered stratum also carries trailing
 `n_clusters_<c>` columns — the cluster count at that fixed threshold. This is a
@@ -2235,6 +2239,7 @@ the marker architectures they support:
 | `Phenuiviridae` | the family alone, with the `Phlebovirus_*` glycoprotein profiles |
 | `Picornaviridae` | the family, with polyprotein peptide slicing |
 | `Filoviridae` | the family |
+| `Orthoherpesviridae` | the family formerly called *Herpesviridae* (alpha-, beta-, gammaherpesviruses; NCBI renamed it): 32 profiles covering the 30 proteins common to the whole family, found by HMM because each virus names its genes differently (the DNA polymerase is UL30 in HSV, UL54 in HCMV, BALF5 in EBV, ORF9 in KSHV) |
 
 Two cautions, both learned from real runs. A profile that sounds pan-clade often
 is not: `Flavi_NS5` matches only *Orthoflavivirus*, and `Bunya_G1`/`G2` only

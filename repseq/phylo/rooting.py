@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import sys
 from typing import Optional
 
 from Bio.Phylo.BaseTree import Clade, Tree
@@ -394,6 +395,68 @@ def _resolve_outgroup_short_ids(
     return result
 
 
+def _best_outgroup_branch(tree: Tree, wanted: set) -> tuple[Clade, int]:
+    """Pick the branch that best separates the outgroup from the rest.
+
+    The tree a builder hands us is rooted arbitrarily (IQ-TREE roots on
+    its first sequence), so "the MRCA of the outgroup" is meaningless
+    as parsed: if the outgroup holds that first sequence its MRCA is the
+    root and re-rooting on it does nothing. A branch, by contrast, is a
+    property of the UNROOTED tree. Every branch splits the leaves in two;
+    we take the branch whose outgroup-bearing side holds every outgroup
+    leaf and the fewest others. Returns ``(clade_below_branch, extra)``
+    where ``extra`` is the number of non-outgroup leaves on the outgroup
+    side (0 when the outgroup is a clean group).
+    """
+    n_total = 0
+    n_out_total = 0
+    counts: dict[int, tuple[int, int]] = {}
+    for clade in tree.find_clades(order="postorder"):
+        if clade.is_terminal():
+            n, k = 1, (1 if clade.name in wanted else 0)
+            n_total += 1
+            n_out_total += k
+        else:
+            n = sum(counts[id(c)][0] for c in clade.clades)
+            k = sum(counts[id(c)][1] for c in clade.clades)
+        counts[id(clade)] = (n, k)
+    best: Optional[Clade] = None
+    best_extra = n_total + 1
+    for clade in tree.find_clades():
+        if clade is tree.root:
+            continue
+        n, k = counts[id(clade)]
+        if k == n_out_total:          # outgroup entirely below this branch
+            extra = n - k
+        elif k == 0:                  # outgroup entirely above this branch
+            extra = (n_total - n) - n_out_total
+        else:
+            continue
+        if extra < best_extra:
+            best, best_extra = clade, extra
+    return best, best_extra
+
+
+def _root_on_branch(tree: Tree, clade: Clade) -> None:
+    """Place the root at the middle of the branch above ``clade``.
+
+    Passing ``outgroup_branch_length`` matters: without it Bio.Phylo makes
+    an internal ``clade`` itself the new root, which yields a three-way
+    root with the outgroup drawn split across two root branches.
+    """
+    root = tree.root
+    if len(root.clades) == 2 and clade in root.clades:
+        return  # already rooted on this very branch
+    half = (clade.branch_length or 0.0) / 2.0
+    tree.root_with_outgroup(clade, outgroup_branch_length=half)
+    # Bio.Phylo leaves the FULL original length on the far side when the
+    # branch hung directly off the old root, lengthening the tree by half
+    # a branch. Both halves are known, so set them outright.
+    if len(tree.root.clades) == 2:
+        for child in tree.root.clades:
+            child.branch_length = half
+
+
 def _outgroup_root(
     tree: Tree,
     reps_by_short_id: dict[str, Sequence],
@@ -403,10 +466,13 @@ def _outgroup_root(
     """Root by a user-specified outgroup (single accession or a clade).
 
     Returns the rooted copy on success, ``None`` if the spec resolves to
-    no leaves on the tree (the caller's chain then falls back to
-    taxonomy/MAD/midpoint). When multiple leaves resolve, the tree is
-    rooted on their MRCA so the user can name several accessions, or a
-    whole taxon via ``outgroup_rank``, as the outgroup clade.
+    no leaves on the tree, or to ALL of them (the caller then falls back
+    to midpoint). When several leaves resolve, the root goes on the
+    branch separating them from every other leaf (see
+    ``_best_outgroup_branch``), giving an ordinary two-way root. If the
+    outgroup leaves are not a single group on this tree, the root goes on
+    the branch enclosing them with the fewest other leaves and a stderr
+    note says so.
     """
     wanted = _resolve_outgroup_short_ids(
         outgroup_spec, outgroup_rank, reps_by_short_id,
@@ -414,19 +480,86 @@ def _outgroup_root(
     if not wanted:
         return None
     rooted = copy.deepcopy(tree)
-    targets = [t for t in rooted.get_terminals() if t.name in wanted]
+    terminals = rooted.get_terminals()
+    targets = [t for t in terminals if t.name in wanted]
     if not targets:
+        return None
+    if len(targets) == len(terminals):
+        print(
+            "[phylo] outgroup rooting: the configured outgroup matches "
+            "EVERY leaf of this tree, so there is nothing to root "
+            "against; falling back to midpoint.",
+            file=sys.stderr,
+        )
         return None
     try:
         if len(targets) == 1:
             rooted.root_with_outgroup(targets[0])
         else:
-            mrca = rooted.common_ancestor(targets)
-            rooted.root_with_outgroup(mrca)
+            branch, extra = _best_outgroup_branch(
+                rooted, {t.name for t in targets},
+            )
+            if branch is None:
+                return None
+            _root_on_branch(rooted, branch)
+            if extra:
+                print(
+                    f"[phylo] outgroup rooting: the {len(targets)} outgroup "
+                    "sequences do not form a single group on this tree. "
+                    "Rooted on the smallest group that holds all of them, "
+                    f"which also holds {extra} other sequence(s) — check "
+                    "the tree before reading its root.",
+                    file=sys.stderr,
+                )
     except Exception as exc:
         logger.info("[phylo] outgroup rooting raised: %s", exc)
         return None
     return rooted
+
+
+def _split_key(leaves: frozenset, all_leaves: frozenset) -> frozenset:
+    """One canonical name for a branch: the smaller side of its split
+    (ties broken by sorted names), so a branch has the same key however
+    the tree is rooted."""
+    other = all_leaves - leaves
+    return min(leaves, other, key=lambda s: (len(s), sorted(s)))
+
+
+def _restore_supports(original: Tree, rooted: Tree) -> None:
+    """Put every support value back on the branch it was estimated for.
+
+    Bio.Phylo stores a support value on the NODE below a branch. When a
+    tree is re-rooted, the branches between the old and the new root
+    reverse direction, but the values stay on their nodes — so each one
+    ends up describing the neighbouring branch. Supports belong to
+    branches (splits of the leaf set), which re-rooting cannot change,
+    so we read split → support off the tree as built and write it back.
+    Both root children of a two-way root sit on the same branch and get
+    the same value.
+    """
+    all_leaves = frozenset(t.name for t in original.get_terminals())
+    below: dict[int, frozenset] = {}
+    support: dict[frozenset, object] = {}
+    for clade in original.find_clades(order="postorder"):
+        if clade.is_terminal():
+            below[id(clade)] = frozenset([clade.name])
+            continue
+        leaves = frozenset().union(*(below[id(c)] for c in clade.clades))
+        below[id(clade)] = leaves
+        if clade is original.root or clade.confidence is None:
+            continue
+        support.setdefault(_split_key(leaves, all_leaves), clade.confidence)
+    below = {}
+    for clade in rooted.find_clades(order="postorder"):
+        if clade.is_terminal():
+            below[id(clade)] = frozenset([clade.name])
+            continue
+        leaves = frozenset().union(*(below[id(c)] for c in clade.clades))
+        below[id(clade)] = leaves
+        if clade is rooted.root:
+            clade.confidence = None
+            continue
+        clade.confidence = support.get(_split_key(leaves, all_leaves))
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +588,36 @@ def root_tree(
     through to midpoint rather than raising — a usable tree is more
     valuable than a perfect one.
     """
+    rooted, used = _root_tree(
+        tree, reps_by_short_id, method,
+        coverage_threshold=coverage_threshold,
+        outgroup=outgroup, outgroup_rank=outgroup_rank,
+    )
+    if rooted is not tree:
+        # Re-rooting leaves support values one branch off along the path
+        # between the old and new root; put them back (see the helper).
+        try:
+            _restore_supports(tree, rooted)
+        except Exception as exc:  # never lose a tree over its supports
+            print(
+                f"[phylo] WARNING: could not re-check branch supports "
+                f"after rooting ({exc}); support values near the root may "
+                "be misplaced.",
+                file=sys.stderr,
+            )
+    return rooted, used
+
+
+def _root_tree(
+    tree: Tree,
+    reps_by_short_id: dict[str, Sequence],
+    method: str = "auto",
+    *,
+    coverage_threshold: float = 0.5,
+    outgroup=None,
+    outgroup_rank=None,
+) -> tuple[Tree, str]:
+    """The rooting chain itself; ``root_tree`` wraps it."""
     if method not in VALID_METHODS:
         method = "auto"
     if method == "none":

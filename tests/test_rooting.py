@@ -244,3 +244,96 @@ def test_outgroup_rooting_falls_back_to_midpoint_on_no_match():
         tree, reps, method="outgroup", outgroup="DOES_NOT_EXIST",
     )
     assert used in ("midpoint", "none")
+
+
+# ---------------------------------------------------------------------------
+# Outgroup rooting must actually move the root (2026-11-13: the tests above
+# only checked `used == "outgroup"`, so a no-op rooting passed them all)
+# ---------------------------------------------------------------------------
+
+def _root_sides(tree):
+    return sorted(
+        sorted(t.name for t in c.get_terminals()) for c in tree.root.clades
+    )
+
+
+def _split_supports(tree):
+    leaves = frozenset(t.name for t in tree.get_terminals())
+    out = {}
+    for c in tree.get_nonterminals():
+        if c is tree.root:
+            continue
+        s = frozenset(t.name for t in c.get_terminals())
+        s = min(s, leaves - s, key=lambda x: (len(x), sorted(x)))
+        if len(s) > 1:
+            out.setdefault(s, set()).add(c.confidence)
+    return out
+
+
+def test_outgroup_holding_the_builders_first_leaf_still_roots():
+    """IQ-TREE roots its output on the first sequence. When that sequence
+    belongs to the outgroup, the outgroup's MRCA is the root as parsed and
+    re-rooting on it used to do nothing (Orthoherpesviridae 2026-11-13)."""
+    tree = _tree("(A:0.1,B:0.1,(C:0.1,(D:0.1,(E:0.1,F:0.1):0.2):0.2):0.4);")
+    reps = {
+        sid: _seq(sid, family=("Out" if sid in "AB" else "In"))
+        for sid in "ABCDEF"
+    }
+    before = tree.total_branch_length()
+    out, used = root_tree(
+        tree, reps, method="outgroup", outgroup_rank={"family": "Out"},
+    )
+    assert used == "outgroup"
+    assert _root_sides(out) == [["A", "B"], ["C", "D", "E", "F"]]
+    assert abs(out.total_branch_length() - before) < 1e-9
+
+
+def test_clade_outgroup_gives_a_two_way_root():
+    """An internal-clade outgroup used to become the root NODE itself: a
+    three-way root with the outgroup split across two root branches."""
+    tree = _tree("(A:0.1,B:0.1,((C:0.1,D:0.1):0.3,(E:0.1,F:0.1):0.3):0.2);")
+    reps = {sid: _seq_with_acc(sid, f"AB00{i}") for i, sid in enumerate("ABCDEF", 1)}
+    out, used = root_tree(
+        tree, reps, method="outgroup", outgroup=["AB003", "AB004"],
+    )
+    assert used == "outgroup"
+    assert _root_sides(out) == [["A", "B", "E", "F"], ["C", "D"]]
+
+
+def test_scattered_outgroup_warns(capsys):
+    tree = _tree("((A:0.1,B:0.1):0.3,(C:0.1,D:0.1):0.3,(E:0.1,F:0.1):0.3);")
+    reps = {sid: _seq_with_acc(sid, f"AB00{i}") for i, sid in enumerate("ABCDEF", 1)}
+    _, used = root_tree(
+        tree, reps, method="outgroup", outgroup=["AB001", "AB003"],
+    )
+    assert used == "outgroup"
+    assert "do not form a single group" in capsys.readouterr().err
+
+
+def test_outgroup_matching_every_leaf_falls_back(capsys):
+    tree = _tree("((A:0.1,B:0.1):0.3,(C:0.1,D:0.1):0.3);")
+    reps = {sid: _seq(sid, family="Same") for sid in "ABCD"}
+    _, used = root_tree(
+        tree, reps, method="outgroup", outgroup_rank={"family": "Same"},
+    )
+    assert used in ("midpoint", "none")
+    assert "EVERY leaf" in capsys.readouterr().err
+
+
+def test_rerooting_keeps_each_support_on_its_own_branch():
+    """Bio.Phylo keeps a support on the node below a branch, so re-rooting
+    shifts every value on the old-root-to-new-root path by one branch."""
+    tree = _tree(
+        "(A:0.1,B:0.1,(C:0.1,(D:0.1,(E:0.1,(F:0.1,(G:0.1,H:0.1)"
+        "60:0.2)70:0.2)80:0.2)90:0.2)95:0.2);"
+    )
+    reps = {sid: _seq_with_acc(sid, f"AB00{i}") for i, sid in enumerate("ABCDEFGH", 1)}
+    want = _split_supports(tree)
+    for kwargs in (
+        {"method": "outgroup", "outgroup": ["AB007", "AB008"]},
+        {"method": "outgroup", "outgroup": "AB008"},
+        {"method": "midpoint"},
+        {"method": "mad"},
+    ):
+        out, _ = root_tree(tree, reps, **kwargs)
+        assert _split_supports(out) == want, kwargs
