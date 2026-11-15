@@ -1757,7 +1757,11 @@ any `overrides.ids` / `overrides.ids_file`, and turns its flag on for that run.
   protected record cannot end up half-exempt. (It was called `marker_length` in
   v0.76.0; the old token is now a config error that names the new one.) A record
   protected from `marker_quality` keeps its real protein everywhere: in clustering, in the
-  per-protein FASTA and in the trees.
+  per-protein FASTA and in the trees. A record protected from `hmm` is clustered
+  on its longest protein when the profile does not recognise its marker; with
+  `concatenate_markers` it is clustered on the markers the profiles do
+  recognise, and the unrecognised one is left out of the clustering string and
+  of that marker's FASTA and tree.
 - **Segmented completeness is deliberately *not* protectable.** Protection can't
   synthesize a missing segment, so a protected isolate missing a segment still
   drops (it can't be concatenated or treed) — with a distinct message rather than
@@ -2880,7 +2884,7 @@ that license; it comes with **no warranty**. The full license text is in the
 
 ## Status
 
-Current: **`v0.81.1`**.
+Current: **`v0.81.2`**.
 
 **Selection.** All 8 selection modes, including grouping by a column of your own
 metadata table (`--metadata-table`), so representatives can be chosen per

@@ -305,3 +305,78 @@ def test_concatenate_drops_isolate_missing_one_hmm_marker(make_seq):
     assert report.removed_hmm_failed == 1
     assert report.removed_hmm_by_marker.get("Nucleocapsid") == 1
     assert any("hmm_failed:Nucleocapsid" in d["reason"] for d in report.details)
+
+
+# ---------------------------------------------------------------------------
+# `hmm` protection survives marker selection (non-segmented backstop)
+# ---------------------------------------------------------------------------
+
+
+class _Policy:
+    """Minimal stand-in for ``overrides.ProtectionPolicy``."""
+
+    def __init__(self, ids, stages):
+        self._ids, self._stages = set(ids), set(stages)
+
+    def protects(self, seq, stage):
+        return stage in self._stages and seq.id in self._ids
+
+
+def test_concatenate_keeps_hmm_protected_sequence_on_its_identified_markers(make_seq):
+    """A sequence protected against `hmm` used to be kept by the HMM QC
+    stage and then silently re-dropped here. It now clusters on the markers
+    the gate does identify; the unprotected twin still drops."""
+    pinned = make_seq("pinned", "ACGT")
+    pinned.proteins = [_spike_cds("P_S2")]  # no nucleocapsid CDS
+    plain = make_seq("plain", "ACGT")
+    plain.proteins = [_spike_cds("P_S3")]
+    report = QCReport()
+    kept = populate_protein_sequences(
+        [pinned, plain], _SPIKE_N_SPECS, report,
+        hmm_active=True, concatenate=True,
+        policy=_Policy({"pinned"}, {"hmm"}),
+    )
+    assert kept == [pinned]
+    # Only the identified marker — never a longest-CDS stand-in.
+    assert pinned.protein_sequence == "S" * 1200
+    assert pinned.marker_protein_ids == ["P_S2"]
+    assert report.removed_hmm_failed == 1
+
+
+def test_hmm_protection_needs_the_hmm_stage_and_a_usable_marker(make_seq):
+    """Protection against another stage does not rescue an HMM failure, and
+    a protected sequence with no identifiable marker at all still drops."""
+    other_stage = make_seq("other", "ACGT")
+    other_stage.proteins = [_spike_cds("P_S4")]
+    nothing = make_seq("nothing", "ACGT")
+    nothing.proteins = [_cds("hypothetical protein", "M" + "A" * 99)]
+    report = QCReport()
+    kept = populate_protein_sequences(
+        [other_stage, nothing], _SPIKE_N_SPECS, report,
+        hmm_active=True, concatenate=True,
+        policy=_Policy({"other"}, {"marker_quality"}),
+    )
+    assert kept == []
+    kept = populate_protein_sequences(
+        [nothing], _SPIKE_N_SPECS, QCReport(),
+        hmm_active=True, concatenate=True,
+        policy=_Policy({"nothing"}, {"hmm"}),
+    )
+    assert kept == []
+
+
+def test_single_marker_hmm_protected_sequence_retries_without_the_gate(make_seq):
+    """Single-marker mode mirrors the segmented backstop: an HMM-off retry
+    gives the protected sequence its alias / longest-CDS marker."""
+    seq = make_seq("pinned", "ACGT")
+    seq.proteins = [_cds("hypothetical protein", "M" + "A" * 99, protein_id="P_H")]
+    spec = [{"name": "Nucleocapsid", "hmms": ["Corona_nucleoca"]}]
+    assert populate_protein_sequences(
+        [seq], spec, QCReport(), hmm_active=True,
+    ) == []
+    kept = populate_protein_sequences(
+        [seq], spec, QCReport(), hmm_active=True,
+        policy=_Policy({"pinned"}, {"hmm"}),
+    )
+    assert kept == [seq]
+    assert seq.marker_protein_ids == ["P_H"]

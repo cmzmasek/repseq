@@ -703,7 +703,10 @@ def populate_protein_sequences(
     ``policy`` (an ``overrides.ProtectionPolicy``): a sequence protected
     against the ``marker_quality`` stage is picked as if neither the length
     bound nor the Met requirement existed, matching what the output pickers
-    show for it.
+    show for it. A sequence protected against the ``hmm`` stage is kept
+    through an HMM-gate failure here as well: single-marker mode retries
+    without the gate, concatenated mode clusters it on the markers the gate
+    does identify (see ``_select_hmm_protected``).
 
     Note: in v0.14.0+ this should rarely fire under HMM control, because
     ``cli._run_hmm_qc`` has already dropped sequences whose HMM gate
@@ -732,6 +735,41 @@ def populate_protein_sequences(
         )
         return ([marker] if marker is not None else None), failure
 
+    def _select_hmm_protected(seq: Sequence, ignore_restrictions: bool):
+        """Markers for a sequence protected against the ``hmm`` stage.
+
+        Single-marker mode mirrors the segmented backstop: retry without the
+        gate (alias / longest-CDS marker). Concatenated mode keeps every
+        marker the gate DOES identify and leaves the unidentified ones out —
+        an HMM-off retry there would fall back to the record's longest CDS
+        for each failing spec and glue an unrelated protein into the
+        clustering string. ``length_aa`` and the Met requirement still apply
+        unless the sequence is protected against ``marker_quality`` too.
+        Returns ``None`` when nothing usable is left (the drop stands).
+        """
+        common = dict(
+            ga_cutoffs=ga_cutoffs, hmm_cfg=hmm_cfg,
+            ignore_restrictions=ignore_restrictions,
+            require_met_start=require_met_start,
+        )
+        if not concatenate:
+            marker, _ = select_marker_protein(
+                seq.proteins, marker_specs, hmm_active=False, **common
+            )
+            return [marker] if marker is not None else None
+        picked: list[dict] = []
+        for spec in _normalize_marker_specs(marker_specs):
+            marker, spec_failure = select_marker_protein(
+                seq.proteins, [spec], hmm_active=hmm_active, **common
+            )
+            if marker is not None:
+                picked.append(marker)
+            elif spec_failure is None or spec_failure.reason != "hmm_failed":
+                # Out of range / 5'-partial / no CDS: not what `hmm`
+                # protection covers.
+                return None
+        return picked or None
+
     kept: list[Sequence] = []
     for seq in sequences:
         markers, failure = _select(seq, False)
@@ -743,6 +781,22 @@ def populate_protein_sequences(
             and policy.protects(seq, "marker_quality")
         ):
             markers, failure = _select(seq, True)
+        if (
+            markers is None
+            and failure is not None
+            and failure.reason == "hmm_failed"
+            and policy is not None
+            and policy.protects(seq, "hmm")
+        ):
+            # Force-keep whitelist: the sequence was protected against the
+            # `hmm` stage upstream, but selection re-applies the gate here
+            # and would silently re-drop it (the non-segmented twin of the
+            # retry in `build_concatenated_sequences`).
+            rescued = _select_hmm_protected(
+                seq, policy.protects(seq, "marker_quality")
+            )
+            if rescued is not None:
+                markers, failure = rescued, None
         if markers is None:
             if report is not None:
                 reason = _format_failure_reason(failure)
