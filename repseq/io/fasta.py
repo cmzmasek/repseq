@@ -21,17 +21,35 @@ _PROTEIN_ONLY_CHARS = set("EFILPQZ")
 
 
 def detect_seq_type(sequence: str) -> SequenceType:
+    """Classify a sequence as nucleotide or protein from its WHOLE length.
+
+    Judged on the full sequence, with ``N`` left out of the base count. Both
+    matter: sequencing gaps are written as runs of N, and a genome often
+    OPENS with one. Looking only at the first 200 characters (as this did
+    until v0.81.1) typed such a genome as protein — and a "protein" has its
+    ambiguity counted over X/B/Z/J only, so the record sailed through
+    ``qc.ambiguous_threshold`` whatever its N content (221 herpesvirus
+    genomes with 2-47 % N on the 2026-11 Orthoherpesviridae input).
+    """
     if not sequence:
         return SequenceType.UNKNOWN
-    sample = sequence[:200].upper()
+    seq = sequence.upper()
     # An unambiguous protein-only residue (E/F/I/L/P/Q/Z) is decisive.
-    if any(c in _PROTEIN_ONLY_CHARS for c in sample):
+    if not _PROTEIN_ONLY_CHARS.isdisjoint(seq):
         return SequenceType.PROTEIN
-    # Otherwise classify by strict A/C/G/T/U content: a real nucleotide
-    # sequence is ≥90% strict bases even with scattered ambiguity codes;
-    # a protein is not.
-    strict_nt = sum(1 for c in sample if c in _STRICT_NT_CHARS)
-    if strict_nt / len(sample) >= 0.90:
+    # Otherwise classify by strict A/C/G/T/U content among the non-N
+    # characters: a real nucleotide sequence is >=90% strict bases even with
+    # scattered IUPAC codes; a protein spelled only in letters that double as
+    # IUPAC codes (K/W/M/H/R/S/D/V...) is not. N is set aside because it says
+    # "unknown base", not "not a base" — how much of it a record may carry is
+    # the ambiguity filter's decision, not this function's.
+    called = len(seq) - seq.count("N")
+    if called == 0:
+        # Nothing but N: unusable either way, and only the nucleotide
+        # reading lets the ambiguity filter remove it (fraction 1.0).
+        return SequenceType.NUCLEOTIDE
+    strict_nt = sum(seq.count(c) for c in _STRICT_NT_CHARS)
+    if strict_nt / called >= 0.90:
         return SequenceType.NUCLEOTIDE
     return SequenceType.PROTEIN
 

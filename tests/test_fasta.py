@@ -38,6 +38,38 @@ def test_detect_seq_type_protein_using_only_iupac_overlap_letters():
     assert detect_seq_type("KWMHRSNDVKWMHRSNDVKWMHRSNDV") == SequenceType.PROTEIN
 
 
+def test_detect_seq_type_genome_opening_with_an_n_run_is_nucleotide():
+    # A genome whose first bases are a sequencing gap. Judged on its first
+    # 200 characters it read as protein, and a protein's ambiguity is counted
+    # over X/B/Z/J only — so the record passed qc.ambiguous_threshold
+    # whatever its N content.
+    seq = "N" * 300 + "ACGT" * 2000
+    assert detect_seq_type(seq) == SequenceType.NUCLEOTIDE
+
+
+def test_detect_seq_type_mostly_n_genome_is_still_nucleotide():
+    # How much N a record may carry is the ambiguity filter's call; the
+    # type must not flip with it.
+    assert detect_seq_type("ACGT" * 100 + "N" * 4000) == SequenceType.NUCLEOTIDE
+    assert detect_seq_type("N" * 500) == SequenceType.NUCLEOTIDE
+
+
+def test_detect_seq_type_protein_residue_beyond_the_first_200_is_decisive():
+    # A low-complexity N-terminus spelled in letters that double as bases
+    # (Gly/Ala/Thr/Cys) must not make a protein read as nucleotide.
+    assert detect_seq_type("GATC" * 60 + "MEEPQSDPSVEPPLSQETF") == SequenceType.PROTEIN
+
+
+def test_n_led_genome_reports_its_true_ambiguous_fraction(tmp_path):
+    # The end-to-end consequence: read_fasta must hand QC a record whose
+    # ambiguous_fraction counts the N's.
+    fa = tmp_path / "g.fasta"
+    fa.write_text(">AB000001.1 test genome\n" + "N" * 300 + "ACGT" * 425 + "\n")
+    (seq,) = list(read_fasta(fa))
+    assert seq.seq_type == SequenceType.NUCLEOTIDE
+    assert abs(seq.ambiguous_fraction - 300 / 2000) < 1e-9
+
+
 def test_detect_seq_type_nucleotide_with_some_ambiguity():
     # A real nucleotide sequence stays nucleotide despite a scattered N
     # (1 ambiguous of 21 => 95% strict bases, above the 90% threshold).
