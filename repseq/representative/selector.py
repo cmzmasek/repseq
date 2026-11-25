@@ -75,4 +75,9 @@ def apply_representative_selection(
             cluster.representative = best
             cluster.members = new_members
 
+    # Re-election changes which sequence leads a cluster, so order the
+    # clusters by their FINAL representative: the order every output file
+    # inherits is then by representative id, the same on every run (see
+    # clustering.canonical_order). In place — callers hold this list.
+    clusters.sort(key=lambda c: str(c.representative.id or ""))
     return clusters

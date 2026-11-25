@@ -856,6 +856,17 @@ IDs, their parent accessions, the post-run config (credentials blanked), the
 version of every external tool, an sha256 of every input FASTA, and (when the
 HMM tier ran) an sha256 of the HMM database. Always written.
 
+**Two identical runs give identical files.** Run the same command twice on
+the same input and every output file comes out byte-for-byte the same, apart
+from the date and time stamped into the run log, `_summary.md` and this
+lockfile (`created_utc`). Clustering tools return their clusters in a
+different order from one run to the next when they use several threads, so
+repseq puts clusters and their members into a fixed order (by sequence id)
+before using them: record order in the tables and FASTA files, cluster
+numbering and which sequence wins a tie do not depend on that. (Tree
+building has its own sources of run-to-run variation and is not covered by
+this guarantee.)
+
 ```jsonc
 {
   "schema_version": 1,
@@ -2972,7 +2983,7 @@ that license; it comes with **no warranty**. The full license text is in the
 
 ## Status
 
-Current: **`v0.82.0`**.
+Current: **`v0.82.1`**.
 
 **Selection.** All 8 selection modes, including grouping by a column of your own
 metadata table (`--metadata-table`), so representatives can be chosen per

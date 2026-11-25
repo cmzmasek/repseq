@@ -78,7 +78,12 @@ def write_run_log(
         "CONFIGURATION",
     ]
     # Redact secrets before serialising the config into a plaintext log.
-    safe_cfg = copy.deepcopy(cfg)
+    # Sets become sorted lists: their iteration order changes from one
+    # process to the next, which made this log differ between identical runs
+    # (and printed them as `!!python/object/apply:builtins.frozenset`).
+    from ..config import sets_to_sorted_lists
+
+    safe_cfg = sets_to_sorted_lists(copy.deepcopy(cfg))
     tax_cfg = safe_cfg.get("taxonomy")
     if isinstance(tax_cfg, dict) and tax_cfg.get("ncbi_api_key"):
         tax_cfg["ncbi_api_key"] = "***redacted***"

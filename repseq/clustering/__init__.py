@@ -30,10 +30,47 @@ def run_clustering(
     """Dispatch to the clustering backend named in ``cfg['clustering']['backend']``."""
     backend = cfg.get("clustering", {}).get("backend", "mmseqs2")
     if backend == "mmseqs2":
-        return mmseqs2.run_clustering(sequences, threshold, cfg, tmp_dir=tmp_dir)
-    if backend == "cdhit":
-        return cdhit.run_clustering(sequences, threshold, cfg, tmp_dir=tmp_dir)
-    raise ValueError(f"Unknown clustering backend: {backend!r}")
+        clusters = mmseqs2.run_clustering(sequences, threshold, cfg, tmp_dir=tmp_dir)
+    elif backend == "cdhit":
+        clusters = cdhit.run_clustering(sequences, threshold, cfg, tmp_dir=tmp_dir)
+    else:
+        raise ValueError(f"Unknown clustering backend: {backend!r}")
+    return canonical_order(clusters)
+
+
+def _order_key(seq: Sequence) -> str:
+    return str(seq.id or "")
+
+
+def canonical_order(clusters: list[Cluster]) -> list[Cluster]:
+    """Put clusters, and the members inside each, in a fixed order.
+
+    A multi-threaded backend does not return its clusters in a stable
+    order: clustering one 215-sequence file six times with
+    ``mmseqs easy-cluster --threads 10`` gave the same clusters every time
+    in FOUR different orders (2026-11-25). Everything downstream inherits
+    that order — the representative tables, every FASTA, the tie-break
+    when two members score equally in representative election, the input
+    order of the diversity sampler under ``--overflow trim`` — so two
+    identical runs wrote files that differed line by line.
+
+    Sorted by sequence id: clusters by their representative's, members by
+    their own; cluster ids are then renumbered ``cluster_000001`` ... in
+    that order. In place and stable; the ``Sequence`` objects themselves are
+    untouched (``force_select`` relies on their identity), and each
+    cluster keeps the backend's representative, so who wins a tie between a
+    representative and an equally good member does not change.
+    """
+    for cluster in clusters:
+        cluster.members.sort(key=_order_key)
+    clusters.sort(key=lambda c: _order_key(c.representative))
+    # The backends number their clusters in the order they happened to
+    # return them, so the ids moved between runs too (`global` mode writes
+    # them to _clusters.tsv as they are). Renumber in the fixed order, same
+    # format.
+    for i, cluster in enumerate(clusters):
+        cluster.cluster_id = f"cluster_{i + 1:06d}"
+    return clusters
 
 
 def min_threshold(cfg: dict[str, Any], sequences: list[Sequence]) -> float:
@@ -121,5 +158,6 @@ def compute_diversity_curve(
 
 __all__ = [
     "run_clustering", "min_threshold", "compute_diversity_curve",
+    "canonical_order",
     "mmseqs2", "cdhit",
 ]

@@ -978,8 +978,8 @@ def sanitize_config(cfg: dict[str, Any], *, drop_private: bool = True) -> dict[s
       runtime state, not configuration, and are recomputed on every run.
 
     Pure / non-mutating: builds fresh dicts and lists, leaves scalars
-    (immutable) as-is, and coerces tuples to lists so the result is
-    YAML/JSON-native. ``drop_private=False`` keeps the ``_`` keys (used by
+    (immutable) as-is, and coerces tuples to lists and sets to SORTED lists
+    so the result is YAML/JSON-native and the same on every run. ``drop_private=False`` keeps the ``_`` keys (used by
     the lockfile, which records the full post-mutation runtime config for
     replay but still must not persist credentials)."""
     def _clean(obj: Any) -> Any:
@@ -995,9 +995,28 @@ def sanitize_config(cfg: dict[str, Any], *, drop_private: bool = True) -> dict[s
             return out
         if isinstance(obj, (list, tuple)):
             return [_clean(x) for x in obj]
+        if isinstance(obj, (set, frozenset)):
+            # A set has no order, and Python varies its iteration order
+            # from one process to the next. Written out as-is (the
+            # resolved override id sets were) it made the lockfile and the
+            # run log differ between two identical runs.
+            return sorted((_clean(x) for x in obj), key=str)
         return obj
 
     return _clean(cfg)
+
+
+def sets_to_sorted_lists(obj: Any) -> Any:
+    """Copy of ``obj`` with every set / frozenset, at any depth, replaced by
+    a sorted list — for writers that serialise the config without going
+    through :func:`sanitize_config` (the run log)."""
+    if isinstance(obj, dict):
+        return {k: sets_to_sorted_lists(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [sets_to_sorted_lists(x) for x in obj]
+    if isinstance(obj, (set, frozenset)):
+        return sorted((sets_to_sorted_lists(x) for x in obj), key=str)
+    return obj
 
 
 def write_effective_config(cfg: dict[str, Any], path: Path) -> Path:
