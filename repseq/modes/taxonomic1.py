@@ -51,6 +51,79 @@ class ThresholdSearch(NamedTuple):
     note: Optional[str] = None
 
 
+#: How far a cluster count must FALL as identity rises before a group is
+#: called unreliable: by at least this many clusters AND this fraction of the
+#: higher count. Greedy clustering is not strictly monotonic even when it is
+#: working properly — MMseqs2 `easy-cluster` gave ILTV 2 -> 1 -> 2 clusters
+#: around 0.95 on the herpesvirus markers — and flagging every one-cluster
+#: wobble would bury the falls that matter (247 -> 86, 41 -> 26, 40 -> 37
+#: under `easy-linclust` on the same data, all of which clear both bars).
+REVERSAL_MIN_FALL = 2
+REVERSAL_MIN_FRACTION = 0.05
+
+
+def _count_reversal(
+    probes: list[tuple[float, int]],
+) -> Optional[tuple[float, int, float, int]]:
+    """The largest fall in cluster count between two probes, if any.
+
+    ``probes`` is every ``(threshold, n_clusters)`` the search ran. A higher
+    identity threshold should never give FEWER clusters; when it does, the
+    bisection has been steering on a signal that is not there. Returns
+    ``(low_threshold, low_count, high_threshold, high_count)`` for the pair
+    with the biggest fall, or ``None`` when the counts never fall by more
+    than the :data:`REVERSAL_MIN_FALL` / :data:`REVERSAL_MIN_FRACTION`
+    tolerance (a one-cluster wobble is normal for greedy clustering).
+
+    Seen for real with MMseqs2 ``easy-linclust`` on ~6,400-aa herpesvirus
+    marker concatenations (2026-11-12): 247 clusters at 0.98, 86 at 0.99.
+    """
+    worst: Optional[tuple[float, int, float, int]] = None
+    ordered = sorted(probes)
+    for i, (t_lo, n_lo) in enumerate(ordered):
+        for t_hi, n_hi in ordered[i + 1:]:
+            fall = n_lo - n_hi
+            if (
+                t_hi > t_lo
+                and fall >= REVERSAL_MIN_FALL
+                and fall >= REVERSAL_MIN_FRACTION * n_lo
+            ):
+                if worst is None or (n_lo - n_hi) > (worst[1] - worst[3]):
+                    worst = (t_lo, n_lo, t_hi, n_hi)
+    return worst
+
+
+def _reversal_advice(cfg: dict[str, Any]) -> str:
+    """The named next step for a search whose counts fell as identity rose."""
+    cluster_cfg = cfg.get("clustering", {})
+    if (
+        cluster_cfg.get("backend", "mmseqs2") != "cdhit"
+        and cluster_cfg.get("mmseqs2_mode", "easy-cluster") == "easy-linclust"
+    ):
+        return (
+            "set clustering.mmseqs2_mode: easy-cluster in the config and "
+            "re-run (easy-linclust is approximate and is known to do this "
+            "on long sequences)"
+        )
+    return (
+        "treat this group's representative count with caution and check "
+        "it against its row in the group-counts table"
+    )
+
+
+def _reversal_note(fell: str, advice: str) -> str:
+    """The run-log sentence for a falling cluster count.
+
+    ONE wording for both checks (in-search probes, diversity curve), and it
+    must keep the word ``UNRELIABLE``: ``cli._final_summary`` keys its
+    end-of-run warning on it.
+    """
+    return (
+        f"UNRELIABLE — {fell}, although a higher identity should never "
+        f"give fewer clusters; {advice}"
+    )
+
+
 def _group_by_rank(sequences: list[Sequence], rank: str) -> dict[str, list[Sequence]]:
     groups: dict[str, list[Sequence]] = {}
     for seq in sequences:
@@ -160,12 +233,18 @@ def _binary_search_threshold(
         f"(target = {n_target} reps) ..."
     )
 
+    # Every (threshold, count) the search runs, so it can check afterwards
+    # that the counts really did rise with identity — the assumption the
+    # whole bisection rests on.
+    probes: list[tuple[float, int]] = []
+
     for i in range(n_probes):
         mid = (lo + hi) / 2
         t0 = time.perf_counter()
         clusters = run_clustering(sequences, mid, cfg)
         clusters = apply_representative_selection(clusters, cfg)
         n_reps = len(clusters)
+        probes.append((mid, n_reps))
         dt = time.perf_counter() - t0
         click.echo(
             f"    {tag}iter {i + 1}/{n_probes}: threshold={mid:.4f} "
@@ -331,7 +410,94 @@ def _binary_search_threshold(
             where, final_count, best_threshold,
         )
 
+    # The bisection assumes a higher identity never gives fewer clusters.
+    # When the probes contradict that, the count above may be wrong in
+    # either direction, so say so where the user will see it AND where it
+    # outlives the console (the note reaches the run log).
+    reversal = _count_reversal(probes)
+    if reversal is not None:
+        t_lo, n_lo, t_hi, n_hi = reversal
+        advice = _reversal_advice(cfg)
+        fell = (
+            f"cluster count FELL from {n_lo} at identity {t_lo:.4f} to "
+            f"{n_hi} at {t_hi:.4f}"
+        )
+        click.echo(
+            f"    {tag}WARNING: {fell}. The search for {n_target} "
+            f"representative(s) assumes the count only rises with "
+            f"identity, so the {final_count} it settled on may be too few "
+            f"or too many. Next step: {advice}.",
+            err=True,
+        )
+        logger.warning(
+            "Binary search%s: %s; the search assumes a rising count, so "
+            "the result (%d for %d requested) is unreliable.",
+            where, fell, final_count, n_target,
+        )
+        reversal_note = _reversal_note(fell, advice)
+        note = f"{note}; {reversal_note}" if note else reversal_note
+
     return ThresholdSearch(best_clusters, best_threshold, trimmed_from, note)
+
+
+def flag_count_reversals(
+    group_stats: Optional[list[GroupStat]], cfg: dict[str, Any],
+) -> list[str]:
+    """Flag groups whose diversity curve shows a falling cluster count.
+
+    The in-search check in :func:`_binary_search_threshold` only sees the
+    identities the bisection happened to probe, and a bisection that walks
+    DOWN from its first probe never looks at the high-identity end where
+    ``easy-linclust`` misbehaves. The diversity curve does: it clusters each
+    group at the fixed ``clustering.diversity_curve_cutoffs`` anyway, so
+    those counts — plus the group's own (cutoff, count) — are a free second
+    look. Costs no extra clustering.
+
+    Appends the same ``UNRELIABLE`` note the in-search check writes (so the
+    run log and the end-of-run warning pick it up), prints one stderr
+    warning per newly flagged group, and returns their names. Groups the
+    search already flagged are left alone. Called once from
+    ``cli._write_output`` so every mode gets it.
+    """
+    flagged: list[str] = []
+    advice = _reversal_advice(cfg)
+    for gs in group_stats or []:
+        if not gs.clustered or not gs.cutoff_counts:
+            continue
+        if gs.note and "UNRELIABLE" in gs.note:
+            continue
+        points = [
+            (float(c), int(n)) for c, n in gs.cutoff_counts.items()
+            if n is not None
+        ]
+        if gs.cutoff is not None:
+            # Clustering at `cutoff` gives the pre-trim count when a trim
+            # ran, n_after otherwise (see GroupStat).
+            at_cutoff = gs.trimmed_from if gs.trimmed_from else gs.n_after
+            points.append((float(gs.cutoff), int(at_cutoff)))
+        reversal = _count_reversal(points)
+        if reversal is None:
+            continue
+        t_lo, n_lo, t_hi, n_hi = reversal
+        fell = (
+            f"cluster count FELL from {n_lo} at identity {t_lo:.4f} to "
+            f"{n_hi} at {t_hi:.4f}"
+        )
+        click.echo(
+            f"  [{gs.group}] WARNING: {fell}. A higher identity should "
+            f"never give fewer clusters, so the {gs.n_after} "
+            f"representative(s) chosen for this group may be too few or "
+            f"too many. Next step: {advice}.",
+            err=True,
+        )
+        logger.warning(
+            "Group '%s': %s; cluster counts for this group are unreliable.",
+            gs.group, fell,
+        )
+        reversal_note = _reversal_note(fell, advice)
+        gs.note = f"{gs.note}; {reversal_note}" if gs.note else reversal_note
+        flagged.append(str(gs.group))
+    return flagged
 
 
 class TaxonomicMode1(BaseMode):

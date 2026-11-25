@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 import requests
 
+from . import http
 from .cache import TaxonomyCache
 
 logger = logging.getLogger(__name__)
@@ -80,17 +81,20 @@ class NCBITaxonomy:
             self._last_request = now
 
     def _get(self, endpoint: str, params: dict) -> dict:
-        self._throttle()
-        resp = requests.get(f"{_ENTREZ_BASE}/{endpoint}", params=params, timeout=30)
-        resp.raise_for_status()
+        # Retries transient errors (rate limit, timeout, 5xx) — see http.py.
+        resp = http.get_with_retry(
+            f"{_ENTREZ_BASE}/{endpoint}", params=params, timeout=30,
+            throttle=self._throttle,
+        )
         return resp.json()
 
     def _get_text(self, endpoint: str, params: dict) -> str:
         """Like ``_get`` but returns the raw response body — for the Entrez
         endpoints that only speak XML (taxonomy ``efetch``)."""
-        self._throttle()
-        resp = requests.get(f"{_ENTREZ_BASE}/{endpoint}", params=params, timeout=30)
-        resp.raise_for_status()
+        resp = http.get_with_retry(
+            f"{_ENTREZ_BASE}/{endpoint}", params=params, timeout=30,
+            throttle=self._throttle,
+        )
         return resp.text
 
     # ------------------------------------------------------------------
@@ -123,8 +127,17 @@ class NCBITaxonomy:
                     {"db": "taxonomy", "id": str(taxid), "retmode": "xml"}
                 ),
             )
-        except Exception:
+        except Exception as exc:
+            # Not cached, so a re-run retries it — but ON RECORD, so the
+            # run can say which records lost their taxonomy and why.
+            # Keyed by taxid under an INTERNAL stage: the resolver turns it
+            # into a per-record entry (see http.STAGE_LINEAGE_TAXID).
+            reason = http.record_failure(http.STAGE_LINEAGE_TAXID, key, exc)
+            logger.warning(
+                "Taxonomy lookup for taxid %s failed: %s", key, reason,
+            )
             return None
+        http.clear_failure(http.STAGE_LINEAGE_TAXID, key)
 
         rank_map = _parse_taxonomy_xml(xml_text)
         if not rank_map:
@@ -220,8 +233,16 @@ class NCBITaxonomy:
                     result["lineage"] = lineage
 
             self._cache.set(_SOURCE_NUCCORE, accession, result)
+            http.clear_failure(http.STAGE_METADATA, accession)
             return result
-        except Exception:
+        except Exception as exc:
+            # Not cached, so a re-run retries it — but ON RECORD (this
+            # used to be a bare `return None`: no retry, no count, and the
+            # record quietly joined an "Unknown" taxonomy group).
+            reason = http.record_failure(http.STAGE_METADATA, accession, exc)
+            logger.warning(
+                "Metadata lookup for %s failed: %s", accession, reason,
+            )
             return None
 
     # ------------------------------------------------------------------
@@ -319,12 +340,20 @@ class NCBITaxonomy:
             try:
                 fetched = self._fetch_nucleotide_chunk(chunk)
             except Exception as exc:
+                # A failed batch says nothing about its accessions, so do
+                # NOT cache them as "not found" (that used to stick for the
+                # whole cache lifetime). Report them and move on.
+                reason = http.describe_error(exc)
                 logger.warning(
                     "Nucleotide batch fetch failed for %d accessions: %s",
-                    len(chunk), exc,
+                    len(chunk), reason,
                 )
-                fetched = {}
+                for acc in chunk:
+                    http.record_failure(http.STAGE_SEQUENCE, acc, reason)
+                    results[acc] = None
+                continue
             for acc in chunk:
+                http.clear_failure(http.STAGE_SEQUENCE, acc)
                 body = fetched.get(acc)
                 if body:
                     self._cache.set(_SOURCE_NUC_SEQ, acc, {"sequence": body})
@@ -344,7 +373,6 @@ class NCBITaxonomy:
         back to the caller's request so ``MW626064`` and ``MW626064.1``
         both resolve.
         """
-        self._throttle()
         params: dict[str, Any] = {
             "db": "nuccore",
             "id": ",".join(accessions),
@@ -356,10 +384,10 @@ class NCBITaxonomy:
         if self._api_key:
             params["api_key"] = self._api_key
 
-        resp = requests.get(
+        resp = http.get_with_retry(
             f"{_ENTREZ_BASE}/efetch.fcgi", params=params, timeout=120,
+            throttle=self._throttle,
         )
-        resp.raise_for_status()
 
         by_full: dict[str, str] = {}
         by_no_version: dict[str, str] = {}
@@ -430,13 +458,32 @@ class NCBITaxonomy:
             try:
                 fetched = self._fetch_genbank_chunk(chunk)
             except Exception as exc:
+                # A failed batch says nothing about its accessions. Caching
+                # them as "record with no proteins" (the old behaviour)
+                # made a single network hiccup drop up to 200 genomes as
+                # un-annotated on this run AND on every later run until the
+                # cache expired. Hand back empty records for this run only,
+                # uncached, and put every accession on record.
+                reason = http.describe_error(exc)
                 logger.warning(
                     "GenBank batch fetch failed for %d accessions: %s",
-                    len(chunk), exc,
+                    len(chunk), reason,
                 )
-                fetched = {}
+                for acc in chunk:
+                    http.record_failure(http.STAGE_RECORD, acc, reason)
+                    results[acc] = {"proteins": [], "source": None}
+                if callable(progress):
+                    progress(
+                        i // batch_size + 1, total_batches, len(chunk),
+                        cached_count,
+                    )
+                continue
 
             for acc in chunk:
+                # This batch got through, so an earlier failed attempt for
+                # the same accession (the fetch runs at several pipeline
+                # steps) no longer describes it.
+                http.clear_failure(http.STAGE_RECORD, acc)
                 rec = fetched.get(acc, {"proteins": [], "source": None})
                 self._cache.set(_SOURCE_PROTEINS, acc, rec)
                 results[acc] = rec
@@ -458,8 +505,6 @@ class NCBITaxonomy:
         """
         from Bio import SeqIO
 
-        self._throttle()
-
         params: dict[str, Any] = {
             "db": "nuccore",
             "id": ",".join(accessions),
@@ -471,10 +516,10 @@ class NCBITaxonomy:
         if self._api_key:
             params["api_key"] = self._api_key
 
-        resp = requests.get(
+        resp = http.get_with_retry(
             f"{_ENTREZ_BASE}/efetch.fcgi", params=params, timeout=120,
+            throttle=self._throttle,
         )
-        resp.raise_for_status()
 
         by_acc_full: dict[str, dict[str, Any]] = {}
         by_acc_no_version: dict[str, dict[str, Any]] = {}

@@ -219,6 +219,37 @@ def test_render_summary_describes_input_blocklist(make_seq, tmp_path):
     assert "{prefix}_excluded.tsv" in md
 
 
+def test_render_summary_reports_failed_database_lookups(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["_lookup_failures_runtime"] = {"failures": [
+        {"stage": "metadata", "id": "AB1.1", "error": "HTTP 429 (rate limit reached)"},
+        {"stage": "taxonomy", "id": "10298", "error": "could not connect"},
+        {"stage": "genbank_record", "id": "CD2.1", "error": "HTTP 502 (server error)"},
+    ]}
+    md = render_summary(cfg, _qc(), _result(make_seq), ["a.fasta"])
+    assert "Incomplete database retrieval" in md
+    assert "**2** metadata / taxonomy lookup(s)" in md
+    assert "**1** GenBank record fetch(es)" in md
+    assert "_lookup_failures.tsv" in md
+
+
+def test_render_summary_separates_unannotated_records_from_marker_failures(
+    make_seq, tmp_path,
+):
+    qc = _qc()
+    qc.removed_hmm_failed = 536
+    qc.removed_hmm_by_marker = {"no_annotated_proteins": 467, "DNA_polymerase": 69}
+    md = render_summary(_base_cfg(tmp_path), qc, _result(make_seq), ["a.fasta"])
+    assert "**536** sequences were dropped by the HMM-based identity QC" in md
+    assert "**467** carried no annotated proteins at all" in md
+    assert "not marker failures" in md
+
+
+def test_render_summary_silent_when_every_lookup_succeeded(make_seq, tmp_path):
+    md = render_summary(_base_cfg(tmp_path), _qc(), _result(make_seq), ["a.fasta"])
+    assert "Incomplete database retrieval" not in md
+
+
 def test_render_summary_omits_blocklist_when_nothing_excluded(make_seq, tmp_path):
     md = render_summary(_base_cfg(tmp_path), _qc(), _result(make_seq), ["a.fasta"])
     assert "input blocklist" not in md
@@ -1210,3 +1241,102 @@ def test_summary_threshold_search_quotes_the_shared_resolution_constant(make_seq
     md = render_summary(_base_cfg(tmp_path), _qc(),
                         _grouped_result(make_seq), ["a.fasta"])
     assert f"resolution of {THRESHOLD_RESOLUTION:g} identity units" in md
+
+
+# ---------------------------------------------------------------------------
+# Things that shaped the run but were missing from the prose (v0.82.0)
+# ---------------------------------------------------------------------------
+# Found on the Orthoherpesviridae runs: the QC sentence omitted the 72
+# description-keyword removals, the clustering sentence named MMseqs2 but
+# not its mode (which changed the selection completely), and a length
+# window that removed nothing was not mentioned at all.
+
+def test_render_summary_reports_keyword_removals_with_the_full_list(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["qc"]["annotation_filter"] = {
+        "enabled": True, "keywords": ["Mutant", "BAC", "WORKING DRAFT"],
+    }
+    qc = _qc(total_input=100, passed=85, dedup=4, length=2, ambig=2)
+    qc.removed_annotation = 7
+    md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"])
+    assert (
+        "**7** whose record description contained an excluded keyword "
+        "(`Mutant`, `BAC`, `WORKING DRAFT`)"
+    ) in md
+    # Counted removals are not repeated as an "applied, removed nothing" note.
+    assert "the description-keyword screen" not in md
+
+
+def test_render_summary_states_filters_that_removed_nothing(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)  # genome_length_filter 9,000-13,000, enabled
+    cfg["qc"]["annotation_filter"] = {"enabled": True, "keywords": ["synthetic"]}
+    qc = _qc(total_input=100, passed=94, dedup=4, length=0, ambig=2)
+    md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"])
+    assert (
+        "Also applied, removing no sequence: the whole-genome length filter "
+        "(9,000–13,000 nt) and the description-keyword screen (`synthetic`)."
+    ) in md
+
+
+def test_render_summary_silent_about_filters_that_were_off(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["qc"]["genome_length_filter"]["enabled"] = False
+    cfg["qc"]["annotation_filter"] = {"enabled": False, "keywords": ["synthetic"]}
+    qc = _qc(total_input=100, passed=94, dedup=4, length=0, ambig=2)
+    md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"])
+    assert "Also applied, removing no sequence" not in md
+
+
+def test_render_summary_length_filter_not_claimed_on_segmented_skip(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    qc = _qc(total_input=100, passed=94, dedup=4, length=0, ambig=2)
+    qc.length_filter_skipped = True
+    md = render_summary(cfg, qc, _result(make_seq), ["a.fasta"])
+    assert "the whole-genome length filter" not in md
+
+
+def test_render_summary_names_the_mmseqs2_mode_and_coverage(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["clustering"].update(
+        {"mmseqs2_mode": "easy-linclust", "coverage": 0.8, "coverage_mode": 0}
+    )
+    md = render_summary(cfg, _qc(), _result(make_seq, mode="taxonomic1"), ["a.fasta"])
+    phrase = (
+        "`easy-linclust` mode — linear-time approximate clustering; "
+        "alignment covering ≥ 80% of both sequences (`-c 0.8 --cov-mode 0`)"
+    )
+    assert phrase in md
+    assert f"| Clustering settings | {phrase} |" in md
+
+
+def test_render_summary_default_mode_is_named_easy_cluster(make_seq, tmp_path):
+    md = render_summary(
+        _base_cfg(tmp_path), _qc(), _result(make_seq, mode="taxonomic1"), ["a.fasta"],
+    )
+    assert "`easy-cluster` mode — cascaded sensitive clustering" in md
+
+
+def test_render_summary_describes_cdhit_settings(make_seq, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg["clustering"]["backend"] = "cdhit"
+    cfg["clustering"]["cdhit"] = {
+        "global_alignment": False, "coverage": 0.9, "accurate": True,
+        "extra_args": ["-s", "0.8"],
+    }
+    md = render_summary(cfg, _qc(), _result(make_seq, mode="taxonomic1"), ["a.fasta"])
+    assert "≥ 90% of the shorter sequence (`-G 0 -aS`)" in md
+    assert "accurate mode (`-g 1`)" in md
+    assert "additional options `-s 0.8`" in md
+    assert "easy-cluster" not in md
+
+
+def test_render_summary_no_clustering_settings_for_diversity_only(make_seq, tmp_path):
+    """global -n runs no clustering binary, so there are no settings to state."""
+    md_n = render_summary(
+        _base_cfg(tmp_path), _qc(),
+        RunResult(mode="global", representatives=[make_seq("r0", "ACGT" * 10)],
+                  clusters=[]),
+        ["a.fasta"],
+    )
+    if "MaxMin diversity selection" in md_n:
+        assert "Clustering settings" not in md_n

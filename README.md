@@ -183,6 +183,18 @@ console output scrolls away, the same sentences are collected under
 count and the identity it was clustered at are in
 `{prefix}_group_counts.tsv`.
 
+The search relies on one assumption: clustering at a higher identity never
+gives *fewer* clusters. MMseqs2's fast `easy-linclust` mode can break it on
+long sequences, and a group then comes back with too few (or too many)
+representatives. repseq checks for this on every group — both among the
+identities the search tried and in the group's diversity-curve counts — and
+when it sees a count fall (by at least 2 clusters and 5 %; a one-cluster
+wobble is normal and is ignored) it prints a `WARNING`, marks the group
+`UNRELIABLE` in the run log's threshold-search block, and repeats the
+headline at the end of the run. The fix is `clustering.mmseqs2_mode:
+easy-cluster`, which is the default since v0.82.0; `easy-linclust` remains
+available for datasets too large for `easy-cluster` to finish.
+
 The `-n` "maximally-different" selection (`global -n`, and the `--overflow trim`
 step) is an alignment-free **MaxMin** sampler over k-mer distance, run on the
 **same representation your clustering uses**: with
@@ -421,6 +433,7 @@ flags you passed. At a glance:
 | `{prefix}_overrides.tsv` | when any sequence was force-kept | Force-keep audit: each sequence `overrides.protect_qc` rescued from a QC stage, with the reason it would otherwise have been dropped. |
 | `{prefix}_force_selected.tsv` | when any sequence was force-selected | Force-select audit: each `overrides.force_select` / `--pin-ids` pin and the action taken. |
 | `{prefix}_excluded.tsv` | when any sequence was blocklisted | Input-blocklist audit: each `overrides.exclude` / `--exclude-ids` record dropped on load, plus any exclude id that matched nothing. |
+| `{prefix}_lookup_failures.tsv` | when a database lookup failed | Every NCBI / UniProt lookup that still failed after 3 attempts (rate limit, timeout, server error), with the reason. The run continues, but those records were handled without that information. |
 | `{prefix}_group_counts.tsv` | yes | One row per stratum: in / out / clustered / cutoff (+ `clusters_before_trim` after a trim). |
 | `{prefix}_group_assignments.tsv` | `custom` / `hybrid` modes | Each isolate's (or sequence's) group label, where it came from (metadata table, attribute, taxonomy, header regex), and whether it became a representative. |
 | `{prefix}_clusters.tsv` | yes | Which sequences ended up grouped, who represents whom. |
@@ -700,6 +713,14 @@ Every sequence dropped during cleaning, with the reason. Columns: `accession`,
 - `taxonomy_mismatch:<rank>` — segments of one isolate disagreed at the configured rank
 - `strain_collision:<segment>` — distinct accessions shared a strain-derived isolate id (when `strain_collision_action: drop`)
 - `hmm_failed:<seg>:<token>` — no CDS satisfied the marker's tokens (HMM-QC)
+- `hmm_failed:record_not_retrieved` / `protein_count_record_not_retrieved` —
+  the GenBank record could not be fetched on this run (a network failure,
+  listed in `_lookup_failures.tsv`). Says nothing about the record; re-run.
+- `hmm_failed:no_annotated_proteins` (segmented: `hmm_failed:<seg>:no_annotated_proteins`)
+  — the GenBank record annotates no proteins at all, so there was nothing for
+  the HMM check to test. Not a marker failure: the record is simply
+  un-annotated. (Before v0.82.0 these were reported under whichever marker
+  was checked first.)
 - `marker_length:<seg>:<n>aa_below_<min>` (or `_above_<max>`) — the marker
   protein is there but outside its `length_aa` range, usually a partial record;
   the isolate's other segments appear as `marker_length_sibling:...`
@@ -737,6 +758,33 @@ The input-blocklist audit for `overrides.exclude` / `--exclude-ids`. Columns:
 matched no input sequence — a typo-catcher). Only written when at least one
 record was excluded. See
 [Excluding bad sequences](#excluding-bad-sequences).
+
+#### `{prefix}_lookup_failures.tsv` — when a database lookup failed
+
+repseq asks NCBI (and UniProt) for each record's taxonomy, host, date and
+annotated proteins. A lookup that fails for a network reason — the service
+is rate-limiting, slow, or briefly down — is tried **3 times** with a growing
+wait. If it still fails, the run carries on, and the record is listed here.
+Columns: `stage`, `id`, `error`.
+
+| `stage` | What was not retrieved | What happens to the record on this run |
+|---|---|---|
+| `metadata` | organism, taxonomy, host, date, country (`id` = accession) | no database taxonomy: it falls into an `Unknown` group in taxonomy-based modes |
+| `taxonomy` | the record's ranked lineage (`id` = accession; the taxon id is in `error`) | organism known, but no ranks: also lands in `Unknown` |
+| `genbank_record` | the GenBank record with its annotated proteins (`id` = accession) | no proteins to check, so protein-based QC removes it — with the reason `protein_count_record_not_retrieved` or `hmm_failed:record_not_retrieved`, never as "un-annotated" |
+| `sequence` | the sequence itself (`repseq replay` only) | also listed in `_replay_missing.tsv` |
+
+**If this file exists, the selection may differ from a clean run.** The same
+warning is printed at the end of the run and written into `_summary.md`.
+A failed lookup is asked for again on the next run, so the fix is simply to
+run the same command again (into a new output directory): everything else
+comes from the cache. A record that the database genuinely does not have, or
+an identifier it does not recognise, is *not* a failure and is not listed.
+
+**No network at all?** After 5 requests in a row that cannot reach the
+service, repseq stops retrying and lets the remaining lookups fail fast, so
+an offline run does not sit waiting on every record. If you meant to work
+offline, stop and use `--no-resolve`.
 
 #### `{prefix}_group_assignments.tsv` — custom / hybrid modes
 
@@ -2031,7 +2079,7 @@ taxonomy:
 clustering:
   backend: mmseqs2                # or "cdhit"
   alphabet_for_clustering: protein  # protein (default) or nucleotide
-  mmseqs2_mode: easy-linclust     # fast; use easy-cluster for tighter, slower clustering
+  mmseqs2_mode: easy-cluster      # thorough; easy-linclust is faster but approximate (very large datasets only)
   coverage: 0.8
   # cd-hit options (only used when backend == cdhit) live under
   # `clustering.cdhit:` — see that block in your generated config (it's
@@ -2264,6 +2312,46 @@ Y/N, GA-cutoff coverage).
 > is editing a `.hmm` file in place without changing its size or mtime, or
 > reclaiming disk after a DB swap: `repseq cache clear --source hmmscan` wipes
 > only the HMM hits. See [The local cache](#the-local-cache).
+
+### Building your own profiles: which cutoff repseq uses
+
+A profile file can carry its own pass mark, the `GA` line, which holds **two**
+numbers:
+
+```
+GA    25.00 22.00;
+      ^     ^
+      |     per-DOMAIN cutoff   <- the one repseq uses
+      whole-sequence cutoff
+```
+
+repseq reads the **second** number and compares it with the score of **each
+individual domain hit** (the `dom_score` column of `_hmm_diagnostic.tsv`).
+This is the standard HMMER convention for domain hits, and for Pfam profiles
+the two numbers are almost always the same, so nothing needs doing.
+
+It matters when you build a profile yourself (`hmmbuild`) and write the `GA`
+line by hand:
+
+- **Calibrate on the best single-domain score, not the whole-sequence
+  score.** Score your known-good proteins with `hmmsearch --domtblout`, take
+  the best domain score of each, and set the cutoff below the lowest of them
+  (and above the best score of anything that should *not* match).
+- **Repeat-rich proteins are where the two scores part ways.** A protein
+  whose alleles differ in repeat number aligns to its profile in several
+  pieces. Its whole-sequence score can be far above a cutoff that no single
+  piece reaches. Example: EBV EBNA3C alleles scored about 2,300 bits as a
+  whole but about 1,390 for their best piece, so a cutoff of 1,443 taken from
+  whole-sequence scores rejected properly annotated proteins.
+- **Check before you run.** Search each profile against the sequences it was
+  built from. Every one of them should pass; if some do not, the cutoff is too
+  high.
+
+A profile with no `GA` line is judged by `hmm.default_evalue` instead, also
+per domain. The coverage requirement (`hmm.relative_length_cutoff`) is per
+domain as well, so a protein split into many short pieces can fail on
+coverage even when its score is fine; lower that setting if you see strong
+hits listed as not passing in `_hmm_diagnostic.tsv`.
 
 ### Configuration examples
 
@@ -2884,7 +2972,7 @@ that license; it comes with **no warranty**. The full license text is in the
 
 ## Status
 
-Current: **`v0.81.2`**.
+Current: **`v0.82.0`**.
 
 **Selection.** All 8 selection modes, including grouping by a column of your own
 metadata table (`--metadata-table`), so representatives can be chosen per

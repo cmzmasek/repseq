@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 import requests
 
+from . import http
 from .cache import TaxonomyCache
 
 _UNIPROT_API = "https://rest.uniprot.org/uniprotkb"
@@ -39,9 +40,10 @@ class UniProtAPI:
             self._last_request = now
 
     def _get(self, url: str, params: Optional[dict] = None) -> dict:
-        self._throttle()
-        resp = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
+        # Retries transient errors (rate limit, timeout, 5xx) — see http.py.
+        resp = http.get_with_retry(
+            url, params=params, timeout=30, throttle=self._throttle,
+        )
         return resp.json()
 
     # ------------------------------------------------------------------
@@ -65,11 +67,17 @@ class UniProtAPI:
             # 5xx, rate limits) must NOT poison the cache.
             if exc.response is not None and exc.response.status_code == 404:
                 self._cache.set(_SOURCE, accession, _NOT_FOUND)
+            elif http.is_network_failure(exc):
+                # Not a 400 ("I do not recognise this id") — that is an
+                # answer about the record, not a failed lookup.
+                http.record_failure(http.STAGE_METADATA, accession, exc)
             return None
-        except Exception:
+        except Exception as exc:
+            http.record_failure(http.STAGE_METADATA, accession, exc)
             return None
 
         result = _parse_uniprot_entry(accession, data)
+        http.clear_failure(http.STAGE_METADATA, accession)
         self._cache.set(_SOURCE, accession, result)
         return result
 
@@ -88,9 +96,13 @@ class UniProtAPI:
         except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 404:
                 self._cache.set(_SOURCE_TAX, key, _NOT_FOUND)
+            elif http.is_network_failure(exc):
+                http.record_failure(http.STAGE_LINEAGE_TAXID, key, exc)
             return None
-        except Exception:
+        except Exception as exc:
+            http.record_failure(http.STAGE_LINEAGE_TAXID, key, exc)
             return None
+        http.clear_failure(http.STAGE_LINEAGE_TAXID, key)
 
         lineage_entries = data.get("lineage", [])
         rank_map: dict[str, str] = {}

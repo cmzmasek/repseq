@@ -113,7 +113,7 @@ def run_clustering(
     """
     mmseqs = _check_mmseqs2()
     cluster_cfg = cfg.get("clustering", {})
-    mode = cluster_cfg.get("mmseqs2_mode", "easy-linclust")
+    mode = cluster_cfg.get("mmseqs2_mode", "easy-cluster")
     coverage = cluster_cfg.get("coverage", 0.8)
     coverage_mode = cluster_cfg.get("coverage_mode", 0)
     extra_args: list[str] = cluster_cfg.get("extra_args", [])

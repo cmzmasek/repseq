@@ -220,7 +220,7 @@ DEFAULTS: dict[str, Any] = {
         # reported as NA. Set to [] to disable (e.g. on huge runs where
         # the extra clustering work would dominate runtime).
         "diversity_curve_cutoffs": [0.99, 0.95, 0.9, 0.8, 0.7],
-        "mmseqs2_mode": "easy-linclust",   # "easy-linclust" | "easy-cluster"
+        "mmseqs2_mode": "easy-cluster",    # "easy-cluster" | "easy-linclust"
         "coverage": 0.8,
         "coverage_mode": 0,
         "extra_args": [],

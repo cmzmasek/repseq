@@ -393,14 +393,18 @@ clustering:
   diversity_curve_cutoffs: [0.99, 0.95, 0.9, 0.8, 0.7]
 
   # ---- MMseqs2 backend options (used when backend == mmseqs2) ----
+  # easy-cluster (default): cascaded all-vs-all, slower, but cluster
+  #   membership actually respects the identity threshold.
   # easy-linclust: linear-time, scales to very large datasets, but APPROXIMATE
   #   — it does not guarantee every pair within a cluster meets --min-seq-id,
-  #   so clusters can be looser than the nominal threshold.
-  # easy-cluster: cascaded all-vs-all, slower, but cluster membership
-  #   actually respects the identity threshold.
-  # For reference-set construction where cluster tightness matters, prefer
-  # easy-cluster unless the dataset is too large for it to finish.
-  mmseqs2_mode: easy-linclust
+  #   so clusters can be looser than the nominal threshold. On long sequences
+  #   that differ by small insertions/deletions its cluster count can also
+  #   FALL as the identity threshold rises, which misleads the "n
+  #   representatives per group" search (groups come back under-filled);
+  #   repseq warns when it sees that happen.
+  # Switch to easy-linclust only when the dataset is too large for
+  # easy-cluster to finish.
+  mmseqs2_mode: easy-cluster
   coverage: 0.8
   # coverage_mode:
   #   0 = query+target coverage
@@ -501,6 +505,15 @@ hmm:
   # When true (recommended), use each profile's GA cutoff when the
   # profile carries one — much more sensitive/specific than a generic
   # E-value threshold. Falls back to default_evalue when GA is absent.
+  #
+  # A profile's GA line holds TWO numbers: a whole-sequence cutoff and a
+  # per-domain cutoff. repseq uses the SECOND (per-domain) number and
+  # compares it with each individual domain hit. For Pfam profiles the two
+  # are almost always equal. If you build your own profile and write its GA
+  # line by hand, calibrate it on best-single-domain scores, not
+  # whole-sequence scores — otherwise a protein that aligns in several
+  # pieces (repeat-rich proteins do) is rejected although it matches well.
+  # See "Building your own profiles" in the README.
   use_ga_when_available: true
   # Length cutoff: the HMM-to-CDS alignment must span at least this
   # fraction of the HMM model length. Guards against tiny domain hits

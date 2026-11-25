@@ -237,6 +237,30 @@ def write_group_assignments_tsv(result: RunResult, path: Path) -> bool:
     return True
 
 
+def write_lookup_failures_tsv(cfg: dict[str, Any], path: Path) -> bool:
+    """Write the database-lookup failure audit TSV.
+
+    One row per lookup that still failed after its retries, from
+    ``cfg["_lookup_failures_runtime"]`` (filled in ``cli._write_output``
+    from ``taxonomy.http.failures()``): ``stage`` (``metadata`` /
+    ``taxonomy`` / ``genbank_record`` / ``sequence``), ``id`` (the
+    accession, or the taxid for a ``taxonomy`` row) and ``error``.
+    Returns ``False`` (writing nothing) on a clean run.
+    """
+    fails = ((cfg.get("_lookup_failures_runtime") or {}).get("failures")) or []
+    if not fails:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("stage\tid\terror\n")
+        for entry in fails:
+            fh.write(
+                f"{_tsv_safe(entry['stage'])}\t{_tsv_safe(entry['id'])}\t"
+                f"{_tsv_safe(entry.get('error', ''))}\n"
+            )
+    return True
+
+
 def write_excluded_tsv(cfg: dict[str, Any], path: Path) -> bool:
     """Write the input-blocklist audit TSV (overrides.exclude).
 
@@ -3418,6 +3442,11 @@ def write_all_reports(
     excluded_path = out_dir / f"{prefix}_excluded.tsv"
     if write_excluded_tsv(cfg, excluded_path):
         output_files.append(excluded_path)
+    # Database lookups that failed for a network reason: only written when
+    # there were any.
+    lookup_failures_path = out_dir / f"{prefix}_lookup_failures.tsv"
+    if write_lookup_failures_tsv(cfg, lookup_failures_path):
+        output_files.append(lookup_failures_path)
     # Group labels of the custom / hybrid modes (incl. metadata-table
     # matching): only those two modes record assignments.
     assignments_path = out_dir / f"{prefix}_group_assignments.tsv"

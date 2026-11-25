@@ -160,8 +160,9 @@ def test_fetch_proteins_batch_records_with_no_cds(tmp_cache_dir):
     assert out["XX000001.1"] == []
 
 
-def test_fetch_proteins_batch_network_failure_caches_empty(tmp_cache_dir):
-    """A failed fetch shouldn't crash; missing accessions cache as []."""
+def test_fetch_proteins_batch_network_failure_does_not_crash(tmp_cache_dir):
+    """A failed fetch shouldn't crash; its accessions come back empty for
+    this run (and are NOT cached — see tests/test_lookup_failures.py)."""
     cache = TaxonomyCache(tmp_cache_dir)
     ncbi = NCBITaxonomy(cache, email="t@e.com")
 

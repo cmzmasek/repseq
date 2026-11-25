@@ -461,3 +461,78 @@ def test_collect_config_hmm_names_skips_malformed_tokens():
     names = _collect_config_hmm_names(cfg)
     assert "Good_HMM" in names
     assert "Bad" not in names
+
+
+# ---------------------------------------------------------------------------
+# Records with no annotated proteins — not a marker's fault (v0.82.0)
+# ---------------------------------------------------------------------------
+# Such a record fails whichever marker is tested first. On the
+# Orthoherpesviridae pass 1, 467 of 536 "DNA polymerase failures" were
+# records annotating zero CDS. Same record removed, honest label.
+
+def test_gate_names_no_proteins_instead_of_a_profile(make_seq):
+    seq = make_seq("s1", "ACGT")
+    _attach_proteins(seq, [])
+    assert _segment_fails_hmm_gate(seq, ["DNA_pol_B"]) == "no_annotated_proteins"
+    seq.proteins = None
+    assert _segment_fails_hmm_gate(seq, ["DNA_pol_B"]) == "no_annotated_proteins"
+
+
+def test_non_segmented_no_proteins_is_not_blamed_on_first_marker(make_seq):
+    cfg = _non_segmented_cfg([
+        {"name": "DNA_polymerase", "hmms": ["DNA_pol_B"]},
+        {"name": "helicase", "hmms": ["Herpes_Helicase"]},
+    ])
+    empty = make_seq("empty", "ACGT")
+    _attach_proteins(empty, [])
+    # A real marker failure in the same run keeps its marker-named reason.
+    no_pol = make_seq("no_pol", "ACGT")
+    _attach_proteins(no_pol, [
+        _cds("helicase", "M" * 800, hmm_hits=[_hit("Herpes_Helicase", 1, 400)]),
+    ])
+    qc = QCReport()
+    kept = _run_hmm_qc_non_segmented([empty, no_pol], cfg, qc)
+    assert kept == []
+    assert empty.qc_fail_reason == "hmm_failed:no_annotated_proteins"
+    assert no_pol.qc_fail_reason == "hmm_failed:DNA_polymerase:DNA_pol_B"
+    # Total unchanged (both counted); only the label differs.
+    assert qc.removed_hmm_failed == 2
+    assert qc.removed_hmm_by_marker == {
+        "no_annotated_proteins": 1, "DNA_polymerase": 1,
+    }
+
+
+def test_segmented_no_proteins_is_labelled_per_segment(make_seq):
+    cfg = _segmented_cfg()
+    iso = _isolate_segs(
+        make_seq, "iso9",
+        s_hits=[_hit("Bunya_nucleocap", 1, 200)],
+        m_hits=[_hit("Bunya_G2", 1, 300), _hit("Bunya_G1", 500, 1000)],
+    )
+    iso[0].proteins = []          # the S record annotates nothing
+    qc = QCReport()
+    assert _run_hmm_qc_segmented(iso, cfg, qc) == []
+    assert iso[0].qc_fail_reason == "hmm_failed:S:no_annotated_proteins"
+    assert iso[1].qc_fail_reason == "hmm_failed_sibling:S:no_annotated_proteins"
+    assert qc.removed_hmm_failed == 1
+    assert qc.removed_hmm_by_marker == {"S:no_annotated_proteins": 1}
+
+
+def test_gate_does_not_call_an_unfetched_record_unannotated(make_seq):
+    """No proteins because the GenBank fetch FAILED is not the same as a
+    record that annotates none."""
+    from repseq.taxonomy import http
+
+    http.reset_failures()
+    try:
+        cfg = _non_segmented_cfg([{"name": "DNA_polymerase", "hmms": ["DNA_pol_B"]}])
+        s = make_seq("AB1.1", "ACGT")
+        s.accession = "AB1.1"
+        _attach_proteins(s, [])
+        http.record_failure(http.STAGE_RECORD, "AB1.1", "HTTP 502 (server error)")
+        qc = QCReport()
+        assert _run_hmm_qc_non_segmented([s], cfg, qc) == []
+        assert s.qc_fail_reason == "hmm_failed:record_not_retrieved"
+        assert qc.removed_hmm_by_marker == {"record_not_retrieved": 1}
+    finally:
+        http.reset_failures()

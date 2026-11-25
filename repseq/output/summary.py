@@ -375,6 +375,8 @@ def _render_at_a_glance(
         if _is_diversity_only(result) else tool_name
     )
     rows.append(("Clustering tool", tool_cell))
+    if not _is_diversity_only(result):
+        rows.append(("Clustering settings", _clustering_settings_phrase(cfg)))
 
     # Selection mode (one short phrase).
     rows.append(("Selection mode", f"`{result.mode}`"))
@@ -461,6 +463,75 @@ def _render_input(qc_report: QCReport, input_paths: list[str]) -> str:
     )
 
 
+def _keyword_list_phrase(qc_cfg: dict) -> str:
+    """`` (`a`, `b`, ...)`` — the description keywords in force, in full."""
+    keywords = (qc_cfg.get("annotation_filter", {}) or {}).get("keywords") or []
+    if not keywords:
+        return ""
+    return " (" + ", ".join(f"`{k}`" for k in keywords) + ")"
+
+
+def _length_bounds_phrase(glf: dict) -> str:
+    """The configured whole-genome length window in words."""
+    mn, mx = glf.get("min"), glf.get("max")
+    if mn is not None and mx is not None:
+        return f"{_fmt_int(mn)}–{_fmt_int(mx)} nt"
+    if mn is not None:
+        return f"at least {_fmt_int(mn)} nt"
+    if mx is not None:
+        return f"at most {_fmt_int(mx)} nt"
+    return ""
+
+
+def _clustering_settings_phrase(cfg: dict) -> str:
+    """The backend settings that decide what counts as "one cluster".
+
+    Identity alone does not define a clustering: on the Orthoherpesviridae
+    run the SAME identity thresholds gave 1 representative for HSV-2 under
+    MMseqs2 `easy-linclust` and 3 under `easy-cluster`, and the prose named
+    neither. Returns a short clause for the Methods sentence.
+    """
+    cluster_cfg = cfg.get("clustering", {}) or {}
+    if cluster_cfg.get("backend", "mmseqs2") == "cdhit":
+        cd = cluster_cfg.get("cdhit", {}) or {}
+        global_aln = bool(cd.get("global_alignment", True))
+        bits = [
+            "global sequence identity" if global_aln
+            else (
+                f"local sequence identity with the alignment covering "
+                f"≥ {float(cd.get('coverage', 0.8)):.0%} of the shorter "
+                f"sequence (`-G 0 -aS`)"
+            ),
+            "accurate mode (`-g 1`)" if cd.get("accurate")
+            else "greedy incremental mode",
+        ]
+        extra = cd.get("extra_args") or []
+    else:
+        mode = cluster_cfg.get("mmseqs2_mode", "easy-cluster")
+        cov = float(cluster_cfg.get("coverage", 0.8))
+        cov_mode = cluster_cfg.get("coverage_mode", 0)
+        of_what = {
+            0: "of both sequences",
+            1: "of the cluster representative (target)",
+            2: "of the member sequence (query)",
+        }.get(cov_mode, "")
+        mode_gloss = {
+            "easy-cluster": "cascaded sensitive clustering",
+            "easy-linclust": "linear-time approximate clustering",
+        }.get(mode, "")
+        bits = [
+            f"`{mode}` mode" + (f" — {mode_gloss}" if mode_gloss else ""),
+            f"alignment covering ≥ {cov:.0%} {of_what}".rstrip()
+            + f" (`-c {cov:g} --cov-mode {cov_mode}`)",
+        ]
+        extra = cluster_cfg.get("extra_args") or []
+    if extra:
+        bits.append(
+            "additional options `" + " ".join(str(a) for a in extra) + "`"
+        )
+    return "; ".join(bits)
+
+
 def _render_qc(qc_report: QCReport, cfg: dict) -> str:
     qc_cfg = cfg.get("qc", {}) or {}
     parts: list[str] = []
@@ -491,11 +562,55 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
             f"**{_fmt_int(qc_report.removed_ambiguous)}** with > {thr:.0%} "
             f"ambiguous characters"
         )
+    # Description keywords. This removal belongs to the same initial screen
+    # as the three above and was simply missing from the sentence, so the
+    # listed removals did not add up to the "passed" figure (72 unexplained
+    # records on the Orthoherpesviridae run). The keyword list is printed in
+    # full: a Methods section has to say what was screened out.
+    if qc_report.removed_annotation:
+        parts.append(
+            f"**{_fmt_int(qc_report.removed_annotation)}** whose record "
+            f"description contained an excluded keyword"
+            f"{_keyword_list_phrase(qc_cfg)}"
+        )
+    # "sequence(s)" used to trail the list; with the keyword list in
+    # brackets at the end that no longer reads as a sentence, so the unit
+    # leads instead.
     basic = (
         f"Initial quality control removed "
-        f"{', '.join(parts) if parts else 'no'} sequence(s) "
-        f"(*{_fmt_int(qc_report.passed)}* passed this initial screen)."
+        + (f"these sequences: {', '.join(parts)}" if parts else "no sequences")
+        + f" (*{_fmt_int(qc_report.passed)}* passed this initial screen)."
     )
+    # Filters that were ON but removed nothing still shaped the run — a
+    # reader must be able to tell "applied, nothing failed" from "not
+    # applied". Before this, a length window that removed no record, or a
+    # keyword screen with no match, left no trace in the prose.
+    applied_bits: list[str] = []
+    glf = qc_cfg.get("genome_length_filter", {}) or {}
+    if (
+        glf.get("enabled")
+        and not qc_report.length_filter_skipped
+        and not qc_report.removed_length
+    ):
+        bounds = _length_bounds_phrase(glf)
+        if bounds:
+            applied_bits.append(
+                f"the whole-genome length filter ({bounds})"
+            )
+    af = qc_cfg.get("annotation_filter", {}) or {}
+    if (
+        af.get("enabled", True)
+        and (af.get("keywords") or [])
+        and not qc_report.removed_annotation
+    ):
+        applied_bits.append(
+            f"the description-keyword screen{_keyword_list_phrase(qc_cfg)}"
+        )
+    if applied_bits:
+        basic += (
+            f" Also applied, removing no sequence: "
+            f"{' and '.join(applied_bits)}."
+        )
 
     extra_lines: list[str] = []
     # Input blocklist (overrides.exclude) runs before any QC, so describe it
@@ -511,6 +626,35 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
             f"resolution, QC, or clustering. The dropped records are listed "
             f"in `{{prefix}}_excluded.tsv`."
         )
+    lookup_fails = (
+        (cfg.get("_lookup_failures_runtime") or {}).get("failures")
+    ) or []
+    if lookup_fails:
+        n_meta = sum(
+            1 for f in lookup_fails if f.get("stage") in ("metadata", "taxonomy")
+        )
+        n_rec = sum(1 for f in lookup_fails if f.get("stage") == "genbank_record")
+        parts = []
+        if n_meta:
+            parts.append(
+                f"**{_fmt_int(n_meta)}** metadata / taxonomy lookup(s), "
+                f"leaving those records without database taxonomy"
+            )
+        if n_rec:
+            parts.append(
+                f"**{_fmt_int(n_rec)}** GenBank record fetch(es), leaving "
+                f"those records without their annotated proteins"
+            )
+        if parts:
+            extra_lines.append(
+                "**Incomplete database retrieval:** despite repeated "
+                "attempts, the following lookups failed for a network "
+                f"reason on this run: {'; and '.join(parts)}. The affected "
+                "records were processed without that information, so the "
+                "selection may differ from that of a complete run; they are "
+                "listed in `{prefix}_lookup_failures.tsv`. A re-run fetches "
+                "them again."
+            )
     # The protein-annotation check is sequence-level QC but is segmented-aware:
     # in segmented mode it compares each record's GenBank CDS count against the
     # per-segment expected count (and so depends on seq.segment being populated
@@ -650,13 +794,40 @@ def _render_qc(qc_report: QCReport, cfg: dict) -> str:
             if use_ga
             else f"E ≤ {ev:g}"
         )
+        # Records with no annotated proteins fail this check without any
+        # marker being at fault; say how many of the total they are, so the
+        # figure is not read as that many missing or divergent markers.
+        n_no_proteins = sum(
+            count for key, count in qc_report.removed_hmm_by_marker.items()
+            if str(key).split(":")[-1] == "no_annotated_proteins"
+        )
+        no_proteins_note = (
+            f" Of these, **{_fmt_int(n_no_proteins)}** carried no annotated "
+            f"proteins at all in their GenBank record(s) "
+            f"(`no_annotated_proteins`), so no marker could be tested — "
+            f"these are un-annotated records, not marker failures."
+            if n_no_proteins else ""
+        )
+        n_not_retrieved = sum(
+            count for key, count in qc_report.removed_hmm_by_marker.items()
+            if str(key).split(":")[-1] == "record_not_retrieved"
+        )
+        if n_not_retrieved:
+            no_proteins_note += (
+                f" A further **{_fmt_int(n_not_retrieved)}** could not be "
+                f"tested because their GenBank record could not be "
+                f"retrieved on this run (`record_not_retrieved`, a network "
+                f"failure — see `{{prefix}}_lookup_failures.tsv`); this says "
+                f"nothing about the records themselves, and a re-run "
+                f"fetches them again."
+            )
         extra_lines.append(
             f"**{_fmt_int(qc_report.removed_hmm_failed)}** {unit} were "
             f"dropped by the HMM-based identity QC (HMMER hmmscan; "
             f"{_CITATIONS['hmmer']}) — each marker's configured HMM(s) "
             f"had to hit a CDS with {gate_phrase} AND the alignment span "
             f"had to cover ≥ {rel:.0%} of the HMM model length. Top "
-            f"reasons: {breakdown}."
+            f"reasons: {breakdown}.{no_proteins_note}"
         )
         hmm_complete = _complete_isolates_removed(
             qc_report, cfg, "hmm_complete_isolates",
@@ -1078,7 +1249,7 @@ def _render_selection(cfg: dict, result: RunResult, qc_report: QCReport) -> str:
     else:
         lead = (
             f"Clustering was performed on {input_desc} using **{tool_name}** "
-            f"({tool_cite}). {mode_desc}{group_sentence}{hmm_sentence} Within each cluster the "
+            f"({tool_cite}; {_clustering_settings_phrase(cfg)}). {mode_desc}{group_sentence}{hmm_sentence} Within each cluster the "
             f"representative was chosen by the configured priority "
             f"(**{priority}**, with sequence length as the final tiebreaker). "
             f"The final set contains **{_fmt_int(n_reps)} {rep_unit}** "

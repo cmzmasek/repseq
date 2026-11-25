@@ -345,3 +345,124 @@ def test_cluster_members_survive_the_new_bracket_choice(make_seq):
     assert all(isinstance(c, Cluster) for c in search.clusters)
     assert sum(c.size for c in search.clusters) == len(seqs)
     assert any(c.members for c in search.clusters)
+
+
+# --- non-monotonic cluster counts (v0.82.0) --------------------------------
+# The bisection assumes a higher identity never gives fewer clusters. MMseqs2
+# easy-linclust broke that on ~6,400-aa herpesvirus marker concatenations
+# (247 clusters at 0.98, 86 at 0.99) and 16 species came back under-filled
+# with no warning.
+
+def _count_by_threshold(table):
+    """A fake backend returning an arbitrary count per identity band.
+
+    ``table`` is ``[(threshold_at_or_above, n_clusters), ...]`` ascending and
+    need NOT be monotonic — that is the point.
+    """
+    return _step_clustering(table)
+
+
+def test_falling_count_is_flagged_in_note_and_on_stderr(make_seq, capsys):
+    seqs = _seqs(make_seq, 40)
+    # 8 clusters at the first probe (0.65) sends the search DOWN, where it
+    # meets 30 — more clusters at a lower identity.
+    fake = _count_by_threshold([(0.0, 30), (0.6, 8)])
+    with patch("repseq.modes.taxonomic1.run_clustering", side_effect=fake):
+        search = _binary_search_threshold(seqs, 5, _cfg(), "keep", label="grp")
+    assert search.note and "UNRELIABLE" in search.note
+    assert "FELL from 30" in search.note
+    # The fixture config uses easy-linclust, so the advice names the fix.
+    assert "easy-cluster" in search.note
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "FELL from 30" in err
+
+
+def test_rising_count_is_not_flagged(make_seq, capsys):
+    seqs = _seqs(make_seq, 40)
+    fake = _count_by_threshold([(0.0, 1), (0.5, 3), (0.8, 12)])
+    with patch("repseq.modes.taxonomic1.run_clustering", side_effect=fake):
+        search = _binary_search_threshold(seqs, 5, _cfg(), "keep", label="grp")
+    assert not (search.note and "UNRELIABLE" in search.note)
+    assert "FELL" not in capsys.readouterr().err
+
+
+def test_falling_count_advice_does_not_name_linclust_when_not_in_use(make_seq):
+    seqs = _seqs(make_seq, 40)
+    cfg = _cfg()
+    cfg["clustering"]["mmseqs2_mode"] = "easy-cluster"
+    fake = _count_by_threshold([(0.0, 30), (0.6, 8)])
+    with patch("repseq.modes.taxonomic1.run_clustering", side_effect=fake):
+        search = _binary_search_threshold(seqs, 5, cfg, "keep")
+    assert "UNRELIABLE" in search.note
+    assert "mmseqs2_mode" not in search.note
+
+
+def test_default_mmseqs2_mode_is_easy_cluster():
+    from repseq.config import DEFAULTS
+    assert DEFAULTS["clustering"]["mmseqs2_mode"] == "easy-cluster"
+
+
+def test_diversity_curve_reversal_is_flagged_when_search_missed_it():
+    """The herpes shape: the bisection walks down from its first probe and
+    never sees the high-identity end, but the curve does (HSV-1 pass 1:
+    246 clusters at 0.95, 86 at 0.99)."""
+    from repseq.models import GroupStat
+    from repseq.modes.taxonomic1 import flag_count_reversals
+
+    bad = GroupStat(
+        grouping="species", group="HSV-1", n_before=459, n_after=4,
+        clustered=True, cutoff=0.62,
+        cutoff_counts={0.99: 86, 0.95: 246, 0.9: 10, 0.8: 4, 0.7: 4},
+    )
+    good = GroupStat(
+        grouping="species", group="HCMV", n_before=369, n_after=3,
+        clustered=True, cutoff=0.9932,
+        cutoff_counts={0.99: 1, 0.95: 1, 0.9: 1, 0.8: 1, 0.7: None},
+    )
+    whole = GroupStat(
+        grouping="species", group="rare", n_before=2, n_after=2,
+        clustered=False,
+    )
+    flagged = flag_count_reversals([bad, good, whole], _cfg())
+    assert flagged == ["HSV-1"]
+    assert "UNRELIABLE" in bad.note and "FELL from 246" in bad.note
+    assert good.note is None and whole.note is None
+    # Already-flagged groups are not flagged twice.
+    assert flag_count_reversals([bad], _cfg()) == []
+
+
+def test_diversity_curve_check_uses_pre_trim_count_at_cutoff():
+    """After --overflow trim, clustering at `cutoff` gives `trimmed_from`,
+    not `n_after` — comparing n_after would invent a reversal."""
+    from repseq.models import GroupStat
+    from repseq.modes.taxonomic1 import flag_count_reversals
+
+    gs = GroupStat(
+        grouping="species", group="g", n_before=50, n_after=5,
+        clustered=True, cutoff=0.97, trimmed_from=9,
+        cutoff_counts={0.99: 20, 0.95: 7, 0.9: 3},
+    )
+    assert flag_count_reversals([gs], _cfg()) == []
+
+
+def test_one_cluster_wobble_is_not_called_unreliable():
+    """Greedy clustering is not strictly monotonic even when healthy
+    (easy-cluster: ILTV 2 -> 1 -> 2 around 0.95). Flagging that would bury
+    the falls that matter."""
+    from repseq.models import GroupStat
+    from repseq.modes.taxonomic1 import _count_reversal, flag_count_reversals
+
+    assert _count_reversal([(0.94, 2), (0.95, 1), (0.96, 2)]) is None
+    assert _count_reversal([(0.95, 41), (0.9512, 40)]) is None
+    # 2 of 200 is a real count but under the 5 % bar.
+    assert _count_reversal([(0.95, 200), (0.96, 198)]) is None
+    # The linclust falls seen on the same data all clear both bars.
+    assert _count_reversal([(0.95, 40), (0.99, 37)]) == (0.95, 40, 0.99, 37)
+    assert _count_reversal([(0.95, 41), (0.99, 26)]) is not None
+    gs = GroupStat(
+        grouping="species", group="ILTV", n_before=85, n_after=3,
+        clustered=True, cutoff=0.9952,
+        cutoff_counts={0.99: 2, 0.95: 1, 0.9: 2},
+    )
+    assert flag_count_reversals([gs], _cfg()) == []
+    assert gs.note is None

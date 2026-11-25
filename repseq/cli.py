@@ -773,12 +773,30 @@ def _resolve_metadata(sequences, cfg, no_resolve):
     ncbi = NCBITaxonomy(cache, email=tax_cfg.get("ncbi_email"), api_key=tax_cfg.get("ncbi_api_key"))
     uniprot = UniProtAPI(cache)
     resolver = MetadataResolver(cache, ncbi, uniprot, threads=cfg.get("threads", 4))
+    # Fresh failure log for this run; every database lookup that still
+    # fails after its retries lands in it (taxonomy/http.py) and is written
+    # to {prefix}_lookup_failures.tsv at the end.
+    from .taxonomy import http as _http
+
+    _http.reset_failures()
     with progress_bar(len(sequences), "Resolving metadata") as bar:
         resolver.resolve_batch(sequences, progress=bar)
     if resolver.failures:
+        ids = [sid for sid, _ in resolver.failures]
         click.echo(
-            f"  Metadata resolution: {len(resolver.failures)} of {len(sequences)} "
-            f"failed (continuing with header-derived metadata).",
+            f"  WARNING: metadata lookup FAILED for {len(ids)} of "
+            f"{len(sequences)} sequence(s): "
+            f"{', '.join(ids[:10])}{' …' if len(ids) > 10 else ''}.",
+            err=True,
+        )
+        click.echo(
+            f"  These records have no (or incomplete) database taxonomy on "
+            f"this run and fall into an 'Unknown' group in taxonomy-based "
+            f"modes. Network errors were retried up to {_http.MAX_TRIES} "
+            f"times first. A failed lookup is looked up again on the next "
+            f"run, so re-running the same command usually fixes it; the "
+            f"reason for each is in the lookup-failures file written at the "
+            f"end of the run.",
             err=True,
         )
     return ncbi
@@ -1216,6 +1234,29 @@ def _resolve_segment_hmms(
     return None, []
 
 
+#: What the HMM gate reports, in place of a profile name, for a record with
+#: no annotated proteins at all. Such a record fails whichever marker is
+#: tested first, so naming that marker blamed the wrong thing: on the
+#: Orthoherpesviridae pass 1, 467 of 536 "DNA polymerase failures" were
+#: records annotating zero CDS. Same count, honest label.
+NO_PROTEINS_TOKEN = "no_annotated_proteins"
+#: Same situation, different cause: the record has no proteins on this run
+#: because its GenBank fetch FAILED (network), not because it annotates
+#: none. Calling that "un-annotated" would put a false statement about a
+#: GenBank record into `_qc_removed.tsv` and the Methods prose.
+RECORD_NOT_RETRIEVED_TOKEN = "record_not_retrieved"
+#: Gate outcomes that describe the RECORD, not a marker.
+_RECORD_LEVEL_TOKENS = frozenset({NO_PROTEINS_TOKEN, RECORD_NOT_RETRIEVED_TOKEN})
+
+
+def _record_fetch_failed(seq) -> bool:
+    """Did this record's GenBank fetch fail for a network reason this run?"""
+    from .taxonomy import http as _http
+
+    acc = getattr(seq, "accession", None)
+    return bool(acc) and _http.failure_for(_http.STAGE_RECORD, acc) is not None
+
+
 def _segment_fails_hmm_gate(seq, tokens: list[str], overlap_tolerance: int = 0) -> Optional[str]:
     """Gate a segment against its ``hmms:`` token list. Return ``None`` when
     the segment passes, or a token string naming what was expected when it
@@ -1231,10 +1272,19 @@ def _segment_fails_hmm_gate(seq, tokens: list[str], overlap_tolerance: int = 0) 
     ``overlap_tolerance`` is forwarded to :func:`cds_satisfies_token` so
     Pfam-boundary fuzz at multidomain seams doesn't drop biologically
     valid isolates from the QC pool.
+
+    A record with no annotated proteins fails with :data:`NO_PROTEINS_TOKEN`
+    instead of a profile name: there was nothing to test, so no marker is
+    to blame.
     """
     from .hmm.runner import cds_satisfies_token, parse_hmm_token
 
     proteins = seq.proteins or []
+    if not proteins:
+        return (
+            RECORD_NOT_RETRIEVED_TOKEN if _record_fetch_failed(seq)
+            else NO_PROTEINS_TOKEN
+        )
     declared: list[str] = []
     for token in tokens:
         try:
@@ -1455,7 +1505,13 @@ def _run_hmm_qc_non_segmented(sequences, cfg, qc_report):
             kept.append(seq)
             continue
         spec_name, failed_token = failed_spec
-        reason = f"hmm_failed:{spec_name}:{failed_token}"
+        if failed_token in _RECORD_LEVEL_TOKENS:
+            # Nothing to test — do not pin it on the first marker checked.
+            reason = f"hmm_failed:{failed_token}"
+            marker_key = failed_token
+        else:
+            reason = f"hmm_failed:{spec_name}:{failed_token}"
+            marker_key = spec_name
         if protected_keep(seq, "hmm", reason, policy, qc_report):
             kept.append(seq)
             continue
@@ -1463,8 +1519,8 @@ def _run_hmm_qc_non_segmented(sequences, cfg, qc_report):
         seq.qc_fail_reason = reason
         qc_report.add_removed(seq.id, reason)
         qc_report.removed_hmm_failed += 1
-        qc_report.removed_hmm_by_marker[spec_name] = (
-            qc_report.removed_hmm_by_marker.get(spec_name, 0) + 1
+        qc_report.removed_hmm_by_marker[marker_key] = (
+            qc_report.removed_hmm_by_marker.get(marker_key, 0) + 1
         )
 
     n_dropped = len(sequences) - len(kept)
@@ -2561,6 +2617,21 @@ def _write_output(result, qc_report, cfg, input_paths, complete_isolates, segmen
     from .overrides import apply_force_select
 
     apply_force_select(result, pre_clustering_sequences, cfg)
+    # Second look at every group's cluster counts, using the diversity
+    # curve the mode already computed (no extra clustering): a count that
+    # FALLS as identity rises means the per-group counts are unreliable.
+    # One site, all modes, before the run log and final summary are written.
+    from .modes.taxonomic1 import flag_count_reversals
+
+    flag_count_reversals(result.group_stats, cfg)
+    # Database lookups that failed for a network reason, across every step
+    # that fetched (metadata resolution, GenBank records). Put on cfg only
+    # when there are any, so a clean run's lockfile is unchanged.
+    from .taxonomy import http as _http
+
+    lookup_failures = _http.failures()
+    if lookup_failures:
+        cfg["_lookup_failures_runtime"] = {"failures": lookup_failures}
     if result.force_selected:
         from collections import Counter
 
@@ -3221,6 +3292,76 @@ def _final_summary(result, qc_report, cfg) -> None:
             err=True,
         )
 
+    def _echo_lookup_failures() -> None:
+        # Repeated at the end because the consequence is easy to miss: a
+        # record whose lookup failed is not removed, it is mis-handled
+        # (no taxonomy -> 'Unknown' group; no GenBank record -> dropped by
+        # QC as if it had no annotated proteins).
+        fails = (cfg.get("_lookup_failures_runtime") or {}).get("failures") or []
+        if not fails:
+            return
+        from collections import Counter
+
+        by_stage = Counter(f["stage"] for f in fails)
+        what = {
+            "metadata": "metadata (organism / taxonomy / host)",
+            "taxonomy": "taxonomy lineage (record left without its lineage)",
+            "genbank_record": "GenBank record (annotated proteins)",
+            "sequence": "sequence",
+        }
+        bits = "; ".join(
+            f"{n} {what.get(stage, stage)}" for stage, n in sorted(by_stage.items())
+        )
+        prefix = cfg.get("output", {}).get("prefix", "repseq")
+        click.echo(
+            f"\nWARNING: {len(fails)} database lookup(s) FAILED for a network "
+            f"reason and were not recovered by retrying: {bits}.",
+            err=True,
+        )
+        click.echo(
+            f"  The affected records were handled WITHOUT that information, "
+            f"so this run's selection may differ from a clean one. They are "
+            f"listed in {prefix}_lookup_failures.tsv with the reason for "
+            f"each. Failed lookups are tried again on the next run: re-run "
+            f"the same command (into a new output directory) and everything "
+            f"else comes from the cache.",
+            err=True,
+        )
+
+    def _echo_unreliable_searches() -> None:
+        # Groups whose "n per group" search saw the cluster count FALL as
+        # identity rose (taxonomic1._count_reversal). Each was warned about
+        # while it ran, but on a long run that line is far up the
+        # scrollback, so repeat the headline where the user is looking.
+        bad = [
+            gs.group for gs in (result.group_stats or [])
+            if gs.note and "UNRELIABLE" in gs.note
+        ]
+        if not bad:
+            return
+        shown = ", ".join(str(g) for g in bad[:5])
+        more = f", +{len(bad) - 5} more" if len(bad) > 5 else ""
+        click.echo(
+            f"\nWARNING: for {len(bad)} group(s) the clustering returned "
+            f"FEWER clusters at a higher identity than at a lower one, so "
+            f"their representative counts may be too low or too high: "
+            f"{shown}{more}.",
+            err=True,
+        )
+        mode = cfg.get("clustering", {}).get("mmseqs2_mode")
+        fix = (
+            "Set clustering.mmseqs2_mode: easy-cluster in the config and "
+            "re-run. "
+            if mode == "easy-linclust"
+            and cfg.get("clustering", {}).get("backend", "mmseqs2") != "cdhit"
+            else ""
+        )
+        click.echo(
+            f"  {fix}The PER-GROUP THRESHOLD SEARCH block of _run.log lists "
+            f"each affected group.",
+            err=True,
+        )
+
     if n_reps > 0:
         cluster_note = f" across {n_clusters} cluster(s)" if n_clusters else ""
         unit = "isolate(s)" if segmented else "representative sequence(s)"
@@ -3248,6 +3389,8 @@ def _final_summary(result, qc_report, cfg) -> None:
         _echo_eliminated()
         _echo_eliminated_labels()
         _echo_polyprotein_walls()
+        _echo_unreliable_searches()
+        _echo_lookup_failures()
         return
 
     # Nothing was selected — diagnose.
@@ -3301,6 +3444,7 @@ def _final_summary(result, qc_report, cfg) -> None:
     click.echo("  See the run log for the full QC and selection breakdown.", err=True)
     _echo_eliminated()
     _echo_eliminated_labels()
+    _echo_lookup_failures()
 
 
 # ---------------------------------------------------------------------------

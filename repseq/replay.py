@@ -441,6 +441,9 @@ def replay_command(
         email=tax_cfg.get("ncbi_email"),
         api_key=tax_cfg.get("ncbi_api_key"),
     )
+    from .taxonomy import http as _http
+
+    _http.reset_failures()
     seqs_by_acc = ncbi.fetch_nucleotide_batch(accessions)
     source_meta = ncbi.fetch_source_metadata_batch(accessions)
     missing_before = [acc for acc, body in seqs_by_acc.items() if not body]
@@ -471,6 +474,26 @@ def replay_command(
         miss_path = out_dir / f"{prefix}_replay_missing.tsv"
         _write_missing_tsv(missing, miss_path)
         written.append(miss_path)
+
+    # An accession missing because NCBI could not be reached is a different
+    # thing from one NCBI has retired — and only the first is fixed by
+    # running the replay again. Same audit file a normal run writes.
+    lookup_failures = _http.failures()
+    if lookup_failures:
+        from .output.report import write_lookup_failures_tsv
+
+        fail_path = out_dir / f"{prefix}_lookup_failures.tsv"
+        write_lookup_failures_tsv(
+            {"_lookup_failures_runtime": {"failures": lookup_failures}},
+            fail_path,
+        )
+        written.append(fail_path)
+        click.echo(
+            f"WARNING: {len(lookup_failures)} database lookup(s) failed for "
+            f"a network reason (not because the records are gone). They are "
+            f"listed in {fail_path.name}; run the replay again to retry them.",
+            err=True,
+        )
 
     if rebuild_trees:
         try:

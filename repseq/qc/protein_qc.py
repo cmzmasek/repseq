@@ -14,6 +14,7 @@ from typing import Any, Optional
 from ..models import QCReport, Sequence, SequenceSource
 from ..overrides import ProtectionPolicy, protected_keep
 from ..segmented.completeness import identify_segment
+from ..taxonomy import http as _http
 from ..taxonomy.ncbi import NCBITaxonomy
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,13 @@ def filter_by_protein_count(
 
         if min_proteins is not None and n < min_proteins:
             fail_reason = f"protein_count_below_min:{n}<{min_proteins}"
+            # No proteins because the GenBank fetch FAILED this run, not
+            # because the record annotates none: say so, or the removal
+            # log states something false about the record.
+            if n == 0 and seq.accession and _http.failure_for(
+                _http.STAGE_RECORD, seq.accession
+            ):
+                fail_reason = "protein_count_record_not_retrieved"
 
         if not fail_reason and expected_per_segment and segment_names:
             seg = identify_segment(seq, segment_names, segment_regex, segment_aliases)

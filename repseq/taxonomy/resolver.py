@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
 from ..models import Sequence, SequenceSource, TaxonomyInfo
+from . import http as _http
 from .cache import TaxonomyCache
 from .ncbi import NCBITaxonomy
 from .uniprot import UniProtAPI
@@ -103,6 +104,13 @@ class MetadataResolver:
         """Populate taxonomy and missing metadata fields on seq in-place."""
         # 1. Database query
         db_meta = self._db_query(seq)
+        # A lookup that failed for a network reason (after the client's
+        # retries) returns nothing, exactly like "no such record" — so ask
+        # the failure log which it was, and count it. Without this the
+        # record silently fell through to header parsing with no taxonomy.
+        reason = self._lookup_failure(seq, db_meta)
+        if reason:
+            self.failures.append((seq.id, reason))
 
         # 2. Fill fields from the DB result.
         #    The database is authoritative: a DB-provided value overrides
@@ -138,6 +146,48 @@ class MetadataResolver:
                 if not getattr(seq, field, None):
                     setattr(seq, field, value)
 
+    @staticmethod
+    def _lookup_failure(
+        seq: Sequence, db_meta: Optional[dict[str, Any]],
+    ) -> Optional[str]:
+        """Why this record's database lookup came back short, if a network
+        failure (rather than a genuine "not found") is the reason."""
+        acc = seq.accession
+        if not acc:
+            return None
+        if not db_meta:
+            reason = _http.failure_for(_http.STAGE_METADATA, acc)
+            return f"metadata lookup failed: {reason}" if reason else None
+        taxid = db_meta.get("taxid")
+        if taxid and not db_meta.get("lineage"):
+            reason = _http.failure_for(_http.STAGE_LINEAGE_TAXID, taxid)
+            if reason:
+                msg = f"taxonomy lookup for taxid {taxid} failed: {reason}"
+                # Pin it to THIS record. The taxid-keyed entry is shared
+                # and is cleared as soon as any other record's fetch of the
+                # same taxid succeeds, but this record has already been
+                # resolved without its lineage and must stay on the report.
+                _http.record_failure(_http.STAGE_LINEAGE, acc, msg)
+                return msg
+        return None
+
+    def _ncbi_metadata(self, acc: str) -> Optional[dict[str, Any]]:
+        """NCBI metadata for ``acc``, with the lineage back-filled.
+
+        ``fetch_accession_metadata`` caches its result even when the lineage
+        fetch inside it failed, so a cache hit can come back without one.
+        Asking for the lineage again here is what lets a re-run recover it —
+        on EVERY path that uses NCBI, the unknown-source one included (it
+        used to skip this, leaving such a record without taxonomy until the
+        cache entry expired).
+        """
+        meta = self._ncbi.fetch_accession_metadata(acc)
+        if meta and meta.get("taxid") and not meta.get("lineage"):
+            lineage = self._ncbi.fetch_lineage(meta["taxid"])
+            if lineage:
+                meta["lineage"] = lineage
+        return meta
+
     def _db_query(self, seq: Sequence) -> Optional[dict[str, Any]]:
         """Query the appropriate database based on sequence source."""
         acc = seq.accession
@@ -148,18 +198,18 @@ class MetadataResolver:
             return self._uniprot.fetch_entry(acc)
 
         if seq.source in (SequenceSource.NCBI, SequenceSource.NCBI_VIRUS):
-            meta = self._ncbi.fetch_accession_metadata(acc)
-            if meta and meta.get("taxid") and not (meta.get("lineage")):
-                lineage = self._ncbi.fetch_lineage(meta["taxid"])
-                if lineage:
-                    meta["lineage"] = lineage
-            return meta
+            return self._ncbi_metadata(acc)
 
         # Unknown source: try NCBI first, then UniProt
-        meta = self._ncbi.fetch_accession_metadata(acc)
+        meta = self._ncbi_metadata(acc)
         if meta:
             return meta
-        return self._uniprot.fetch_entry(acc)
+        entry = self._uniprot.fetch_entry(acc)
+        if entry:
+            # Found at UniProt, so a failed NCBI attempt for the same
+            # accession is not a failure of this record.
+            _http.clear_failure(_http.STAGE_METADATA, acc)
+        return entry
 
     # ------------------------------------------------------------------
     # Batch resolve with thread pool
@@ -181,6 +231,9 @@ class MetadataResolver:
                 except Exception as exc:
                     msg = f"{type(exc).__name__}: {exc}"
                     self.failures.append((seq.id, msg))
+                    _http.record_failure(
+                        _http.STAGE_METADATA, seq.accession or seq.id, msg,
+                    )
                     logger.warning("Resolution failed for %s: %s", seq.id, msg)
                 if progress:
                     progress.update(1)
