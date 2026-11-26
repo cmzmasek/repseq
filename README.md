@@ -2302,6 +2302,7 @@ the marker architectures they support:
 | `Phenuiviridae` | the family alone, with the `Phlebovirus_*` glycoprotein profiles |
 | `Picornaviridae` | the family, with polyprotein peptide slicing |
 | `Filoviridae` | the family |
+| `Coronaviridae` | the family: 47 profiles — every coronavirus profile of the core set plus the spike subdomains `CoV_S1_C` and `CoV_S2_C` and the hemagglutinin-esterase `Hema_esterase`, which the core set lacks |
 | `Orthoherpesviridae` | the family formerly called *Herpesviridae* (alpha-, beta-, gammaherpesviruses; NCBI renamed it): 32 profiles covering the 30 proteins common to the whole family, found by HMM because each virus names its genes differently (the DNA polymerase is UL30 in HSV, UL54 in HCMV, BALF5 in EBV, ORF9 in KSHV) |
 
 Two cautions, both learned from real runs. A profile that sounds pan-clade often
